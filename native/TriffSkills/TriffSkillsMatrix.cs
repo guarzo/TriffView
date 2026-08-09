@@ -16,9 +16,10 @@ internal sealed record SkillMatrix(IReadOnlyList<PlanSummary> Plans, IReadOnlyLi
 // under the "plans" and "matrix" keys respectively. Pulled out to a WPF-free type so the
 // projection - in particular readiness = cell.Readiness.ToString(), the encoding a plain
 // enum-equality test on SkillMatrix cannot catch a regression in - is itself serializable
-// and assertable from the scratch harness. Property names are PascalCase here because
-// PostState's JsonOptions (TriffSkillsController.cs) applies JsonNamingPolicy.CamelCase at
-// serialize time, same as every other type posted to the webview.
+// and assertable outside the WPF assembly. Property names are PascalCase here because
+// what finally puts this on the wire is MainWindow.PostAppEvent's CamelCase-naming
+// WebMessageJsonOptions (native/MainWindow.xaml.cs), same as every other type posted to
+// the webview - PascalCase here becomes camelCase there, not here.
 internal sealed record MatrixWire(IReadOnlyList<object> Plans, IReadOnlyList<object> Matrix);
 
 internal static class TriffSkillsMatrix
@@ -64,13 +65,13 @@ internal static class TriffSkillsMatrix
     }
 
     // Byte-identical extraction of the two inline .Select(...) projections PostState used
-    // to build directly inside its anonymous state object (commit 876c33b). Moved here,
-    // WPF-free, purely so the wire encoding is reachable from the scratch harness -
-    // TriffSkillsMatrixWireTests.cs serializes this and asserts on the JSON text, which is
-    // what actually catches a reverted `readiness = cell.Readiness.ToString()`; asserting
-    // PlanReadiness equality on SkillMatrix, as the Build tests do, cannot. PostState now
-    // splices Plans and Matrix in verbatim where the two blocks used to live, changing no
-    // field name, no nesting, and no value encoding.
+    // to build directly inside its anonymous state object. Moved here, WPF-free, so the wire
+    // encoding is reachable and assertable outside the WPF assembly: serializing this and
+    // checking the JSON text is what actually catches a reverted
+    // `readiness = cell.Readiness.ToString()`, which asserting PlanReadiness equality on
+    // SkillMatrix alone cannot - that would still pass if the enum serialized as its integer
+    // value instead of its name. PostState now splices Plans and Matrix in verbatim where the
+    // two blocks used to live, changing no field name, no nesting, and no value encoding.
     public static MatrixWire ToWire(SkillMatrix matrix)
     {
         var plans = matrix.Plans.Select(plan => (object)new

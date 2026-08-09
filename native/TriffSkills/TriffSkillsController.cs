@@ -20,9 +20,9 @@ internal sealed class TriffSkillsController
     // TriffFleetsController's. The client ID names the *application* to CCP, so the
     // two tools must be able to point at different registrations (design D2), and
     // port 51778 deliberately differs from TriffFleets' 51777
-    // (TriffFleetsController.cs:22) so the loopback listeners cannot collide.
+    // (TriffFleetsController.cs:23, listener at :324) so the loopback listeners cannot collide.
     //
-    // Unlike TriffFleets, which hardcodes its client ID (TriffFleetsController.cs:21),
+    // Unlike TriffFleets, which hardcodes its client ID (TriffFleetsController.cs:22),
     // TriffSkills resolves the effective value at runtime so a maintainer running his
     // own EVE application does not have to edit and rebuild. The const below is only
     // the fallback. See ResolveClientId().
@@ -45,7 +45,7 @@ internal sealed class TriffSkillsController
 
     // github.com rejects API requests with no User-Agent ("Request forbidden by
     // administrative rules"). Same product token as this file's own SendEsiAsync
-    // wrapper (:115) and TriffFleetsController's equivalent (:1506).
+    // wrapper (:123) and TriffFleetsController's equivalent (:1506).
     private const string GitHubUserAgent = "TriffView/1.0 TriffSkills";
 
     // Resolution order, first non-empty wins:
@@ -84,11 +84,16 @@ internal sealed class TriffSkillsController
     {
         Timeout = TimeSpan.FromSeconds(20),
     };
-    // .scratch-tests/TriffSkillsMatrixWireTests.cs keeps its own copy of these exact
-    // settings, because this file references System.Windows.Threading and cannot be linked
-    // into the WPF-free scratch harness. If PropertyNamingPolicy or WriteIndented changes
-    // here, update that copy too - a divergence would let the harness assert against a
-    // JSON shape PostState no longer actually produces.
+    // Shared by the ESI transport (SendEsiAsync, :123), the SSO token response parse
+    // (SendTokenRequestAsync, :332), and PostState (:854). In PostState, though, this is
+    // NOT what determines the JSON the UI receives: that call only builds
+    // _lastPostedStateJson, the string compared to skip an identical repost. The actual
+    // wire message is the same anonymous object handed to _postToHud, which
+    // MainWindow.PostAppEvent (native/MainWindow.xaml.cs:866) re-serializes with its own
+    // WebMessageJsonOptions (native/MainWindow.xaml.cs:110). The two option sets both use
+    // CamelCase naming, so the casing the UI sees matches what PostState computed here -
+    // but that is the two settings agreeing, not this one governing the wire. WriteIndented
+    // in particular affects only the dedupe string, never what the UI parses.
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -123,7 +128,7 @@ internal sealed class TriffSkillsController
         => EsiTransport.SendAsync<T>(Http, JsonOptions, UserAgent, method, path, token, body);
 
     // Resolves one batch of skill names through POST /universe/ids/, the same endpoint
-    // TriffFleets already calls for character names (TriffFleetsController.cs:1486).
+    // TriffFleets already calls for character names (TriffFleetsController.cs:1484).
     // Unauthenticated by design - name resolution needs no token, so it works even for a
     // character whose credential has expired.
     private async Task<IReadOnlyList<SkillsUniverseIdName>> ResolveNamesBatchAsync(IReadOnlyList<string> batch)
@@ -257,7 +262,7 @@ internal sealed class TriffSkillsController
     // Reads the unverified payload of the access token to learn the character ID,
     // name, and granted scopes. The token's signature is not checked here - it came
     // directly from the SSO token endpoint over TLS, which is the same trust
-    // boundary TriffFleetsController.DecodeEveJwt (:1712) relies on.
+    // boundary TriffFleetsController.DecodeEveJwt (:1601) relies on.
     private static EveJwtIdentity DecodeEveJwt(string token)
     {
         var parts = token.Split('.');
@@ -310,7 +315,7 @@ internal sealed class TriffSkillsController
 
     // The distinct "TriffView.TriffSkills." prefix (parallel to
     // TriffFleetsController.RefreshTokenTarget's "TriffView.TriffFleets." prefix,
-    // :1698) is the whole point: TriffSkills must never read a TriffFleets token,
+    // :1587) is the whole point: TriffSkills must never read a TriffFleets token,
     // and so can never grant itself skill access on the back of a fleets grant.
     private static string RefreshTokenTarget(long characterId) => $"TriffView.TriffSkills.RefreshToken.{characterId}";
 
@@ -347,7 +352,7 @@ internal sealed class TriffSkillsController
     }
 
     // Validates nothing about the returned token's scopes - neither does the fleets
-    // original at :526-548. That is a real gap, not an oversight to fix here: if the
+    // original at :524-545. That is a real gap, not an oversight to fix here: if the
     // client ID is later repointed at a different registration, a surviving refresh
     // token can mint an access token missing the skill scopes, and the failure
     // surfaces as a 403 on the first skills call rather than at refresh time. Task 6
@@ -421,7 +426,7 @@ internal sealed class TriffSkillsController
 
             var callbackPath = new Uri(RedirectUri).AbsolutePath;
 
-            // Diverges from TriffFleetsController.StartAuthAsync (:366-372), which
+            // Diverges from TriffFleetsController.StartAuthAsync (:335), which
             // awaits AcceptTcpClientAsync exactly once and trusts whatever socket
             // wins the race. A browser routinely opens more than one connection
             // around a redirect (preconnects, an abandoned tab from a prior
@@ -507,9 +512,9 @@ internal sealed class TriffSkillsController
                 _state.Save();
                 authSucceeded = true;
 
-                // Diverges from TriffFleetsController.StartAuthAsync (:398-399),
-                // which writes the refresh token to Credential Manager before
-                // calling _state.Save(). If Save() then threw (disk full, an AV
+                // Diverges from TriffFleetsController.StartAuthAsync (:389), which
+                // writes the refresh token to Credential Manager before
+                // calling _state.Save() (:411). If Save() then threw (disk full, an AV
                 // lock, a redirected/OneDrive %APPDATA%), that ordering leaves a
                 // live refresh token in Credential Manager with no character row
                 // to drive ForgetCharacter against - the "forgotten character
@@ -557,7 +562,7 @@ internal sealed class TriffSkillsController
         }
     }
 
-    // Modelled on TriffFleetsController.ForgetBoss (:141-159): delete the
+    // Modelled on TriffFleetsController.ForgetBoss (:139-154): delete the
     // Credential Manager entry, remove the record, drop the cached access token,
     // fix the selection, save, repost. It additionally drops the cached skills and
     // queue, which travel with the record.
@@ -677,7 +682,7 @@ internal sealed class TriffSkillsController
             // 403 on a skills endpoint is a scope problem, not a transient one, and is
             // deliberately absent from ShouldRetryEsi's transient list. It surfaces here rather
             // than at refresh time because RefreshTokenAsync performs no scope check
-            // (TriffFleetsController.cs:526) - a token minted under a different registration
+            // (TriffFleetsController.cs:524) - a token minted under a different registration
             // refreshes happily and only fails on the first skills call.
             character.NeedsReauth = true;
             character.Error = $"Re-authenticate this character: the stored token does not carry {Scopes}.";
@@ -862,12 +867,12 @@ internal sealed class TriffSkillsController
         }
     }
 
-    private void PostError(string category, string message)
+    private void PostError(string action, string message)
     {
         _postToHud(new
         {
             type = "triffskills:error",
-            action = category,
+            action,
             message,
         });
     }

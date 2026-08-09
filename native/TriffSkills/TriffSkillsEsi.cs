@@ -52,7 +52,7 @@ internal sealed class SkillQueueItem
 }
 
 // POST /universe/ids/ returns one array per resolved category. TriffFleets already has a
-// UniverseIdsResponse (TriffFleetsController.cs:2106) but it declares only "characters" -
+// UniverseIdsResponse (TriffFleetsController.cs:1996) but it declares only "characters" -
 // skills come back under "inventory_types", so TriffSkills needs its own response type.
 internal sealed class SkillsUniverseIdsResponse
 {
