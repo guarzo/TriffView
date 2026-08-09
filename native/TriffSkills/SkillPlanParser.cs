@@ -11,7 +11,9 @@ internal sealed record SkillPlan(string Name, IReadOnlyList<PlanRequirement> Req
 
 internal static class SkillPlanParser
 {
-    private static readonly Dictionary<string, int> RomanLevels = new(StringComparer.Ordinal)
+    // Case-insensitive for the same reason SkillIdCache.Map is: plan files are
+    // hand-written, and "Survey iv" is the same requirement as "Survey IV".
+    private static readonly Dictionary<string, int> RomanLevels = new(StringComparer.OrdinalIgnoreCase)
     {
         ["I"] = 1,
         ["II"] = 2,
@@ -26,7 +28,13 @@ internal static class SkillPlanParser
     public static SkillPlan Parse(string name, string contents)
     {
         var order = new List<string>();
-        var levels = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        // OrdinalIgnoreCase because SkillIdCache.Map resolves names that way: under an
+        // ordinal comparer "Survey 3" and "survey 4" survive as two separate requirements
+        // that both resolve to the same typeID, and the matrix then shows one skill twice
+        // with conflicting verdicts. Merging them here keeps the highest level, which is
+        // the same rule already applied to an exact repeat.
+        var levels = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var rawLine in (contents ?? string.Empty).Split('\n'))
         {
@@ -80,6 +88,16 @@ internal static class SkillPlanParser
         }
 
         // NumberStyles.None rejects signs and whitespace; a level is a bare positive integer.
-        return int.TryParse(token, NumberStyles.None, CultureInfo.InvariantCulture, out level);
+        // EVE skills only go to V, so anything outside 1-5 is a malformed line rather than a
+        // requirement - "Survey 0" and "Survey 50" would otherwise become requirements the
+        // evaluator can never satisfy, or that every character trivially satisfies.
+        if (int.TryParse(token, NumberStyles.None, CultureInfo.InvariantCulture, out level)
+            && level >= 1 && level <= 5)
+        {
+            return true;
+        }
+
+        level = 0;
+        return false;
     }
 }

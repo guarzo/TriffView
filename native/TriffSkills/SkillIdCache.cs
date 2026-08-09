@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -61,13 +62,33 @@ internal sealed class SkillIdCache
     {
         var path = CachePath;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var temp = path + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(Map, JsonOptions), new UTF8Encoding(false));
 
-        // Write-temp-then-replace, so a crash mid-write leaves the previous file rather
-        // than a truncated one. File.Replace requires the destination to exist.
-        if (File.Exists(path)) File.Replace(temp, path, null);
-        else File.Move(temp, path);
+        // Unique per save for the same reason TriffSkillsState.Save uses one: a fixed
+        // ".tmp" is shared state between concurrent saves. This cache is pure derived
+        // data - re-resolvable from ESI - so a failed write is logged and dropped rather
+        // than propagated into the refresh that triggered it.
+        var temp = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temp, JsonSerializer.Serialize(Map, JsonOptions), new UTF8Encoding(false));
+
+            // Write-temp-then-replace, so a crash mid-write leaves the previous file rather
+            // than a truncated one. File.Replace requires the destination to exist.
+            if (File.Exists(path)) File.Replace(temp, path, null);
+            else File.Move(temp, path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Debug.WriteLine($"TriffSkills: skill id cache save failed: {ex.Message}");
+            try
+            {
+                if (File.Exists(temp)) File.Delete(temp);
+            }
+            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+            {
+                // Nothing useful to do; a stray temp file is harmless.
+            }
+        }
     }
 
     public static List<string> Unresolved(IReadOnlyDictionary<string, int> map, IEnumerable<string> names)

@@ -285,9 +285,19 @@ export default function TriffSkills() {
   useEffect(() => {
     const unsubscribe = onNativeMessage((message) => {
       if (message?.type === "triffskills:state") {
+        // Built field by field rather than spread. A spread carries the transport-only
+        // "type" key into component state, and - worse - a present-but-null field wins
+        // over the EMPTY_STATE default it is supposed to fall back to, so one null
+        // characters array turns every .map/.length below into a crash. Every field the
+        // renderer reads is normalized here, once, instead of guarded at each use.
         setState({
-          ...EMPTY_STATE,
-          ...(message as TriffSkillsState),
+          authConfigured: message.authConfigured === true,
+          characters: Array.isArray(message.characters) ? message.characters : [],
+          plans: Array.isArray(message.plans) ? message.plans : [],
+          matrix: Array.isArray(message.matrix) ? message.matrix : [],
+          refreshInFlight: message.refreshInFlight === true,
+          authInProgress: message.authInProgress === true,
+          plansUpdatedUtc: typeof message.plansUpdatedUtc === "string" ? message.plansUpdatedUtc : "",
         });
       }
       if (message?.type === "triffskills:error") {

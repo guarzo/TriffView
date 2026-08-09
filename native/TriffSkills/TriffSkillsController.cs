@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -70,6 +71,15 @@ internal sealed class TriffSkillsController
         if (!string.IsNullOrWhiteSpace(fromEnv)) return fromEnv;
 
         return DefaultClientId;
+    }
+
+    // The placeholder is a real string that resolves successfully, so "did we get a value"
+    // is not the same question as "can we authenticate". Both call sites need the second
+    // one, and comparing against the constant keeps them from drifting apart if the
+    // placeholder is ever replaced with a real registration.
+    private static bool IsClientIdConfigured(string? clientId)
+    {
+        return !string.IsNullOrWhiteSpace(clientId) && clientId != DefaultClientId;
     }
 
     private static readonly HttpClient Http = new()
@@ -147,7 +157,7 @@ internal sealed class TriffSkillsController
                 _ = StartAuthAsync();
                 return true;
             case "triffskills:forget-character":
-                ForgetCharacter(message?["characterId"]?.GetValue<long>() ?? 0);
+                ForgetCharacter(ReadLong(message, "characterId"));
                 return true;
             case "triffskills:refresh-characters":
                 _ = RefreshCharactersAsync();
@@ -164,6 +174,43 @@ internal sealed class TriffSkillsController
             default:
                 return false;
         }
+    }
+
+    // Web-message fields are untrusted input, not a typed contract: the renderer can be
+    // stale, and JsonNode.GetValue<T> throws on any mismatch rather than returning a
+    // default. A throw here escapes HandleWebMessage and takes down the message pump for
+    // every tool, so each field is read defensively and a bad value degrades to a default
+    // the caller already handles.
+    private static long ReadLong(JsonObject? message, string key)
+    {
+        if (message?[key] is not JsonValue value)
+        {
+            return 0;
+        }
+
+        if (value.TryGetValue<long>(out var number))
+        {
+            return number;
+        }
+
+        // JSON numbers large enough to arrive as strings, and renderers that stringify
+        // ids to dodge the JS 2^53 limit, both land here.
+        return value.TryGetValue<string>(out var text)
+            && long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : 0;
+    }
+
+    private static string ReadString(JsonObject? message, string key)
+    {
+        return message?[key] is JsonValue value && value.TryGetValue<string>(out var text)
+            ? text
+            : "";
+    }
+
+    private static bool ReadBool(JsonObject? message, string key)
+    {
+        return message?[key] is JsonValue value && value.TryGetValue<bool>(out var flag) && flag;
     }
 
     private static string Base64Url(byte[] bytes)
@@ -445,7 +492,7 @@ internal sealed class TriffSkillsController
         }
 
         var clientId = ResolveClientId();
-        if (string.IsNullOrWhiteSpace(clientId) || clientId == "REPLACE_WITH_OUR_DEV_REGISTRATION")
+        if (!IsClientIdConfigured(clientId))
         {
             PostError("auth", $"TriffSkills needs a registered EVE SSO client ID carrying esi-skills.read_skills.v1 and esi-skills.read_skillqueue.v1. Set {ClientIdEnvVar}, or put the ID in {Path.Combine(TriffSkillsPaths.Root, "client-id.txt")}.");
             PostState(force: true);
@@ -542,17 +589,21 @@ internal sealed class TriffSkillsController
                 var code = hasCode ? query["code"] : "";
                 var returnedState = query.TryGetValue("state", out var stateValue) ? stateValue : "";
 
+                // State is checked before anything else that ends the wait, error included.
+                // Any local process can reach this port, so an unauthenticated caller must
+                // not be able to abort a pending login just by sending ?error=. Only a
+                // caller echoing the state we generated gets to influence this attempt;
+                // everything else is discarded and the listener keeps waiting.
+                if (!string.Equals(state, returnedState, StringComparison.Ordinal))
+                {
+                    await TryWriteCallbackHtmlAsync(stream, "TriffSkills blocked this login because the SSO state did not match. You can close this tab.");
+                    continue;
+                }
+
                 if (!string.IsNullOrWhiteSpace(error))
                 {
                     await TryWriteCallbackHtmlAsync(stream, "TriffSkills authentication was cancelled or denied. You can close this tab.");
                     PostError("auth", $"EVE SSO returned: {error}");
-                    return;
-                }
-
-                if (!string.Equals(state, returnedState, StringComparison.Ordinal))
-                {
-                    await TryWriteCallbackHtmlAsync(stream, "TriffSkills blocked this login because the SSO state did not match. You can close this tab.");
-                    PostError("auth", "EVE SSO state did not match. Authentication was blocked.");
                     return;
                 }
 
@@ -900,10 +951,23 @@ internal sealed class TriffSkillsController
     // HttpClient/CredentialStore dependencies.
     private async Task ImportPlanAsync(JsonObject? message)
     {
-        var name = message?["name"]?.GetValue<string>() ?? "";
-        var contents = message?["contents"]?.GetValue<string>() ?? "";
-        var replace = message?["replace"]?.GetValue<bool>() ?? false;
+        // HandleWebMessage fires this without awaiting, so an escaping exception would be
+        // an unobserved task: the renderer gets neither triffskills:import-error nor
+        // triffskills:import-done and the import modal waits forever on a reply that is
+        // never coming. Every exit path from here must post one or the other.
+        var name = ReadString(message, "name");
+        try
+        {
+            await ImportPlanCoreAsync(name, ReadString(message, "contents"), ReadBool(message, "replace"));
+        }
+        catch (Exception ex)
+        {
+            PostError("import-plan", ex.Message);
+        }
+    }
 
+    private async Task ImportPlanCoreAsync(string name, string contents, bool replace)
+    {
         if (!PlanNameValidator.TryValidate(name, out var nameError))
         {
             PostError("import-plan", nameError);
@@ -980,7 +1044,7 @@ internal sealed class TriffSkillsController
             var state = new
             {
                 type = "triffskills:state",
-                authConfigured = ResolveClientId() is { Length: > 0 } id && id != "REPLACE_WITH_OUR_DEV_REGISTRATION",
+                authConfigured = IsClientIdConfigured(ResolveClientId()),
                 authInProgress = _authInProgress,
                 refreshInFlight = _charactersRefreshInFlight,
                 characters = _state.Characters.Select(character => new

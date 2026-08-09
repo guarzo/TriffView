@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -78,15 +79,45 @@ internal sealed class TriffSkillsState
         // only a fresh ESI round-trip can rebuild. Writing a sibling temp file and
         // calling File.Replace makes the swap atomic: a crash leaves the previous
         // file intact rather than a truncated one.
-        var tempPath = TriffSkillsPaths.StatePath + ".tmp";
-        File.WriteAllText(tempPath, json, new UTF8Encoding(false));
-        if (File.Exists(TriffSkillsPaths.StatePath))
+        // A fixed ".tmp" name is a shared resource: two saves overlapping - a refresh pass
+        // saving per character while the user forgets one - would write the same path and
+        // one File.Replace would fail or consume the other's bytes. A unique name per save
+        // keeps concurrent saves from touching each other; the last Replace wins, which is
+        // the intended semantics for a full-state snapshot.
+        var tempPath = $"{TriffSkillsPaths.StatePath}.{Guid.NewGuid():N}.tmp";
+        try
         {
-            File.Replace(tempPath, TriffSkillsPaths.StatePath, null);
+            File.WriteAllText(tempPath, json, new UTF8Encoding(false));
+            if (File.Exists(TriffSkillsPaths.StatePath))
+            {
+                File.Replace(tempPath, TriffSkillsPaths.StatePath, null);
+            }
+            else
+            {
+                File.Move(tempPath, TriffSkillsPaths.StatePath);
+            }
         }
-        else
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            File.Move(tempPath, TriffSkillsPaths.StatePath);
+            // A transient failure here - antivirus holding the file, a locked profile
+            // directory - must not abort the refresh pass that called Save(). The
+            // in-memory state is still correct and the next Save will retry; losing the
+            // write is recoverable, losing the pass is not.
+            Debug.WriteLine($"TriffSkills: state save failed: {ex.Message}");
+            TryDelete(tempPath);
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Leaving a stray temp file behind is strictly better than throwing out of
+            // a cleanup path that is itself handling a failure.
         }
     }
 
@@ -123,12 +154,31 @@ internal sealed class TriffSkillsState
         return added;
     }
 
-    public void ApplyFetchSuccess(long characterId, Dictionary<int, int> trainedLevels, List<QueueEntry> queue)
+    // Both Apply* methods below look the character up instead of upserting it, and do
+    // nothing when it is gone. A refresh pass awaits ESI per character, and Forget
+    // character can complete during that await - upserting here would then re-add a
+    // character the user just deleted, with its credential already destroyed, leaving a
+    // permanently broken row that only another Forget can clear. Adding characters is the
+    // authorization path's job; a fetch result may only update one that still exists.
+    private TriffSkillsCharacter? Find(long characterId)
     {
-        if (characterId <= 0) return;
-        var character = Upsert(characterId);
-        character.TrainedLevels = trainedLevels;
-        character.Queue = queue;
+        return characterId <= 0
+            ? null
+            : Characters.FirstOrDefault(character => character.CharacterId == characterId);
+    }
+
+    public void ApplyFetchSuccess(long characterId, Dictionary<int, int>? trainedLevels, List<QueueEntry>? queue)
+    {
+        var character = Find(characterId);
+        if (character == null) return;
+
+        // Copied rather than aliased: the caller's collections are its own locals and
+        // nothing stops it mutating them after this returns, which would silently edit
+        // persisted state behind Save()'s back.
+        character.TrainedLevels = trainedLevels == null
+            ? new Dictionary<int, int>()
+            : new Dictionary<int, int>(trainedLevels);
+        character.Queue = queue == null ? new List<QueueEntry>() : new List<QueueEntry>(queue);
         character.FetchedUtc = DateTimeOffset.UtcNow;
         character.Error = "";
         character.NeedsReauth = false;
@@ -136,8 +186,9 @@ internal sealed class TriffSkillsState
 
     public void ApplyFetchFailure(long characterId, string error, bool needsReauth)
     {
-        if (characterId <= 0) return;
-        var character = Upsert(characterId);
+        var character = Find(characterId);
+        if (character == null) return;
+
         // Deliberately leaves TrainedLevels, Queue and FetchedUtc untouched, so the
         // last-good record stays visible and the UI can label it stale by FetchedUtc.
         character.Error = string.IsNullOrWhiteSpace(error) ? "ESI request failed." : error.Trim();
