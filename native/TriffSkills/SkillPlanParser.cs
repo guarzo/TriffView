@@ -2,13 +2,11 @@ using System.Globalization;
 
 namespace TriffView.TriffSkills;
 
-/// <summary>A single "train skill X to level N" line from a plan file.</summary>
+// A single "train skill X to level N" line from a plan file.
 internal sealed record PlanRequirement(string SkillName, int Level);
 
-/// <summary>
-/// A parsed plan. <see cref="Requirements"/> is ordered by first appearance in the
-/// source file so that downstream analysis output is deterministic.
-/// </summary>
+// A parsed plan. Requirements is ordered by first appearance in the
+// source file so that downstream analysis output is deterministic.
 internal sealed record SkillPlan(string Name, IReadOnlyList<PlanRequirement> Requirements);
 
 internal static class SkillPlanParser
@@ -22,11 +20,9 @@ internal static class SkillPlanParser
         ["V"] = 5,
     };
 
-    /// <summary>
-    /// Parses "Skill Name &lt;level&gt;" lines. Malformed lines are skipped rather than
-    /// throwing: plan files are community-authored and one bad line must not cost the
-    /// whole plan. A skill listed more than once keeps its highest level.
-    /// </summary>
+    // Parses "Skill Name <level>" lines. Malformed lines are skipped rather than
+    // throwing: plan files are community-authored and one bad line must not cost the
+    // whole plan. A skill listed more than once keeps its highest level.
     public static SkillPlan Parse(string name, string contents)
     {
         var order = new List<string>();
