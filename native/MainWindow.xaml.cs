@@ -135,6 +135,7 @@ public partial class MainWindow : Window
     private TriffViewController? _triffView;
     private EveSettingsController? _eveSettings;
     private TriffFleetsController? _triffFleets;
+    private TriffSkills.TriffSkillsController? _triffSkills;
     private InputOverlayWindow? _inputOverlay;
     private GuiThemePalette _guiTheme = GuiThemePalette.TriffTools;
     private TriffViewUpdateSnapshot _updateSnapshot;
@@ -187,6 +188,7 @@ public partial class MainWindow : Window
         InitializeTriffView();
         InitializeEveSettings();
         InitializeTriffFleets();
+        InitializeTriffSkills();
         InitializeTray();
         await InitializeWebViewAsync();
         InitializeInputOverlay();
@@ -248,6 +250,11 @@ public partial class MainWindow : Window
         _triffFleets = new TriffFleetsController(Dispatcher, PostAppEvent);
     }
 
+    private void InitializeTriffSkills()
+    {
+        _triffSkills = new TriffSkills.TriffSkillsController(Dispatcher, PostAppEvent);
+    }
+
     private void InitializeTray()
     {
         _trayIconImage ??= LoadAppIcon();
@@ -257,6 +264,7 @@ public partial class MainWindow : Window
         var openTriffViewItem = new Forms.ToolStripMenuItem("Open TriffView settings", null, (_, _) => OpenTool("triffview"));
         var openEveSettingsItem = new Forms.ToolStripMenuItem("Open EVE Settings", null, (_, _) => OpenTool("eve-settings"));
         var openFleetManagerItem = new Forms.ToolStripMenuItem("Open Fleet Manager", null, (_, _) => OpenTool("fleet-manager"));
+        var openSkillPlannerItem = new Forms.ToolStripMenuItem("Open Skill Planner", null, (_, _) => OpenTool("skill-planner"));
         var savePreviewItem = new Forms.ToolStripMenuItem("Save preview positions", null, (_, _) => PostTriffViewNativeCommand("save-preview-layout"));
         var saveClientsItem = new Forms.ToolStripMenuItem("Save EVE client positions", null, (_, _) => PostTriffViewNativeCommand("save-client-layouts"));
         var restoreClientsItem = new Forms.ToolStripMenuItem("Restore EVE client positions", null, (_, _) => PostTriffViewNativeCommand("restore-client-layouts"));
@@ -275,6 +283,7 @@ public partial class MainWindow : Window
         menu.Items.Add(openTriffViewItem);
         menu.Items.Add(openEveSettingsItem);
         menu.Items.Add(openFleetManagerItem);
+        menu.Items.Add(openSkillPlannerItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add(_triffViewEnabledItem);
         menu.Items.Add(_triffViewHotkeysItem);
@@ -629,6 +638,11 @@ public partial class MainWindow : Window
         }
 
         if (_triffFleets?.HandleWebMessage(type, message) == true)
+        {
+            return;
+        }
+
+        if (_triffSkills?.HandleWebMessage(type, message) == true)
         {
             return;
         }
