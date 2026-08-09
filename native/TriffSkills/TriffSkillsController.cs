@@ -818,6 +818,7 @@ internal sealed class TriffSkillsController
         try
         {
             _state.Normalize();
+            var matrix = TriffSkillsMatrix.Build(_state.Characters, _plans, _skillIds.Map);
             var state = new
             {
                 type = "triffskills:state",
@@ -838,6 +839,31 @@ internal sealed class TriffSkillsController
                     character.NeedsReauth,
                     tokenStored = !string.IsNullOrWhiteSpace(CredentialStore.Read(RefreshTokenTarget(character.CharacterId))),
                 }).ToArray(),
+                plans = matrix.Plans.Select(plan => new
+                {
+                    plan.Name,
+                    plan.RequirementCount,
+                }).ToArray(),
+                matrix = matrix.Cells.Select(cell => new
+                {
+                    cell.CharacterId,
+                    cell.PlanName,
+                    // Explicit string, not the enum. System.Text.Json serializes an enum
+                    // as its integer value by default, and the UI keys READINESS_META
+                    // off "Ready" / "Training" / "Missing" - an integer would silently
+                    // render every cell as Missing via its fallback.
+                    readiness = cell.Readiness.ToString(),
+                    cell.EstimatedFinishUtc,
+                    missingSkills = cell.MissingSkills.Select(skill => new
+                    {
+                        skill.SkillName,
+                        skill.Level,
+                    }).ToArray(),
+                    cell.UnknownSkills,
+                }).ToArray(),
+                // The UI types this as a string and renders "No plans cached" when it is
+                // empty, so emit "" rather than null.
+                plansFetchedUtc = _plansFetchedUtc?.ToString("o") ?? "",
             };
             var json = JsonSerializer.Serialize(state, JsonOptions);
             if (!force && string.Equals(json, _lastPostedStateJson, StringComparison.Ordinal)) return;
