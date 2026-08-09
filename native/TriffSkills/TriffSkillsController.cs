@@ -34,6 +34,20 @@ internal sealed class TriffSkillsController
     private const string Scopes = "esi-skills.read_skills.v1 esi-skills.read_skillqueue.v1";
     private const string UserAgent = "TriffView/1.0 TriffSkills";
 
+    // Pinned to guarzo/canifly@main, the same default CanIFly ships
+    // (internal/server/env.go:64-69, path suffix applied at
+    // internal/services/skillplans/github_downloader.go:131). Deliberately NOT
+    // configurable: a settable remote fetch path inside a signed binary that writes
+    // files under %APPDATA% is a security conversation this PR should not start.
+    // Do not add a setting, an environment variable, or a message parameter for it.
+    private const string PlansContentsUrl =
+        "https://api.github.com/repos/guarzo/canifly/contents/plans?ref=main";
+
+    // github.com rejects API requests with no User-Agent ("Request forbidden by
+    // administrative rules"). Same product token as this file's own SendEsiAsync
+    // wrapper (:115) and TriffFleetsController's equivalent (:1506).
+    private const string GitHubUserAgent = "TriffView/1.0 TriffSkills";
+
     // Resolution order, first non-empty wins:
     //   1. %APPDATA%\TriffHud\TriffSkills\client-id.txt   (trimmed; a deliberate,
     //      discoverable file next to state.json, for a maintainer who does not want
@@ -84,6 +98,8 @@ internal sealed class TriffSkillsController
     private string _lastPostedStateJson = "";
     private bool _authInProgress;
     private bool _refreshInFlight;
+    private List<SkillPlan> _plans = new();
+    private DateTimeOffset? _plansFetchedUtc;
 
     public TriffSkillsController(Dispatcher dispatcher, Action<object> postToHud)
     {
@@ -91,6 +107,7 @@ internal sealed class TriffSkillsController
         _postToHud = postToHud;
         _state = TriffSkillsState.Load();
         _skillIds = SkillIdCache.Load();
+        LoadCachedPlans();
     }
 
     // The transport, retry policy, and EsiResponse<T> are shared with TriffFleets
@@ -129,6 +146,9 @@ internal sealed class TriffSkillsController
                 return true;
             case "triffskills:refresh-characters":
                 _ = RefreshCharactersAsync();
+                return true;
+            case "triffskills:refresh-plans":
+                _ = RefreshPlansAsync();
                 return true;
             default:
                 return false;
@@ -666,6 +686,126 @@ internal sealed class TriffSkillsController
 
         PostError("refresh-characters", $"{character.CharacterName}: {character.Error}");
         return false;
+    }
+
+    private void LoadCachedPlans()
+    {
+        try
+        {
+            _plans = PlanCache.LoadAll(TriffSkillsPaths.PlansDir).ToList();
+            _plansFetchedUtc = Directory.Exists(TriffSkillsPaths.PlansDir) && _plans.Count > 0
+                ? new DateTimeOffset(Directory.GetLastWriteTimeUtc(TriffSkillsPaths.PlansDir), TimeSpan.Zero)
+                : null;
+        }
+        catch (Exception ex)
+        {
+            _plans = new List<SkillPlan>();
+            _plansFetchedUtc = null;
+            PostError("plans", $"Could not read the cached plans: {ex.Message}");
+        }
+    }
+
+    // Manual refresh only - there is no background poll. Unauthenticated GitHub API
+    // requests are capped at 60/hour per IP, shared with everything else on that IP,
+    // so this runs when the user asks and at no other time.
+    private async Task RefreshPlansAsync()
+    {
+        if (_refreshInFlight)
+        {
+            PostError("plans", "A refresh is already in progress.");
+            return;
+        }
+
+        _refreshInFlight = true;
+        PostState(force: true);
+
+        var staging = "";
+        try
+        {
+            var listingJson = await GetGitHubStringAsync(PlansContentsUrl);
+            var remoteFiles = PlanCatalog.ParseContentsListing(listingJson);
+            if (remoteFiles.Count == 0)
+            {
+                throw new InvalidDataException(
+                    "The GitHub plans directory listed no .txt files. The cached plans were left alone.");
+            }
+
+            // Everything downloads into a sibling staging directory first. Any failure
+            // below abandons it, so a half-finished refresh can never be what the user
+            // is left with.
+            staging = PlanCache.BeginStaging(TriffSkillsPaths.PlansDir);
+            foreach (var remoteFile in remoteFiles)
+            {
+                PlanCache.WritePlan(staging, remoteFile.Name, await GetGitHubStringAsync(remoteFile.DownloadUrl));
+            }
+
+            PlanCache.Commit(TriffSkillsPaths.PlansDir, staging);
+            staging = "";
+            LoadCachedPlans();
+
+            // Newly-arrived plans may name skills the cache has never seen. Resolve them
+            // now so the matrix does not report them Unknown until the next refresh.
+            //
+            // This runs AFTER the cache swap has already committed, so its failure is not
+            // a plan-refresh failure - the plans are on disk and loaded either way. It gets
+            // its own try/catch and its own message so a name-resolution outage cannot
+            // report "could not refresh plans" for a refresh that in fact succeeded. The
+            // only consequence of failing here is that some plans read Unknown until the
+            // next refresh, which is exactly the degradation the matrix is built to show.
+            try
+            {
+                var names = _plans
+                    .SelectMany(plan => plan.Requirements.Select(requirement => requirement.SkillName))
+                    .Where(name => !_skillIds.Map.ContainsKey(name))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                if (names.Count > 0)
+                {
+                    await _skillIds.ResolveMissingAsync(names, ResolveNamesBatchAsync);
+                }
+            }
+            catch (Exception ex)
+            {
+                PostError("plans", $"Plans updated, but some skill names could not be resolved: {ex.Message}");
+            }
+        }
+        catch (Exception ex)
+        {
+            // The cache is untouched on every path that reaches here: either the failure
+            // happened before BeginStaging, or the staging directory is abandoned below.
+            // Name resolution is deliberately outside this scope - see its own catch above.
+            PostError("plans", $"Could not refresh plans from GitHub: {ex.Message}");
+        }
+        finally
+        {
+            if (!string.IsNullOrEmpty(staging))
+            {
+                try { PlanCache.Abandon(staging); } catch { }
+            }
+            _refreshInFlight = false;
+            PostState(force: true);
+        }
+    }
+
+    private static async Task<string> GetGitHubStringAsync(string url)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.UserAgent.ParseAdd(GitHubUserAgent);
+
+        using var response = await Http.SendAsync(request);
+        var text = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            var rateLimitRemaining = response.Headers.TryGetValues("X-RateLimit-Remaining", out var values)
+                ? string.Join(",", values)
+                : "";
+            var suffix = string.IsNullOrEmpty(rateLimitRemaining)
+                ? ""
+                : $" (GitHub rate limit remaining: {rateLimitRemaining})";
+            throw new InvalidOperationException($"GET {url} returned {(int)response.StatusCode}.{suffix}");
+        }
+
+        return text;
     }
 
     private void PostState(bool force = false)
