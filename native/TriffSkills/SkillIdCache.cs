@@ -24,11 +24,10 @@ internal sealed class SkillIdCache
     // and ESI resolves names case-insensitively, so the map must too.
     public Dictionary<string, int> Map { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    public static string CachePath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "TriffHud",
-        "TriffSkills",
-        "skill-ids.json");
+    // Goes through TriffSkillsPaths rather than rebuilding the path by hand, so this
+    // cache lands next to state.json under one root - including when a harness
+    // redirects that root via TriffSkillsPaths.OverrideRoot.
+    public static string CachePath => TriffSkillsPaths.SkillIdsPath;
 
     public static SkillIdCache Load()
     {

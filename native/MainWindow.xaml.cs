@@ -252,7 +252,7 @@ public partial class MainWindow : Window
 
     private void InitializeTriffSkills()
     {
-        _triffSkills = new TriffSkills.TriffSkillsController(Dispatcher, PostAppEvent);
+        _triffSkills = new TriffSkills.TriffSkillsController(PostAppEvent);
     }
 
     private void InitializeTray()

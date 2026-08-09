@@ -8,7 +8,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows.Threading;
 using TriffView.Shared;        // EsiTransport, EsiResponse<T> (Task 0b)
 using TriffView.TriffFleets;   // CredentialStore, TokenResponse - internal, same assembly
 
@@ -47,6 +46,17 @@ internal sealed class TriffSkillsController
     // administrative rules"). Same product token as this file's own SendEsiAsync
     // wrapper (:123) and TriffFleetsController's equivalent (:1506).
     private const string GitHubUserAgent = "TriffView/1.0 TriffSkills";
+
+    // The only two hosts this tool will fetch from: the pinned contents listing lives on
+    // the API host, and every plan body must come from GitHub's raw host (the same value
+    // PlanCatalog validates download_url against). See GetGitHubStringAsync.
+    private const string GitHubApiHost = "api.github.com";
+
+    // Read budgets. The listing is one JSON array describing a few dozen files; a plan is
+    // a few kilobytes of "Skill Name <level>" lines. Both are generous by an order of
+    // magnitude, so they only ever fire on something that is not what it claims to be.
+    private const int MaxListingBytes = 4 * 1024 * 1024;
+    private const int MaxPlanBytes = 1024 * 1024;
 
     // Resolution order, first non-empty wins:
     //   1. %APPDATA%\TriffHud\TriffSkills\client-id.txt   (trimmed; a deliberate,
@@ -100,20 +110,29 @@ internal sealed class TriffSkillsController
         WriteIndented = true,
     };
 
-    private readonly Dispatcher _dispatcher;
     private readonly Action<object> _postToHud;
     private readonly TriffSkillsState _state;
     private readonly SkillIdCache _skillIds;
     private readonly Dictionary<long, AccessTokenCache> _accessTokens = new();
     private string _lastPostedStateJson = "";
     private bool _authInProgress;
-    private bool _refreshInFlight;
+
+    // Two independent operations, two flags. They were one, which meant a plan refresh
+    // made RefreshCharactersAsync a no-op - including the post-auth refresh
+    // StartAuthAsync fires, so a character added during a plan refresh appeared with no
+    // skills and no error. The UI still sees a single refreshInFlight (PostState) because
+    // it disables both buttons for either operation, which is the behaviour we want.
+    private bool _charactersRefreshInFlight;
+    private bool _charactersRefreshPending;
+    private bool _plansRefreshInFlight;
     private List<SkillPlan> _plans = new();
     private DateTimeOffset? _plansFetchedUtc;
 
-    public TriffSkillsController(Dispatcher dispatcher, Action<object> postToHud)
+    // Takes no Dispatcher, unlike its three siblings in MainWindow: every entry point
+    // here is either a web message or a continuation of one, so there is nothing to
+    // marshal back onto the UI thread the way TriffFleetsController's timer callbacks do.
+    public TriffSkillsController(Action<object> postToHud)
     {
-        _dispatcher = dispatcher;
         _postToHud = postToHud;
         _state = TriffSkillsState.Load();
         _skillIds = SkillIdCache.Load();
@@ -259,6 +278,26 @@ internal sealed class TriffSkillsController
         await stream.WriteAsync(body);
     }
 
+    // Writing the browser page is best-effort and must never decide the outcome of an
+    // authorization. By the time the success page is written the state file is saved and
+    // the refresh token is in Credential Manager, so a user who closed the tab has a
+    // fully authenticated character - letting the resulting IOException reach
+    // StartAuthAsync's catch-all would report that success as "authentication failed".
+    // The failure paths swallow for the same reason in reverse: they have already decided
+    // what to tell the user, and a dead socket must not replace that message with a
+    // socket error.
+    private static async Task TryWriteCallbackHtmlAsync(NetworkStream stream, string message)
+    {
+        try
+        {
+            await WriteCallbackHtmlAsync(stream, message);
+        }
+        catch
+        {
+            // Tab closed, browser gone, connection reset. Nothing to report.
+        }
+    }
+
     // Reads the unverified payload of the access token to learn the character ID,
     // name, and granted scopes. The token's signature is not checked here - it came
     // directly from the SSO token endpoint over TLS, which is the same trust
@@ -331,7 +370,10 @@ internal sealed class TriffSkillsController
         var text = await response.Content.ReadAsStringAsync();
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException($"EVE SSO returned {(int)response.StatusCode}: {text}");
+            // EsiTransport.ReadError, the same helper TriffFleetsController uses on this
+            // exact response, so the token endpoint's body is reduced to its "error" field
+            // instead of being interpolated whole into a message the UI shows verbatim.
+            throw new InvalidOperationException($"EVE SSO returned {(int)response.StatusCode}: {EsiTransport.ReadError(text)}");
         }
 
         return JsonSerializer.Deserialize<TokenResponse>(text, JsonOptions)
@@ -470,21 +512,21 @@ internal sealed class TriffSkillsController
 
                 if (!string.IsNullOrWhiteSpace(error))
                 {
-                    await WriteCallbackHtmlAsync(stream, "TriffSkills authentication was cancelled or denied. You can close this tab.");
+                    await TryWriteCallbackHtmlAsync(stream, "TriffSkills authentication was cancelled or denied. You can close this tab.");
                     PostError("auth", $"EVE SSO returned: {error}");
                     return;
                 }
 
                 if (!string.Equals(state, returnedState, StringComparison.Ordinal))
                 {
-                    await WriteCallbackHtmlAsync(stream, "TriffSkills blocked this login because the SSO state did not match. You can close this tab.");
+                    await TryWriteCallbackHtmlAsync(stream, "TriffSkills blocked this login because the SSO state did not match. You can close this tab.");
                     PostError("auth", "EVE SSO state did not match. Authentication was blocked.");
                     return;
                 }
 
                 if (string.IsNullOrWhiteSpace(code))
                 {
-                    await WriteCallbackHtmlAsync(stream, "TriffSkills did not receive an authorization code. You can close this tab.");
+                    await TryWriteCallbackHtmlAsync(stream, "TriffSkills did not receive an authorization code. You can close this tab.");
                     PostError("auth", "EVE SSO did not return an authorization code.");
                     return;
                 }
@@ -524,7 +566,7 @@ internal sealed class TriffSkillsController
                 CredentialStore.Write(RefreshTokenTarget(identity.CharacterId), token.RefreshToken);
                 _accessTokens[identity.CharacterId] = new AccessTokenCache(token.AccessToken, DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, token.ExpiresIn - 60)));
 
-                await WriteCallbackHtmlAsync(stream, "TriffSkills authentication complete. You can close this tab and return to TriffView.");
+                await TryWriteCallbackHtmlAsync(stream, "TriffSkills authentication complete. You can close this tab and return to TriffView.");
                 return;
             }
         }
@@ -591,46 +633,69 @@ internal sealed class TriffSkillsController
     // others are refreshed normally. Nothing here throws out to the caller.
     private async Task RefreshCharactersAsync()
     {
-        // A second request while one is in flight is ignored, not queued. All state mutation
-        // happens on the dispatcher thread like the other controllers, so there is exactly one
-        // writer and this flag is sufficient - concurrency here is cooperative, not locked.
-        if (_refreshInFlight) return;
+        // A request that arrives while a pass is running is deferred, not dropped. Dropping
+        // it is what made the post-auth refresh disappear: StartAuthAsync adds the new
+        // character and then asks for a refresh, and a pass that has already walked past
+        // that point in the list would never fetch it, leaving a row with no skills, no
+        // queue and no error. Recording the request and running one more pass costs at most
+        // one extra round trip per character and always ends with everyone up to date.
+        //
+        // All state mutation happens on the WebView2 dispatcher thread like the other
+        // controllers, so there is exactly one writer and these plain bools are sufficient -
+        // concurrency here is cooperative, not locked.
+        if (_charactersRefreshInFlight)
+        {
+            _charactersRefreshPending = true;
+            return;
+        }
 
-        _refreshInFlight = true;
+        _charactersRefreshInFlight = true;
         PostState(force: true);
         try
         {
-            foreach (var character in _state.Characters.ToArray())
+            do
             {
-                try
-                {
-                    await RefreshOneCharacterAsync(character);
-                }
-                catch (Exception ex)
-                {
-                    // Deliberately broad, and deliberately here rather than in RefreshOneCharacterAsync
-                    // or EsiTransport. RefreshOneCharacterAsync already guards RefreshTokenAsync and
-                    // treats a non-success EsiResponse<T> as a per-character failure via
-                    // CharacterResponseIsUsable, but neither of those covers a 200 response whose body
-                    // doesn't match the expected DTO - schema drift, or a captive-portal/proxy handing
-                    // back an HTML page with a 200 - which throws a JsonException straight out of
-                    // JsonSerializer.Deserialize inside SendEsiAsync. EsiTransport's catch only shields
-                    // transient network exceptions (TriffView.Shared.EsiTransport.IsTransientNetworkException),
-                    // not shape mismatches, and it is shared with TriffFleets, so widening it there would
-                    // change behavior for that tool too. This method's contract is that no single
-                    // character's failure aborts the batch, so this is the backstop that makes that true
-                    // regardless of what RefreshOneCharacterAsync throws.
-                    character.Error = $"Refresh failed unexpectedly: {ex.Message}";
-                    PostError("refresh-characters", $"{character.CharacterName}: {character.Error}");
-                }
+                // Cleared before the pass, so a request that lands mid-pass schedules
+                // another one rather than being absorbed by the pass already underway.
+                _charactersRefreshPending = false;
 
-                _state.Save();
-                PostState(force: true);
+                foreach (var character in _state.Characters.ToArray())
+                {
+                    try
+                    {
+                        await RefreshOneCharacterAsync(character);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Deliberately broad, and deliberately here rather than in RefreshOneCharacterAsync
+                        // or EsiTransport. RefreshOneCharacterAsync already guards RefreshTokenAsync and
+                        // treats a non-success EsiResponse<T> as a per-character failure via
+                        // CharacterResponseIsUsable, but neither of those covers a 200 response whose body
+                        // doesn't match the expected DTO - schema drift, or a captive-portal/proxy handing
+                        // back an HTML page with a 200 - which throws a JsonException straight out of
+                        // JsonSerializer.Deserialize inside SendEsiAsync. EsiTransport's catch only shields
+                        // transient network exceptions (TriffView.Shared.EsiTransport.IsTransientNetworkException),
+                        // not shape mismatches, and it is shared with TriffFleets, so widening it there would
+                        // change behavior for that tool too. This method's contract is that no single
+                        // character's failure aborts the batch, so this is the backstop that makes that true
+                        // regardless of what RefreshOneCharacterAsync throws.
+                        //
+                        // NeedsReauth is deliberately left alone: an unrecognised body says nothing
+                        // about whether the credential is still good.
+                        character.Error = $"Refresh failed unexpectedly: {ex.Message}";
+                        PostError("refresh-characters", $"{character.CharacterName}: {character.Error}");
+                    }
+
+                    _state.Save();
+                    PostState(force: true);
+                }
             }
+            while (_charactersRefreshPending);
         }
         finally
         {
-            _refreshInFlight = false;
+            _charactersRefreshInFlight = false;
+            _charactersRefreshPending = false;
             PostState(force: true);
         }
     }
@@ -647,8 +712,10 @@ internal sealed class TriffSkillsController
         {
             // Token refresh failed. Flag this character; its last-good record stays visible and
             // is rendered stale by its unchanged FetchedUtc.
-            character.NeedsReauth = true;
-            character.Error = $"Sign-in expired - re-authenticate this character. {ex.Message}";
+            _state.ApplyFetchFailure(
+                character.CharacterId,
+                $"Sign-in expired - re-authenticate this character. {ex.Message}",
+                needsReauth: true);
             PostError("refresh-characters", $"{character.CharacterName}: {character.Error}");
             return;
         }
@@ -663,11 +730,10 @@ internal sealed class TriffSkillsController
 
         // Written only once BOTH calls have succeeded, so a character is never left holding
         // fresh skills next to a stale queue.
-        character.TrainedLevels = EsiSkillMapper.ToTrainedLevels(skills.Value);
-        character.Queue = EsiSkillMapper.ToQueue(queue.Value);
-        character.FetchedUtc = DateTimeOffset.UtcNow;
-        character.Error = "";
-        character.NeedsReauth = false;
+        _state.ApplyFetchSuccess(
+            character.CharacterId,
+            EsiSkillMapper.ToTrainedLevels(skills.Value),
+            EsiSkillMapper.ToQueue(queue.Value));
     }
 
     // Returns true when the response can be used. On failure the character's previous record is
@@ -677,23 +743,29 @@ internal sealed class TriffSkillsController
     {
         if (response.IsSuccess) return true;
 
-        if (response.StatusCode == HttpStatusCode.Forbidden)
+        string error;
+        var forbidden = response.StatusCode == HttpStatusCode.Forbidden;
+        // A non-403 failure says nothing about the credential, so it must not clear a
+        // re-auth flag an earlier 403 raised - only a successful fetch (ApplyFetchSuccess)
+        // clears it. This preserves the behaviour of the inline assignment this replaced.
+        var needsReauth = forbidden || character.NeedsReauth;
+        if (forbidden)
         {
             // 403 on a skills endpoint is a scope problem, not a transient one, and is
             // deliberately absent from ShouldRetryEsi's transient list. It surfaces here rather
             // than at refresh time because RefreshTokenAsync performs no scope check
             // (TriffFleetsController.cs:524) - a token minted under a different registration
             // refreshes happily and only fails on the first skills call.
-            character.NeedsReauth = true;
-            character.Error = $"Re-authenticate this character: the stored token does not carry {Scopes}.";
+            error = $"Re-authenticate this character: the stored token does not carry {Scopes}.";
         }
         else
         {
             // Already carries the X-Esi-Error-Limit-Remain / -Reset / Retry-After values that
             // SendEsiAsync appends to Error.
-            character.Error = $"{response.Method} {response.Path} returned {(int)response.StatusCode}: {response.Error}";
+            error = $"{response.Method} {response.Path} returned {(int)response.StatusCode}: {response.Error}";
         }
 
+        _state.ApplyFetchFailure(character.CharacterId, error, needsReauth);
         PostError("refresh-characters", $"{character.CharacterName}: {character.Error}");
         return false;
     }
@@ -725,19 +797,19 @@ internal sealed class TriffSkillsController
     // so this runs when the user asks and at no other time.
     private async Task RefreshPlansAsync()
     {
-        if (_refreshInFlight)
+        if (_plansRefreshInFlight)
         {
-            PostError("plans", "A refresh is already in progress.");
+            PostError("plans", "A plan refresh is already in progress.");
             return;
         }
 
-        _refreshInFlight = true;
+        _plansRefreshInFlight = true;
         PostState(force: true);
 
         var staging = "";
         try
         {
-            var listingJson = await GetGitHubStringAsync(PlansContentsUrl);
+            var listingJson = await GetGitHubStringAsync(PlansContentsUrl, GitHubApiHost, MaxListingBytes);
             var remoteFiles = PlanCatalog.ParseContentsListing(listingJson);
             if (remoteFiles.Count == 0)
             {
@@ -751,7 +823,10 @@ internal sealed class TriffSkillsController
             staging = PlanCache.BeginStaging(TriffSkillsPaths.PlansDir);
             foreach (var remoteFile in remoteFiles)
             {
-                PlanCache.WritePlan(staging, remoteFile.Name, await GetGitHubStringAsync(remoteFile.DownloadUrl));
+                PlanCache.WritePlan(
+                    staging,
+                    remoteFile.Name,
+                    await GetGitHubStringAsync(remoteFile.DownloadUrl, PlanCatalog.RawContentHost, MaxPlanBytes));
             }
 
             PlanCache.Commit(TriffSkillsPaths.PlansDir, staging);
@@ -797,18 +872,31 @@ internal sealed class TriffSkillsController
             {
                 try { PlanCache.Abandon(staging); } catch { }
             }
-            _refreshInFlight = false;
+            _plansRefreshInFlight = false;
             PostState(force: true);
         }
     }
 
-    private static async Task<string> GetGitHubStringAsync(string url)
+    // Every GitHub fetch names the host it expects and the number of bytes it is willing
+    // to read. The listing URL is a compile-time constant, but download_url comes out of
+    // that listing's JSON and therefore chooses its own host: a spoofed or compromised
+    // listing could otherwise point this at an arbitrary server, and ReadAsStringAsync
+    // would buffer whatever it sent until the 20-second HttpClient timeout. The host is
+    // also checked at parse time (PlanCatalog.ParseContentsListing); this is the second
+    // half of the same guard, kept here because only the caller knows the byte budget.
+    private static async Task<string> GetGitHubStringAsync(string url, string expectedHost, int maxBytes)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttps
+            || !string.Equals(uri.Host, expectedHost, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"Refusing to fetch '{url}': expected an https URL on {expectedHost}.");
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
         request.Headers.UserAgent.ParseAdd(GitHubUserAgent);
 
-        using var response = await Http.SendAsync(request);
-        var text = await response.Content.ReadAsStringAsync();
+        using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
         if (!response.IsSuccessStatusCode)
         {
             var rateLimitRemaining = response.Headers.TryGetValues("X-RateLimit-Remaining", out var values)
@@ -820,7 +908,42 @@ internal sealed class TriffSkillsController
             throw new InvalidOperationException($"GET {url} returned {(int)response.StatusCode}.{suffix}");
         }
 
-        return text;
+        return await ReadBoundedStringAsync(response, maxBytes, url);
+    }
+
+    // Reads at most maxBytes and throws rather than truncating - a plan silently cut in
+    // half would parse into a shorter, wrong requirement list, which is worse than a
+    // failed refresh that leaves the previous cache in place. Content-Length is only a
+    // hint (it can be absent, or a lie), so the streaming loop enforces the cap either way.
+    private static async Task<string> ReadBoundedStringAsync(HttpResponseMessage response, int maxBytes, string url)
+    {
+        var declared = response.Content.Headers.ContentLength;
+        if (declared.HasValue && declared.Value > maxBytes)
+        {
+            throw new InvalidDataException($"GET {url} declared {declared.Value} bytes, over the {maxBytes} byte limit.");
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        int read;
+        while ((read = await stream.ReadAsync(chunk)) > 0)
+        {
+            if (buffer.Length + read > maxBytes)
+            {
+                throw new InvalidDataException($"GET {url} returned more than the {maxBytes} byte limit.");
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
+
+        // StreamReader rather than Encoding.UTF8.GetString so a byte-order mark is
+        // consumed rather than left as a U+FEFF on the first character - which is what
+        // HttpContent.ReadAsStringAsync did before, and what SkillPlanParser expects
+        // (a BOM would otherwise become part of the first plan line's skill name).
+        buffer.Position = 0;
+        using var reader = new StreamReader(buffer, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return await reader.ReadToEndAsync();
     }
 
     private void PostState(bool force = false)
@@ -830,15 +953,24 @@ internal sealed class TriffSkillsController
             _state.Normalize();
             var matrix = TriffSkillsMatrix.Build(_state.Characters, _plans, _skillIds.Map);
             var wire = TriffSkillsMatrix.ToWire(matrix);
+            // Every field here is one TriffSkills.tsx reads. Four more were posted and
+            // never consumed - requiredScopes, redirectUri, selectedCharacterId, and a
+            // per-character tokenStored - and they are gone. tokenStored was the one that
+            // cost something: it called CredentialStore.Read for every character on every
+            // PostState, and PostState runs once per character inside the refresh loop
+            // plus twice around it, so N characters meant O(N^2) refresh-token
+            // decryptions per refresh, each producing a managed string this process has
+            // no reason to hold. The other three were free but implied a wire contract
+            // that does not exist; SelectedCharacterId is still tracked and persisted in
+            // state.json, it is simply not something the matrix UI needs.
             var state = new
             {
                 type = "triffskills:state",
                 authConfigured = ResolveClientId() is { Length: > 0 } id && id != "REPLACE_WITH_OUR_DEV_REGISTRATION",
-                requiredScopes = Scopes.Split(' '),
-                redirectUri = RedirectUri,
                 authInProgress = _authInProgress,
-                refreshInFlight = _refreshInFlight,
-                selectedCharacterId = _state.SelectedCharacterId,
+                // One flag for the UI: it disables both refresh buttons while either
+                // operation runs, even though the two are now independent internally.
+                refreshInFlight = _charactersRefreshInFlight || _plansRefreshInFlight,
                 characters = _state.Characters.Select(character => new
                 {
                     character.CharacterId,
@@ -848,7 +980,6 @@ internal sealed class TriffSkillsController
                     character.FetchedUtc,
                     character.Error,
                     character.NeedsReauth,
-                    tokenStored = !string.IsNullOrWhiteSpace(CredentialStore.Read(RefreshTokenTarget(character.CharacterId))),
                 }).ToArray(),
                 plans = wire.Plans,
                 matrix = wire.Matrix,

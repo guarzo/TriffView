@@ -9,6 +9,12 @@ internal sealed record RemotePlanFile(string Name, string DownloadUrl);
 
 internal static class PlanCatalog
 {
+    // Plan bodies are only ever fetched from GitHub's raw host. download_url is the one
+    // field in this listing that chooses a server, so it is validated here, at the point
+    // the untrusted document is parsed, rather than being trusted all the way down to
+    // HttpClient.
+    public const string RawContentHost = "raw.githubusercontent.com";
+
     // Filters a GET /repos/{owner}/{repo}/contents/{path} response down to the plan
     // files worth downloading. Directory entries carry type "dir" and a null
     // download_url; non-.txt files (the repo currently ships a README.md) are not plans.
@@ -40,10 +46,28 @@ internal static class PlanCatalog
                 : null;
             if (string.IsNullOrWhiteSpace(downloadUrl)) continue;
 
+            // Throws rather than skipping. A .txt entry whose download_url points somewhere
+            // other than the raw host is not a plan this listing forgot to fill in - it is a
+            // listing that is not the one we pinned, and abandoning the whole refresh leaves
+            // the previously cached plans in place. Same doctrine as the malformed-JSON throw
+            // above: a silent skip would look like "upstream removed that plan".
+            if (!IsRawContentUrl(downloadUrl!))
+            {
+                throw new InvalidDataException(
+                    $"The GitHub contents listing pointed '{name}' at '{downloadUrl}', which is not on {RawContentHost}.");
+            }
+
             files.Add(new RemotePlanFile(name, downloadUrl!));
         }
 
         return files;
+    }
+
+    public static bool IsRawContentUrl(string url)
+    {
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            && uri.Scheme == Uri.UriSchemeHttps
+            && string.Equals(uri.Host, RawContentHost, StringComparison.OrdinalIgnoreCase);
     }
 }
 
