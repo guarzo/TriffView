@@ -572,7 +572,28 @@ internal sealed class TriffSkillsController
         {
             foreach (var character in _state.Characters.ToArray())
             {
-                await RefreshOneCharacterAsync(character);
+                try
+                {
+                    await RefreshOneCharacterAsync(character);
+                }
+                catch (Exception ex)
+                {
+                    // Deliberately broad, and deliberately here rather than in RefreshOneCharacterAsync
+                    // or EsiTransport. RefreshOneCharacterAsync already guards RefreshTokenAsync and
+                    // treats a non-success EsiResponse<T> as a per-character failure via
+                    // CharacterResponseIsUsable, but neither of those covers a 200 response whose body
+                    // doesn't match the expected DTO - schema drift, or a captive-portal/proxy handing
+                    // back an HTML page with a 200 - which throws a JsonException straight out of
+                    // JsonSerializer.Deserialize inside SendEsiAsync. EsiTransport's catch only shields
+                    // transient network exceptions (TriffView.Shared.EsiTransport.IsTransientNetworkException),
+                    // not shape mismatches, and it is shared with TriffFleets, so widening it there would
+                    // change behavior for that tool too. This method's contract is that no single
+                    // character's failure aborts the batch, so this is the backstop that makes that true
+                    // regardless of what RefreshOneCharacterAsync throws.
+                    character.Error = $"Refresh failed unexpectedly: {ex.Message}";
+                    PostError("refresh-characters", $"{character.CharacterName}: {character.Error}");
+                }
+
                 _state.Save();
                 PostState(force: true);
             }
