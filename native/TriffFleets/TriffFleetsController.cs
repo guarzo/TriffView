@@ -12,6 +12,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Windows.Threading;
+using TriffView.Shared;
 using Forms = System.Windows.Forms;
 
 namespace TriffView.TriffFleets;
@@ -22,15 +23,12 @@ internal sealed class TriffFleetsController
     private const string RedirectUri = "http://127.0.0.1:51777/trifffleets/callback/";
     private const string AuthorizeEndpoint = "https://login.eveonline.com/v2/oauth/authorize";
     private const string TokenEndpoint = "https://login.eveonline.com/v2/oauth/token";
-    private const string EsiBaseUrl = "https://esi.evetech.net/latest";
     private const string Scopes = "esi-fleets.read_fleet.v1 esi-fleets.write_fleet.v1";
     private const int WriteThrottleMs = 250;
     private const int MemberWriteConcurrency = 4;
     private const int MemberMoveSettleBeforePruneMs = 1200;
     private const int StructureSettleBeforeMemberReadMs = 1000;
     private const int CleanupDeleteConcurrency = 6;
-    private const int EsiTransientMaxAttempts = 3;
-    private const int EsiTransientBaseDelayMs = 650;
     private const int FleetStructureNameMaxLength = 10;
     private const string BenchWingName = "Bench";
     private const string BenchSquadName = "Waiting";
@@ -558,7 +556,7 @@ internal sealed class TriffFleetsController
         var text = await response.Content.ReadAsStringAsync();
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException($"EVE SSO returned {(int)response.StatusCode}: {ReadError(text)}");
+            throw new InvalidOperationException($"EVE SSO returned {(int)response.StatusCode}: {EsiTransport.ReadError(text)}");
         }
 
         return JsonSerializer.Deserialize<TokenResponse>(text, JsonOptions)
@@ -1502,119 +1500,10 @@ internal sealed class TriffFleetsController
         return result;
     }
 
-    private async Task<EsiResponse<T>> SendEsiAsync<T>(HttpMethod method, string path, string? token, object? body = null)
-    {
-        var url = path.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? path : $"{EsiBaseUrl}{path}";
-        var bodyJson = body == null ? null : JsonSerializer.Serialize(body, JsonOptions);
-        Exception? lastException = null;
-
-        for (var attempt = 1; attempt <= EsiTransientMaxAttempts; attempt++)
-        {
-            try
-            {
-                using var request = new HttpRequestMessage(method, url);
-                request.Headers.UserAgent.ParseAdd("TriffView/1.0 TriffFleets");
-                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                if (!string.IsNullOrWhiteSpace(token))
-                {
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                }
-                if (bodyJson != null)
-                {
-                    request.Content = new StringContent(bodyJson, Encoding.UTF8, "application/json");
-                }
-
-                using var response = await Http.SendAsync(request);
-                var text = await response.Content.ReadAsStringAsync();
-                var error = response.IsSuccessStatusCode ? "" : ReadError(text);
-                var esiRemain = HeaderValue(response, "X-Esi-Error-Limit-Remain");
-                var esiReset = HeaderValue(response, "X-Esi-Error-Limit-Reset");
-                var retryAfter = HeaderValue(response, "Retry-After");
-                if (!string.IsNullOrWhiteSpace(esiRemain) || !string.IsNullOrWhiteSpace(esiReset) || !string.IsNullOrWhiteSpace(retryAfter))
-                {
-                    error = $"{error} ESI error limit remain={esiRemain}, reset={esiReset}, retry-after={retryAfter}".Trim();
-                }
-
-                if (!response.IsSuccessStatusCode && ShouldRetryEsi(method, path, response.StatusCode, attempt))
-                {
-                    await Task.Delay(RetryDelay(attempt, retryAfter));
-                    continue;
-                }
-
-                T? value = default;
-                if (response.IsSuccessStatusCode && !string.IsNullOrWhiteSpace(text) && typeof(T) != typeof(object))
-                {
-                    value = JsonSerializer.Deserialize<T>(text, JsonOptions);
-                }
-
-                return new EsiResponse<T>(response.StatusCode, value, error, method.Method, path);
-            }
-            catch (Exception ex) when (IsTransientNetworkException(ex) && attempt < EsiTransientMaxAttempts)
-            {
-                lastException = ex;
-                await Task.Delay(RetryDelay(attempt, ""));
-            }
-            catch (Exception ex) when (IsTransientNetworkException(ex))
-            {
-                lastException = ex;
-                break;
-            }
-        }
-
-        return new EsiResponse<T>(
-            HttpStatusCode.ServiceUnavailable,
-            default,
-            lastException?.Message ?? "ESI request failed after transient retries.",
-            method.Method,
-            path
-        );
-    }
-
-    private static bool ShouldRetryEsi(HttpMethod method, string path, HttpStatusCode statusCode, int attempt)
-    {
-        if (attempt >= EsiTransientMaxAttempts) return false;
-
-        var status = (int)statusCode;
-        var transient = status is 408 or 420 or 429 or 500 or 502 or 503 or 504;
-        if (!transient) return false;
-
-        if (method == HttpMethod.Get || method == HttpMethod.Put) return true;
-        return method == HttpMethod.Post && path.StartsWith("/universe/ids/", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static TimeSpan RetryDelay(int attempt, string retryAfter)
-    {
-        if (int.TryParse(retryAfter, out var seconds) && seconds > 0)
-        {
-            return TimeSpan.FromSeconds(Math.Min(seconds, 8));
-        }
-
-        return TimeSpan.FromMilliseconds(EsiTransientBaseDelayMs * attempt);
-    }
-
-    private static bool IsTransientNetworkException(Exception ex)
-    {
-        return ex is HttpRequestException or TaskCanceledException or SocketException;
-    }
-
-    private static string HeaderValue(HttpResponseMessage response, string name)
-    {
-        return response.Headers.TryGetValues(name, out var values) ? string.Join(",", values) : "";
-    }
-
-    private static string ReadError(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return "No response body.";
-        try
-        {
-            var node = JsonNode.Parse(text)?.AsObject();
-            return node?["error"]?.GetValue<string>() ?? text;
-        }
-        catch
-        {
-            return text;
-        }
-    }
+    // The transport moved to TriffView.Shared.EsiTransport so TriffSkills can share the
+    // same retry policy. This wrapper keeps every existing call site unchanged.
+    private static Task<EsiResponse<T>> SendEsiAsync<T>(HttpMethod method, string path, string? token, object? body = null)
+        => EsiTransport.SendAsync<T>(Http, JsonOptions, "TriffView/1.0 TriffFleets", method, path, token, body);
 
     private LiveFleetInfo RequireLiveFleet()
     {
@@ -2117,19 +2006,6 @@ internal sealed class UniverseIdName
 
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";
-}
-
-internal sealed record EsiResponse<T>(HttpStatusCode StatusCode, T? Value, string Error, string Method, string Path)
-{
-    public bool IsSuccess => (int)StatusCode is >= 200 and <= 299;
-
-    public void ThrowIfFailed()
-    {
-        if (!IsSuccess)
-        {
-            throw new InvalidOperationException($"{Method} {Path} returned {(int)StatusCode}: {Error}");
-        }
-    }
 }
 
 internal static class CredentialStore
