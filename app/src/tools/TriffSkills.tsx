@@ -31,6 +31,7 @@ type MatrixEntry = {
 };
 
 type TriffSkillsState = {
+  authConfigured: boolean;
   characters: SkillCharacter[];
   plans: SkillPlanSummary[];
   matrix: MatrixEntry[];
@@ -40,6 +41,7 @@ type TriffSkillsState = {
 };
 
 const EMPTY_STATE: TriffSkillsState = {
+  authConfigured: false,
   characters: [],
   plans: [],
   matrix: [],
@@ -57,7 +59,7 @@ const READINESS_META: Record<Readiness, { glyph: string; label: string; classNam
 const READINESS_ORDER: Readiness[] = ["Ready", "Training", "Missing"];
 
 const REAUTH_HINT =
-  "Needs re-authentication for esi-skills.read_skills.v1 and esi-skills.read_skillqueue.v1.";
+  "Needs re-authentication for esi-skills.read_skills.v1 and esi-skills.read_skillqueue.v1. Use Add character to reauthorize.";
 
 function send(type: string, payload: Record<string, unknown> = {}) {
   postNative({ type, ...payload });
@@ -159,6 +161,12 @@ export default function TriffSkills() {
               Refresh plans
             </button>
           </div>
+          {!state.authConfigured ? (
+            <div className="triffview-warning">
+              <strong>SSO client ID missing.</strong>
+              <span>Set the built-in TriffView EVE SSO client ID before authenticating a character.</span>
+            </div>
+          ) : null}
           <div className="triffskills-legend">
             {READINESS_ORDER.map((key) => (
               <span key={key} className={READINESS_META[key].className}>
@@ -323,7 +331,10 @@ function MatrixCell({ entry, stale }: { entry: MatrixEntry | null; stale: boolea
     );
   }
 
-  const meta = READINESS_META[entry.readiness] || READINESS_META.Missing;
+  // A readiness value outside the three known strings is an anomaly, not a
+  // confident "Missing" - route it to the same unscored/unknown vocabulary
+  // the null-entry branch above uses, rather than silently reading as Missing.
+  const meta = READINESS_META[entry.readiness] ?? { glyph: "?", label: "Unknown", className: "is-unscored" };
   const missing = entry.missingSkills || [];
   const unknown = entry.unknownSkills || [];
   const eta = formatUtc(entry.estimatedFinishUtc);
