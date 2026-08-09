@@ -699,8 +699,13 @@ internal sealed class TriffSkillsController
         }
         catch (Exception ex)
         {
-            _plans = new List<SkillPlan>();
-            _plansFetchedUtc = null;
+            // Deliberately leaves _plans and _plansFetchedUtc exactly as they were.
+            // LoadAll now isolates a bad file per-file (PlanCache.cs), so a throw out of
+            // here is a directory-level failure (e.g. Recover's Directory.Move racing an
+            // antivirus scan) rather than one bad plan. This method also runs after a
+            // successful RefreshPlansAsync has already populated a good in-memory list -
+            // discarding that on a later, possibly transient, re-read would throw away
+            // plans the user could still use. Surface the error; keep what was loaded.
             PostError("plans", $"Could not read the cached plans: {ex.Message}");
         }
     }

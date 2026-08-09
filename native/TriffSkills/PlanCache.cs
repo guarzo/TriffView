@@ -123,8 +123,18 @@ internal static class PlanCache
     public static void Abandon(string stagingDir) => DeleteIfExists(stagingDir);
 
     // Parses every cached .txt into a plan named after its file stem. A file that
-    // cannot be read is skipped rather than failing the whole load - one unreadable
+    // cannot be read or parsed is skipped rather than failing the whole load - one bad
     // file must not cost the user every other plan.
+    //
+    // Deliberately broad: File.ReadAllText can throw UnauthorizedAccessException (a
+    // permission-denied ACL, a read-only/system attribute, or the "directory where a
+    // file was expected" case) as readily as IOException (a lock), and neither derives
+    // from the other. SkillPlanParser.Parse tolerates malformed lines internally but is
+    // not guaranteed against every pathological input. This is the same per-file
+    // isolation contract RefreshCharactersAsync's per-character catch enforces
+    // (TriffSkillsController.cs) - one bad item must degrade by exactly one item, so the
+    // catch here has to cover whatever that one item can throw, not just the case that
+    // was easiest to name.
     public static IReadOnlyList<SkillPlan> LoadAll(string plansDir)
     {
         Recover(plansDir);
@@ -137,9 +147,10 @@ internal static class PlanCache
             {
                 plans.Add(SkillPlanParser.Parse(Path.GetFileNameWithoutExtension(path), File.ReadAllText(path)));
             }
-            catch (IOException)
+            catch (Exception)
             {
-                // Locked or unreadable file: skip it, keep the rest.
+                // Unreadable (locked, permission-denied, missing) or unparseable: skip
+                // this one file, keep the rest.
             }
         }
 
