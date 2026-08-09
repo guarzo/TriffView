@@ -4776,6 +4776,111 @@ button:disabled {
   color: var(--tv-warning-text);
 }
 
+/* Import-from-clipboard modal. Reuses the .triffview-modal-backdrop / .triffview-hotkey-modal
+   shell (see EveSettings.tsx:162-193) - only the body/footer layout below is new, mirroring
+   .eve-settings-modal-body / .eve-settings-modal-actions above. */
+.triffskills-import-modal {
+  width: min(480px, calc(100% - 42px));
+}
+
+.triffskills-import-body {
+  display: flex;
+  max-height: 320px;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.triffskills-import-name {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.triffskills-import-name span {
+  color: var(--tv-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.triffskills-import-name input {
+  min-height: 28px;
+  border: 1px solid var(--tv-border);
+  border-radius: 0;
+  background: var(--tv-control-bg);
+  color: var(--tv-text);
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.triffskills-import-name input:focus {
+  border-color: var(--tv-accent);
+  outline: none;
+}
+
+.triffskills-import-hint {
+  color: var(--tv-danger-text);
+  font-size: 11px;
+}
+
+.triffskills-import-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--tv-border-muted);
+  background: rgba(var(--tv-surface-rgb), 0.72);
+  padding: 8px;
+}
+
+.triffskills-import-preview strong {
+  color: var(--tv-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.triffskills-import-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  border-top: 1px solid var(--tv-border-muted);
+  padding: 10px 12px;
+}
+
+.triffskills-import-actions button {
+  min-height: 28px;
+  border: 1px solid var(--tv-border);
+  border-radius: 0;
+  background: var(--tv-control-bg);
+  color: var(--tv-text);
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.triffskills-import-actions button:hover {
+  border-color: var(--tv-accent);
+  color: var(--tv-white);
+}
+
+.triffskills-import-actions button:disabled {
+  cursor: not-allowed;
+  color: var(--tv-disabled);
+}
+
+.triffskills-import-actions .primary-action {
+  border-color: var(--tv-accent);
+  background: var(--tv-accent-bg);
+}
+
+.triffskills-import-actions .danger-action {
+  border-color: var(--tv-danger-border-soft);
+  background: rgba(var(--tv-danger-bg-rgb), 0.35);
+  color: var(--tv-danger-text);
+}
+
 @media (max-width: 980px) {
   .triffskills-grid-label-col {
     width: 150px;

@@ -158,6 +158,9 @@ internal sealed class TriffSkillsController
             case "triffskills:open-plans-folder":
                 OpenPlansFolder();
                 return true;
+            case "triffskills:import-plan":
+                _ = ImportPlanAsync(message);
+                return true;
             default:
                 return false;
         }
@@ -868,8 +871,9 @@ internal sealed class TriffSkillsController
     // whose plan list is empty until you populate a folder you cannot locate looks broken.
     // Created first so the button works on a fresh install, where nothing has written it
     // yet. Same launch and error-reporting shape as EveSettingsController.ShowInFolder
-    // (:528) - no CanRevealPath equivalent is needed, since the path is a constant here
-    // rather than something the web message chose.
+    // (:528). Unlike ImportPlanAsync below, there is no name to validate here: this call
+    // takes no argument from the web message, so PlansDir itself is the only path in
+    // play and CanRevealPath-style validation has nothing to check.
     private void OpenPlansFolder()
     {
         try
@@ -882,6 +886,78 @@ internal sealed class TriffSkillsController
         {
             PostError("open-plans-folder", ex.Message);
         }
+    }
+
+    // Writes a plan copied from EVE's in-game skill plan window to PlansDir. Nothing here
+    // re-parses the clipboard text: SkillPlanParser reads plan files at LoadPlans time
+    // (via ReloadPlansAsync below), so contents is written verbatim and whatever the game
+    // put on the clipboard is exactly what ends up on disk and what gets parsed.
+    //
+    // The name itself is untrusted - it arrives in a web message, so the renderer's own
+    // planNameHint check (TriffSkills.tsx) cannot be assumed to have run. PlanNameValidator
+    // (PlanNameValidator.cs) is the authoritative half of that pair and is split into its
+    // own file so it can be exercised in .scratch-tests without linking this controller's
+    // HttpClient/CredentialStore dependencies.
+    private async Task ImportPlanAsync(JsonObject? message)
+    {
+        var name = message?["name"]?.GetValue<string>() ?? "";
+        var contents = message?["contents"]?.GetValue<string>() ?? "";
+        var replace = message?["replace"]?.GetValue<bool>() ?? false;
+
+        if (!PlanNameValidator.TryValidate(name, out var nameError))
+        {
+            PostError("import-plan", nameError);
+            return;
+        }
+
+        string fullPath;
+        try
+        {
+            Directory.CreateDirectory(TriffSkillsPaths.PlansDir);
+            fullPath = Path.GetFullPath(Path.Combine(TriffSkillsPaths.PlansDir, name + ".txt"));
+        }
+        catch (Exception ex)
+        {
+            PostError("import-plan", ex.Message);
+            return;
+        }
+
+        if (!PlanNameValidator.IsWithin(fullPath, TriffSkillsPaths.PlansDir))
+        {
+            // PlanNameValidator.TryValidate should already have rejected anything that
+            // gets here - this is the backstop, not the primary defense, so the message
+            // stays generic rather than trying to explain a case that should be
+            // unreachable.
+            PostError("import-plan", "That plan name is not allowed.");
+            return;
+        }
+
+        // Checked here, not only in TriffSkills.tsx's own plan list: that list can be
+        // stale (another tool instance, a file dropped in by hand, a prior import), so
+        // the disk is the only source of truth for whether this would overwrite
+        // something. Neither a silent overwrite nor an auto-rename happens here - a
+        // collision is reported back so the dialog can offer Replace as a distinct,
+        // deliberate action instead.
+        if (File.Exists(fullPath) && !replace)
+        {
+            _postToHud(new { type = "triffskills:import-collision", name });
+            return;
+        }
+
+        try
+        {
+            await File.WriteAllTextAsync(fullPath, contents);
+        }
+        catch (Exception ex)
+        {
+            PostError("import-plan", ex.Message);
+            return;
+        }
+
+        // Reuses the same reload path Reload plans uses: re-read the folder, post state,
+        // then best-effort resolve any skill names the ID cache has not seen yet.
+        await ReloadPlansAsync();
+        _postToHud(new { type = "triffskills:import-done", name });
     }
 
     private void PostState(bool force = false)

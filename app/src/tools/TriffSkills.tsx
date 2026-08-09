@@ -67,6 +67,95 @@ type DetailRow = {
   entry: MatrixEntry | null;
 };
 
+// A client-side, preview-only echo of SkillPlanParser.Parse (SkillPlanParser.cs).
+// This is advisory: it exists so the import modal can show a count and a few
+// sample lines before anything is sent, not to decide what gets written.
+// TriffSkillsController re-parses nothing - it writes the clipboard text
+// verbatim - so a difference between this and the real parser affects only the
+// preview, never the saved file.
+type ImportPreview = { count: number; lines: string[] };
+
+const PLAN_ROMAN_LEVELS: Record<string, number> = { I: 1, II: 2, III: 3, IV: 4, V: 5 };
+
+function parsePlanPreview(text: string): ImportPreview | null {
+  const order: string[] = [];
+  const levels = new Map<string, number>();
+
+  for (const rawLine of (text || "").split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const lastSpace = line.lastIndexOf(" ");
+    if (lastSpace < 0) continue;
+
+    const skillName = line.slice(0, lastSpace);
+    const token = line.slice(lastSpace + 1);
+    let level: number | null = null;
+    if (Object.prototype.hasOwnProperty.call(PLAN_ROMAN_LEVELS, token)) {
+      level = PLAN_ROMAN_LEVELS[token];
+    } else if (/^\d+$/.test(token)) {
+      level = Number(token);
+    }
+    if (level === null) continue;
+
+    const existing = levels.get(skillName);
+    if (existing === undefined) order.push(skillName);
+    if (existing === undefined || level > existing) levels.set(skillName, level);
+  }
+
+  if (!order.length) return null;
+  return {
+    count: order.length,
+    lines: order.slice(0, 5).map((skillName) => `${skillName} ${levels.get(skillName)}`),
+  };
+}
+
+const WINDOWS_RESERVED_PLAN_NAMES = new Set([
+  "CON",
+  "PRN",
+  "AUX",
+  "NUL",
+  "COM1",
+  "COM2",
+  "COM3",
+  "COM4",
+  "COM5",
+  "COM6",
+  "COM7",
+  "COM8",
+  "COM9",
+  "LPT1",
+  "LPT2",
+  "LPT3",
+  "LPT4",
+  "LPT5",
+  "LPT6",
+  "LPT7",
+  "LPT8",
+  "LPT9",
+]);
+
+const MAX_PLAN_NAME_LENGTH = 120;
+
+// Advisory only, same reasoning as parsePlanPreview above: a friendly message as the
+// user types, not the boundary. TriffSkillsController.TryValidatePlanName runs the
+// authoritative version of these same rules against the actual web message, because
+// a renderer-side check can't be trusted to have run at all.
+function planNameHint(name: string): string {
+  if (!name) return "";
+  if (name.length > MAX_PLAN_NAME_LENGTH) return `Name is too long (max ${MAX_PLAN_NAME_LENGTH} characters).`;
+  if (name !== name.trim()) return "Name can't start or end with a space.";
+  if (name.endsWith(".")) return "Name can't end with a period.";
+  if (/[\\/:*?"<>|]/.test(name) || name.includes("..")) {
+    return `Name can't contain \\ / : * ? " < > | or "..".`;
+  }
+  const stem = name.split(".")[0];
+  if (WINDOWS_RESERVED_PLAN_NAMES.has(stem.toUpperCase())) {
+    return `"${stem}" is a reserved Windows device name.`;
+  }
+  return "";
+}
+
 const EMPTY_STATE: TriffSkillsState = {
   authConfigured: false,
   characters: [],
@@ -175,6 +264,17 @@ export default function TriffSkills() {
   const [confirmForgetId, setConfirmForgetId] = useState(0);
   const [selection, setSelection] = useState<Selection>(null);
 
+  // Set when the user presses "Import from clipboard" and cleared the moment a
+  // "clipboard" reply is consumed. read-clipboard/clipboard is a generic pair every
+  // tool shares (MainWindow.xaml.cs:661,853), so without this flag a clipboard
+  // event some other tool caused would open this dialog too.
+  const [pendingClipboardImport, setPendingClipboardImport] = useState(false);
+  const [importDraft, setImportDraft] = useState<{ contents: string; preview: ImportPreview } | null>(null);
+  const [importName, setImportName] = useState("");
+  const [importCollision, setImportCollision] = useState(false);
+  const [importSubmitError, setImportSubmitError] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+
   useEffect(() => {
     const unsubscribe = onNativeMessage((message) => {
       if (message?.type === "triffskills:state") {
@@ -223,9 +323,12 @@ export default function TriffSkills() {
   // Escape is the third way out, and the one keyboard users reach for. Cells are
   // buttons reached by tab, so a mouse-only dismiss would leave them in the same
   // dead end. Bound only while something is selected, so it never swallows an
-  // Escape the rest of the app might want.
+  // Escape the rest of the app might want - and skipped entirely while the import
+  // modal is open, so its own Escape handler below is the only one that fires
+  // instead of both firing off the same keydown and closing the modal *and*
+  // clearing the grid selection behind it.
   useEffect(() => {
-    if (!selection) return;
+    if (!selection || importDraft) return;
     function onKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       event.stopPropagation();
@@ -234,13 +337,101 @@ export default function TriffSkills() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selection]);
+  }, [selection, importDraft]);
 
   function confirmForget(characterId: number) {
     send("triffskills:forget-character", { characterId });
     setConfirmForgetId(0);
     setSelection(null);
   }
+
+  function startClipboardImport() {
+    setPendingClipboardImport(true);
+    send("read-clipboard");
+  }
+
+  function closeImportModal() {
+    setImportDraft(null);
+    setImportName("");
+    setImportCollision(false);
+    setImportSubmitError("");
+    setImportBusy(false);
+  }
+
+  function submitImport(replace: boolean) {
+    if (!importDraft) return;
+    const trimmedName = importName.trim();
+    if (!trimmedName) return;
+    setImportBusy(true);
+    setImportSubmitError("");
+    setImportCollision(false);
+    send("triffskills:import-plan", { name: trimmedName, contents: importDraft.contents, replace });
+  }
+
+  // read-clipboard is a generic request every tool can make (MainWindow.xaml.cs:661),
+  // and its "clipboard" reply is broadcast to all of them (PostAppEvent). Listening
+  // only while pendingClipboardImport is set - and clearing it the moment a reply
+  // arrives - is what stops a clipboard read some other tool triggered from opening
+  // this dialog.
+  useEffect(() => {
+    if (!pendingClipboardImport) return;
+    const unsubscribe = onNativeMessage((message) => {
+      if (message?.type !== "clipboard") return;
+      setPendingClipboardImport(false);
+      const text = typeof message.text === "string" ? message.text : "";
+      const preview = parsePlanPreview(text);
+      if (!preview) {
+        setError(
+          'TriffSkills: Clipboard did not look like a skill plan. Expected one skill per line, name then level (e.g. "Caldari Frigate III").',
+        );
+        return;
+      }
+      setImportDraft({ contents: text, preview });
+      setImportName("");
+      setImportCollision(false);
+      setImportSubmitError("");
+      setImportBusy(false);
+    });
+    return unsubscribe;
+  }, [pendingClipboardImport]);
+
+  // triffskills:import-collision, triffskills:import-done, and the "import-plan"
+  // triffskills:error all only ever arrive in response to the triffskills:import-plan
+  // message this modal itself sends, so - same reasoning as the clipboard listener
+  // above - this only listens while there is a draft open to react to.
+  useEffect(() => {
+    if (!importDraft) return;
+    const unsubscribe = onNativeMessage((message) => {
+      if (message?.type === "triffskills:import-collision") {
+        setImportBusy(false);
+        setImportCollision(true);
+        return;
+      }
+      if (message?.type === "triffskills:import-done") {
+        closeImportModal();
+        return;
+      }
+      if (message?.type === "triffskills:error" && message.action === "import-plan") {
+        setImportBusy(false);
+        setImportSubmitError(message.message || "Could not import the plan.");
+      }
+    });
+    return unsubscribe;
+  }, [importDraft]);
+
+  // Bound only while the import modal is open, so Escape closes the modal instead
+  // of falling through to the grid-selection handler above (which is itself
+  // skipped for exactly this reason while importDraft is set).
+  useEffect(() => {
+    if (!importDraft) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      closeImportModal();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [importDraft]);
 
   return (
     <div className="triffview-settings triffskills" data-hud-scroll data-hud-select-text-controls="true">
@@ -273,6 +464,9 @@ export default function TriffSkills() {
             </button>
             <button type="button" onClick={() => send("triffskills:refresh-plans")}>
               Reload plans
+            </button>
+            <button type="button" onClick={startClipboardImport} disabled={pendingClipboardImport}>
+              {pendingClipboardImport ? "Reading clipboard..." : "Import from clipboard"}
             </button>
           </div>
           {!state.authConfigured ? (
@@ -445,6 +639,20 @@ export default function TriffSkills() {
           ) : null}
         </div>
       </section>
+
+      {importDraft ? (
+        <ImportPlanModal
+          draft={importDraft}
+          name={importName}
+          onNameChange={setImportName}
+          collision={importCollision}
+          submitError={importSubmitError}
+          busy={importBusy}
+          onCancel={closeImportModal}
+          onConfirm={() => submitImport(false)}
+          onReplace={() => submitImport(true)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -684,6 +892,105 @@ function CellDetail({ entry, stale }: { entry: MatrixEntry | null; stale: boolea
           </ul>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// Matches the established modal pattern at EveSettings.tsx:162-193 exactly:
+// .triffview-modal-backdrop + .triffview-hotkey-modal, a header (h3 + p + Close), a
+// body with data-hud-scroll, and a footer with Cancel and a primary-action.
+function ImportPlanModal({
+  draft,
+  name,
+  onNameChange,
+  collision,
+  submitError,
+  busy,
+  onCancel,
+  onConfirm,
+  onReplace,
+}: {
+  draft: { contents: string; preview: ImportPreview };
+  name: string;
+  onNameChange: (value: string) => void;
+  collision: boolean;
+  submitError: string;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  onReplace: () => void;
+}) {
+  const trimmedName = name.trim();
+  const hint = planNameHint(name);
+  const remaining = draft.preview.count - draft.preview.lines.length;
+
+  return (
+    <div className="triffview-modal-backdrop">
+      <section className="triffview-hotkey-modal triffskills-import-modal">
+        <header>
+          <div>
+            <h3>Import plan from clipboard</h3>
+            <p>
+              {draft.preview.count === 1 ? "1 skill parsed." : `${draft.preview.count} skills parsed.`} Name the plan
+              to save it.
+            </p>
+          </div>
+          <button type="button" onClick={onCancel}>
+            Close
+          </button>
+        </header>
+
+        <div className="triffskills-import-body" data-hud-scroll>
+          <label className="triffskills-import-name">
+            <span>Plan name</span>
+            <input
+              autoFocus
+              value={name}
+              placeholder="e.g. Marauder V"
+              onChange={(event) => onNameChange(event.target.value)}
+            />
+          </label>
+          {hint ? <small className="triffskills-import-hint">{hint}</small> : null}
+
+          <div className="triffskills-import-preview">
+            <strong>Preview</strong>
+            <ul className="triffskills-skill-list">
+              {draft.preview.lines.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+            {remaining > 0 ? <small>...and {remaining} more</small> : null}
+          </div>
+
+          {collision ? (
+            <div className="triffview-warning">
+              <strong>&quot;{trimmedName}&quot; already exists.</strong>
+              <span>Replace it, or Cancel and pick a different name.</span>
+            </div>
+          ) : null}
+
+          {submitError ? (
+            <div className="triffview-warning">
+              <span>{submitError}</span>
+            </div>
+          ) : null}
+        </div>
+
+        <footer className="triffskills-import-actions">
+          <button type="button" onClick={onCancel}>
+            Cancel
+          </button>
+          {collision ? (
+            <button type="button" className="danger-action" onClick={onReplace} disabled={busy}>
+              Replace
+            </button>
+          ) : (
+            <button type="button" className="primary-action" onClick={onConfirm} disabled={busy || !trimmedName || Boolean(hint)}>
+              {busy ? "Importing..." : "Import"}
+            </button>
+          )}
+        </footer>
+      </section>
     </div>
   );
 }
