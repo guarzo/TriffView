@@ -2,13 +2,15 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows.Threading;
-using TriffView.TriffFleets;
+using TriffView.Shared;        // EsiTransport, EsiResponse<T> (Task 0b)
+using TriffView.TriffFleets;   // CredentialStore, TokenResponse - internal, same assembly
 
 namespace TriffView.TriffSkills;
 
@@ -30,6 +32,7 @@ internal sealed class TriffSkillsController
     private const string AuthorizeEndpoint = "https://login.eveonline.com/v2/oauth/authorize";
     private const string TokenEndpoint = "https://login.eveonline.com/v2/oauth/token";
     private const string Scopes = "esi-skills.read_skills.v1 esi-skills.read_skillqueue.v1";
+    private const string UserAgent = "TriffView/1.0 TriffSkills";
 
     // Resolution order, first non-empty wins:
     //   1. %APPDATA%\TriffHud\TriffSkills\client-id.txt   (trimmed; a deliberate,
@@ -76,6 +79,7 @@ internal sealed class TriffSkillsController
     private readonly Dispatcher _dispatcher;
     private readonly Action<object> _postToHud;
     private readonly TriffSkillsState _state;
+    private readonly SkillIdCache _skillIds;
     private readonly Dictionary<long, AccessTokenCache> _accessTokens = new();
     private string _lastPostedStateJson = "";
     private bool _authInProgress;
@@ -86,6 +90,28 @@ internal sealed class TriffSkillsController
         _dispatcher = dispatcher;
         _postToHud = postToHud;
         _state = TriffSkillsState.Load();
+        _skillIds = SkillIdCache.Load();
+    }
+
+    // The transport, retry policy, and EsiResponse<T> are shared with TriffFleets
+    // (native/Shared/EsiTransport.cs, extracted in Task 0b). This wrapper binds the three
+    // per-tool arguments - our HttpClient, our serializer options, and our User-Agent
+    // product token - so call sites read the same as TriffFleets' do.
+    private static Task<EsiResponse<T>> SendEsiAsync<T>(HttpMethod method, string path, string? token, object? body = null)
+        => EsiTransport.SendAsync<T>(Http, JsonOptions, UserAgent, method, path, token, body);
+
+    // Resolves one batch of skill names through POST /universe/ids/, the same endpoint
+    // TriffFleets already calls for character names (TriffFleetsController.cs:1486).
+    // Unauthenticated by design - name resolution needs no token, so it works even for a
+    // character whose credential has expired.
+    private async Task<IReadOnlyList<SkillsUniverseIdName>> ResolveNamesBatchAsync(IReadOnlyList<string> batch)
+    {
+        var response = await SendEsiAsync<SkillsUniverseIdsResponse>(HttpMethod.Post, "/universe/ids/", token: null, body: batch);
+        response.ThrowIfFailed();
+
+        // Names ESI does not recognise are simply omitted from inventory_types. They stay out
+        // of the cache and surface as UnknownSkills on the plan.
+        return response.Value?.InventoryTypes ?? new List<SkillsUniverseIdName>();
     }
 
     public bool HandleWebMessage(string type, JsonObject? message)
@@ -100,6 +126,9 @@ internal sealed class TriffSkillsController
                 return true;
             case "triffskills:forget-character":
                 ForgetCharacter(message?["characterId"]?.GetValue<long>() ?? 0);
+                return true;
+            case "triffskills:refresh-characters":
+                _ = RefreshCharactersAsync();
                 return true;
             default:
                 return false;
@@ -354,6 +383,7 @@ internal sealed class TriffSkillsController
 
         using var listener = new TcpListener(IPAddress.Loopback, 51778);
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        var authSucceeded = false;
         try
         {
             var state = Base64Url(RandomNumberGenerator.GetBytes(32));
@@ -450,6 +480,7 @@ internal sealed class TriffSkillsController
                 character.NeedsReauth = false;
                 _state.SelectedCharacterId = identity.CharacterId;
                 _state.Save();
+                authSucceeded = true;
 
                 // Diverges from TriffFleetsController.StartAuthAsync (:398-399),
                 // which writes the refresh token to Credential Manager before
@@ -485,6 +516,19 @@ internal sealed class TriffSkillsController
             cts.Cancel();
             listener.Stop();
             PostState(force: true);
+
+            // Fire-and-forget, and deliberately after PostState: the user sees the new
+            // character row appear immediately, then sees it fill in. Ordering it before
+            // the repost would show an empty matrix until the fetch returned.
+            //
+            // RefreshCharactersAsync degrades per character and never throws out, so an
+            // unobserved task here cannot surface as an unhandled exception. It refreshes
+            // every character, not just the new one, which is correct: re-authorizing a
+            // character that had expired should also clear the stale rows around it.
+            if (authSucceeded)
+            {
+                _ = RefreshCharactersAsync();
+            }
         }
     }
 
@@ -508,6 +552,99 @@ internal sealed class TriffSkillsController
         _accessTokens.Remove(characterId);
         _state.Save();
         PostState(force: true);
+    }
+
+    // Refreshes every authenticated character's skills and queue.
+    //
+    // Every failure below degrades exactly one character: the failed character keeps its
+    // previous TrainedLevels/Queue/FetchedUtc untouched and gains an error string, while the
+    // others are refreshed normally. Nothing here throws out to the caller.
+    private async Task RefreshCharactersAsync()
+    {
+        // A second request while one is in flight is ignored, not queued. All state mutation
+        // happens on the dispatcher thread like the other controllers, so there is exactly one
+        // writer and this flag is sufficient - concurrency here is cooperative, not locked.
+        if (_refreshInFlight) return;
+
+        _refreshInFlight = true;
+        PostState(force: true);
+        try
+        {
+            foreach (var character in _state.Characters.ToArray())
+            {
+                await RefreshOneCharacterAsync(character);
+                _state.Save();
+                PostState(force: true);
+            }
+        }
+        finally
+        {
+            _refreshInFlight = false;
+            PostState(force: true);
+        }
+    }
+
+    private async Task RefreshOneCharacterAsync(TriffSkillsCharacter character)
+    {
+        string token;
+        try
+        {
+            var response = await RefreshTokenAsync(character.CharacterId);
+            token = response.AccessToken;
+        }
+        catch (Exception ex)
+        {
+            // Token refresh failed. Flag this character; its last-good record stays visible and
+            // is rendered stale by its unchanged FetchedUtc.
+            character.NeedsReauth = true;
+            character.Error = $"Sign-in expired - re-authenticate this character. {ex.Message}";
+            PostError("refresh-characters", $"{character.CharacterName}: {character.Error}");
+            return;
+        }
+
+        var skills = await SendEsiAsync<CharacterSkillsResponse>(
+            HttpMethod.Get, $"/characters/{character.CharacterId}/skills/", token);
+        if (!CharacterResponseIsUsable(character, skills)) return;
+
+        var queue = await SendEsiAsync<List<SkillQueueItem>>(
+            HttpMethod.Get, $"/characters/{character.CharacterId}/skillqueue/", token);
+        if (!CharacterResponseIsUsable(character, queue)) return;
+
+        // Written only once BOTH calls have succeeded, so a character is never left holding
+        // fresh skills next to a stale queue.
+        character.TrainedLevels = EsiSkillMapper.ToTrainedLevels(skills.Value);
+        character.Queue = EsiSkillMapper.ToQueue(queue.Value);
+        character.FetchedUtc = DateTimeOffset.UtcNow;
+        character.Error = "";
+        character.NeedsReauth = false;
+    }
+
+    // Returns true when the response can be used. On failure the character's previous record is
+    // left entirely alone and the error is surfaced both on the record and via PostError
+    // (the pattern at EveSettingsController.cs:1099).
+    private bool CharacterResponseIsUsable<T>(TriffSkillsCharacter character, EsiResponse<T> response)
+    {
+        if (response.IsSuccess) return true;
+
+        if (response.StatusCode == HttpStatusCode.Forbidden)
+        {
+            // 403 on a skills endpoint is a scope problem, not a transient one, and is
+            // deliberately absent from ShouldRetryEsi's transient list. It surfaces here rather
+            // than at refresh time because RefreshTokenAsync performs no scope check
+            // (TriffFleetsController.cs:526) - a token minted under a different registration
+            // refreshes happily and only fails on the first skills call.
+            character.NeedsReauth = true;
+            character.Error = $"Re-authenticate this character: the stored token does not carry {Scopes}.";
+        }
+        else
+        {
+            // Already carries the X-Esi-Error-Limit-Remain / -Reset / Retry-After values that
+            // SendEsiAsync appends to Error.
+            character.Error = $"{response.Method} {response.Path} returned {(int)response.StatusCode}: {response.Error}";
+        }
+
+        PostError("refresh-characters", $"{character.CharacterName}: {character.Error}");
+        return false;
     }
 
     private void PostState(bool force = false)
