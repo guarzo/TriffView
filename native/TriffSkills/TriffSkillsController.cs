@@ -84,6 +84,11 @@ internal sealed class TriffSkillsController
     {
         Timeout = TimeSpan.FromSeconds(20),
     };
+    // .scratch-tests/TriffSkillsMatrixWireTests.cs keeps its own copy of these exact
+    // settings, because this file references System.Windows.Threading and cannot be linked
+    // into the WPF-free scratch harness. If PropertyNamingPolicy or WriteIndented changes
+    // here, update that copy too - a divergence would let the harness assert against a
+    // JSON shape PostState no longer actually produces.
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -819,6 +824,7 @@ internal sealed class TriffSkillsController
         {
             _state.Normalize();
             var matrix = TriffSkillsMatrix.Build(_state.Characters, _plans, _skillIds.Map);
+            var wire = TriffSkillsMatrix.ToWire(matrix);
             var state = new
             {
                 type = "triffskills:state",
@@ -839,28 +845,8 @@ internal sealed class TriffSkillsController
                     character.NeedsReauth,
                     tokenStored = !string.IsNullOrWhiteSpace(CredentialStore.Read(RefreshTokenTarget(character.CharacterId))),
                 }).ToArray(),
-                plans = matrix.Plans.Select(plan => new
-                {
-                    plan.Name,
-                    plan.RequirementCount,
-                }).ToArray(),
-                matrix = matrix.Cells.Select(cell => new
-                {
-                    cell.CharacterId,
-                    cell.PlanName,
-                    // Explicit string, not the enum. System.Text.Json serializes an enum
-                    // as its integer value by default, and the UI keys READINESS_META
-                    // off "Ready" / "Training" / "Missing" - an integer would silently
-                    // render every cell as Missing via its fallback.
-                    readiness = cell.Readiness.ToString(),
-                    cell.EstimatedFinishUtc,
-                    missingSkills = cell.MissingSkills.Select(skill => new
-                    {
-                        skill.SkillName,
-                        skill.Level,
-                    }).ToArray(),
-                    cell.UnknownSkills,
-                }).ToArray(),
+                plans = wire.Plans,
+                matrix = wire.Matrix,
                 // The UI types this as a string and renders "No plans cached" when it is
                 // empty, so emit "" rather than null.
                 plansFetchedUtc = _plansFetchedUtc?.ToString("o") ?? "",
