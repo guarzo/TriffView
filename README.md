@@ -26,6 +26,7 @@ TriffView is a standalone preview system paired with configurable log alerts, a 
 - EVE-X Preview JSON import.
 - Full TriffView settings backup export and restore.
 - Fleet Manager for saving wing/squad layouts, pre-assigning characters, restructuring live fleets, moving existing members, and sending ESI invites.
+- TriffSkills for scoring your authenticated characters against shared skill plans, with the skills each one still needs.
 - Dark themed standalone settings window with selectable GUI themes.
 - Tray controls for quick enable, disable, suspend, save, restore, reload, and quit actions.
 
@@ -40,6 +41,16 @@ TriffFleets lets you save fleet wing/squad names, pre-assign characters and role
 Build repeatable fleet templates for DPS, logi, scouts, miners, rolling crews, or whatever your multiboxing setup needs. Create the fleet in-game, detect it with the authenticated fleet boss, then let TriffFleets create or rename wings and squads, move existing members into their saved positions, invite missing characters, keep unexpected pilots in a Bench / Waiting squad, and show a clear result log for every action.
 
 Fleet Manager does not control EVE clients. It does not inject keyboard input, mouse input, chat commands, OCR, memory reads, warps, modules, or invite acceptance. Characters still accept fleet invites manually in-game.
+
+## TriffSkills Included
+
+TriffSkills shows which shared skill plans your characters can already fly. Authenticate a character through EVE SSO, and TriffSkills reads its trained skills and skill queue through ESI, then scores every plan as Ready, Training, or Missing in one matrix so you can see at a glance which character to fly, and what the ones that fall short are still missing.
+
+Skill plans are not bundled with the app. They are fetched at runtime from the `guarzo/canifly` GitHub repository and cached under `%APPDATA%\TriffHud\TriffSkills\`, so the plan list stays current without an app update.
+
+TriffSkills needs its own EVE SSO client ID, because the ID that ships in the build is a placeholder. Register an application at the EVE developer portal with the `esi-skills.read_skills.v1` and `esi-skills.read_skillqueue.v1` scopes and a `http://127.0.0.1:51778/triffskills/callback/` callback URL, then supply the ID either in `client-id.txt` under `%APPDATA%\TriffHud\TriffSkills\` or through the `TRIFFVIEW_TRIFFSKILLS_CLIENT_ID` environment variable. Until one of those is set, adding a character reports what is missing and does nothing else.
+
+TriffSkills is read-only. It does not train skills, buy skill injectors, change your queue, or control EVE clients.
 
 ## TriffAlerts Included
 

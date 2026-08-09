@@ -285,7 +285,12 @@ function CharacterCell({
         </span>
       ) : null}
 
-      {character.error && !character.needsReauth ? (
+      {/* Shown even when needsReauth is set. The hint above says what to do; this says why
+          the character is in that state - expired sign-in, missing scopes, a 401, or the
+          text of whatever the token refresh threw. Suppressing it on re-auth hid exactly
+          the line a first-run user needs, since a misconfigured client ID reaches the UI
+          only through this string. */}
+      {character.error ? (
         <span className="triffskills-flag">
           <em aria-hidden="true">!</em>
           {character.error}

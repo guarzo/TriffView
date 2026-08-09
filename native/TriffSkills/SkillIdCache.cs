@@ -6,7 +6,7 @@ namespace TriffView.TriffSkills;
 
 // Name -> typeID map persisted at %APPDATA%\TriffHud\TriffSkills\skill-ids.json.
 //
-// This cache is load-bearing, not an optimisation (design decision D4). Skill names are
+// This cache is load-bearing, not an optimisation. Skill names are
 // immutable once resolved, so the map is written once and only unseen names are ever sent
 // to ESI. Without it every plan load re-resolves every name in every plan and the ESI
 // dependency is worse than the Fuzzworks invTypes.csv download it replaced. Do not add a

@@ -8,7 +8,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using TriffView.Shared;        // EsiTransport, EsiResponse<T> (Task 0b)
+using TriffView.Shared;        // EsiTransport, EsiResponse<T> - shared with TriffFleets
 using TriffView.TriffFleets;   // CredentialStore, TokenResponse - internal, same assembly
 
 namespace TriffView.TriffSkills;
@@ -17,7 +17,7 @@ internal sealed class TriffSkillsController
 {
     // TriffSkills carries its own SSO registration constants rather than reusing
     // TriffFleetsController's. The client ID names the *application* to CCP, so the
-    // two tools must be able to point at different registrations (design D2), and
+    // two tools must be able to point at different registrations, and
     // port 51778 deliberately differs from TriffFleets' 51777
     // (TriffFleetsController.cs:23, listener at :324) so the loopback listeners cannot collide.
     //
@@ -33,12 +33,18 @@ internal sealed class TriffSkillsController
     private const string Scopes = "esi-skills.read_skills.v1 esi-skills.read_skillqueue.v1";
     private const string UserAgent = "TriffView/1.0 TriffSkills";
 
-    // Pinned to guarzo/canifly@main, the same default CanIFly ships
-    // (internal/server/env.go:64-69, path suffix applied at
-    // internal/services/skillplans/github_downloader.go:131). Deliberately NOT
+    // How long a single accepted socket gets to deliver its request line and headers before
+    // it is closed and discarded. This is a loopback connection from a browser that has
+    // already decided to talk to us, so ten seconds is generous - a socket still silent
+    // after that is one that was never going to speak. It bounds each candidate; the
+    // 5-minute CTS in StartAuthAsync bounds the authorization as a whole.
+    private static readonly TimeSpan CallbackReadTimeout = TimeSpan.FromSeconds(10);
+
+    // Pinned to guarzo/canifly@main, the same repository and branch CanIFly itself
+    // defaults to for its plan downloads. Deliberately NOT
     // configurable: a settable remote fetch path inside a signed binary that writes
-    // files under %APPDATA% is a security conversation this PR should not start.
-    // Do not add a setting, an environment variable, or a message parameter for it.
+    // files under %APPDATA% is a security conversation this PR should not start, so
+    // the pin stays a constant until someone decides to have that conversation.
     private const string PlansContentsUrl =
         "https://api.github.com/repos/guarzo/canifly/contents/plans?ref=main";
 
@@ -67,7 +73,7 @@ internal sealed class TriffSkillsController
     //
     // Any failure reading the file falls through to the next source rather than
     // throwing: an unreadable override must not make the tool unusable, and the
-    // "auth not configured" path in Step 6 already reports the end state clearly.
+    // "auth not configured" path in StartAuthAsync already reports the end state clearly.
     private static string ResolveClientId()
     {
         try
@@ -140,7 +146,7 @@ internal sealed class TriffSkillsController
     }
 
     // The transport, retry policy, and EsiResponse<T> are shared with TriffFleets
-    // (native/Shared/EsiTransport.cs, extracted in Task 0b). This wrapper binds the three
+    // (native/Shared/EsiTransport.cs). This wrapper binds the three
     // per-tool arguments - our HttpClient, our serializer options, and our User-Agent
     // product token - so call sites read the same as TriffFleets' do.
     private static Task<EsiResponse<T>> SendEsiAsync<T>(HttpMethod method, string path, string? token, object? body = null)
@@ -252,6 +258,19 @@ internal sealed class TriffSkillsController
 
         return new Uri(new Uri(RedirectUri), parts[1]);
     }
+
+    // Path comparison for the callback request. An exact ordinal compare against
+    // "/triffskills/callback/" discards a request to "/triffskills/callback" or
+    // "/TriffSkills/Callback/", and a discarded candidate is silent by design - so a
+    // near-miss redirect would present as a five-minute hang with nothing in the UI to
+    // explain it. URL paths are not case sensitive in practice here (the same origin,
+    // the same registration), and the trailing slash carries no meaning, so both are
+    // normalised away before comparing.
+    private static bool IsCallbackPath(string requestPath, string callbackPath)
+        => string.Equals(
+            requestPath.TrimEnd('/'),
+            callbackPath.TrimEnd('/'),
+            StringComparison.OrdinalIgnoreCase);
 
     private static async Task WriteCallbackHtmlAsync(NetworkStream stream, string message)
     {
@@ -397,8 +416,9 @@ internal sealed class TriffSkillsController
     // original at :524-545. That is a real gap, not an oversight to fix here: if the
     // client ID is later repointed at a different registration, a surviving refresh
     // token can mint an access token missing the skill scopes, and the failure
-    // surfaces as a 403 on the first skills call rather than at refresh time. Task 6
-    // owns treating that 403 as "re-authenticate this character." The scope check in
+    // surfaces as a 403 on the first skills call rather than at refresh time.
+    // CharacterResponseIsUsable is what turns that 403 into "re-authenticate this
+    // character." The scope check in
     // StartAuthAsync covers interactive grants only and is not a complete defense.
     private async Task<TokenResponse> RefreshTokenAsync(long characterId)
     {
@@ -423,6 +443,12 @@ internal sealed class TriffSkillsController
         return token;
     }
 
+    // Every caller that needs a bearer token goes through here, not through
+    // RefreshTokenAsync directly. A refresh is a full SSO token exchange, so calling it
+    // once per character per pass spent a round trip (and a Credential Manager write, since
+    // CCP rotates the refresh token) to obtain a token the previous pass had already
+    // obtained and cached. The 30-second margin keeps a token that is about to expire from
+    // being handed out just before the request that would use it.
     private async Task<string> AccessTokenForAsync(long characterId)
     {
         if (_accessTokens.TryGetValue(characterId, out var cached) && cached.ExpiresUtc > DateTimeOffset.UtcNow.AddSeconds(30))
@@ -475,31 +501,61 @@ internal sealed class TriffSkillsController
             // attempt), and any of those can win the accept ahead of the real
             // callback, misreporting a successful login as a parse failure. Loop
             // until a request actually lands on the callback path and carries
-            // `code` or `error`, discarding everything else - all under the one
-            // 5-minute budget shared by every accept and read below via `cts`,
-            // not 5 minutes per socket.
+            // `code` or `error`, discarding everything else. Two budgets apply: a
+            // short per-candidate one (CallbackReadTimeout, below) so no single silent
+            // socket can stall the loop, and the one 5-minute `cts` covering the
+            // authorization as a whole - not 5 minutes per socket.
             while (true)
             {
                 using var client = await listener.AcceptTcpClientAsync(cts.Token);
-                await using var stream = client.GetStream();
+
+                // Per-candidate deadline. `cts` alone is not enough: passing its token to
+                // ReadLineAsync only cancels a receive that has not been posted yet - .NET
+                // cannot cancel a socket receive already in flight, so a peer that connects
+                // and then sends nothing (exactly what a browser preconnect socket is) would
+                // block this loop forever. The 5-minute CTS would fire and nothing would
+                // happen: no timeout message, no `finally`, _authInProgress stuck true and
+                // port 51778 still bound until the app restarted. Registering a Dispose on
+                // the candidate token is what actually breaks the read - closing the socket
+                // faults the pending receive into the catch below, and the loop moves on to
+                // the next candidate with the 5-minute budget still running.
+                using var candidateCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+                candidateCts.CancelAfter(CallbackReadTimeout);
+                using var candidateAbort = candidateCts.Token.Register(client.Dispose);
 
                 Uri callbackUrl;
                 try
                 {
-                    callbackUrl = await ReadCallbackUrlAsync(stream, cts.Token);
+                    // GetStream() is inside the try on purpose: it throws if the peer already
+                    // went away, and outside the try that would abort the whole authorization
+                    // through the general catch - the exact failure this loop exists to avoid.
+                    callbackUrl = await ReadCallbackUrlAsync(client.GetStream(), candidateCts.Token);
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Exception)
                 {
-                    // Not a well-formed HTTP request - e.g. a preconnect socket
-                    // that never sent a request line, or an unrelated local
+                    // If the overall budget expired, this read faulted because the
+                    // registration above closed the socket, not because the candidate was
+                    // bad - and it faults as an IOException/ObjectDisposedException, not as
+                    // cancellation. Re-raise it as the timeout it actually is so the caller
+                    // still reports "EVE SSO authentication timed out."
+                    cts.Token.ThrowIfCancellationRequested();
+
+                    // Otherwise: not a well-formed HTTP request in time - e.g. a preconnect
+                    // socket that never sent a request line, or an unrelated local
                     // connection. Discard this candidate and keep waiting.
                     continue;
                 }
 
+                // This candidate is the real callback (or at least a request we are going to
+                // answer), so retire its short deadline before the token exchange - which can
+                // easily outlast it - closes the socket out from under the reply page.
+                candidateCts.CancelAfter(Timeout.InfiniteTimeSpan);
+                var stream = client.GetStream();
+
                 var query = ParseQuery(callbackUrl.Query);
                 var hasCode = query.ContainsKey("code");
                 var hasError = query.ContainsKey("error");
-                if (callbackUrl.AbsolutePath != callbackPath || (!hasCode && !hasError))
+                if (!IsCallbackPath(callbackUrl.AbsolutePath, callbackPath) || (!hasCode && !hasError))
                 {
                     // Some other local connection, or a request to the right port
                     // that isn't the SSO redirect. Discard and keep waiting.
@@ -705,8 +761,7 @@ internal sealed class TriffSkillsController
         string token;
         try
         {
-            var response = await RefreshTokenAsync(character.CharacterId);
-            token = response.AccessToken;
+            token = await AccessTokenForAsync(character.CharacterId);
         }
         catch (Exception ex)
         {
@@ -745,10 +800,12 @@ internal sealed class TriffSkillsController
 
         string error;
         var forbidden = response.StatusCode == HttpStatusCode.Forbidden;
-        // A non-403 failure says nothing about the credential, so it must not clear a
-        // re-auth flag an earlier 403 raised - only a successful fetch (ApplyFetchSuccess)
-        // clears it. This preserves the behaviour of the inline assignment this replaced.
-        var needsReauth = forbidden || character.NeedsReauth;
+        var unauthorized = response.StatusCode == HttpStatusCode.Unauthorized;
+        // A failure that is neither 401 nor 403 says nothing about the credential, so it must
+        // not clear a re-auth flag an earlier 401/403 raised - only a successful fetch
+        // (ApplyFetchSuccess) clears it. This preserves the behaviour of the inline
+        // assignment this replaced.
+        var needsReauth = forbidden || unauthorized || character.NeedsReauth;
         if (forbidden)
         {
             // 403 on a skills endpoint is a scope problem, not a transient one, and is
@@ -757,6 +814,16 @@ internal sealed class TriffSkillsController
             // (TriffFleetsController.cs:524) - a token minted under a different registration
             // refreshes happily and only fails on the first skills call.
             error = $"Re-authenticate this character: the stored token does not carry {Scopes}.";
+        }
+        else if (unauthorized)
+        {
+            // 401 means ESI rejected the bearer token itself - revoked, or invalidated on
+            // CCP's side. Without this branch the user got a bare
+            // "GET /characters/.../skills/ returned 401" and no hint that re-authenticating
+            // is what fixes it. The cached access token is dropped so the next pass performs
+            // a real refresh rather than presenting the same rejected token again.
+            _accessTokens.Remove(character.CharacterId);
+            error = "Re-authenticate this character: EVE rejected the stored sign-in (401).";
         }
         else
         {
