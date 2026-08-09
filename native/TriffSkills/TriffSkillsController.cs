@@ -40,30 +40,6 @@ internal sealed class TriffSkillsController
     // 5-minute CTS in StartAuthAsync bounds the authorization as a whole.
     private static readonly TimeSpan CallbackReadTimeout = TimeSpan.FromSeconds(10);
 
-    // Pinned to guarzo/canifly@main, the same repository and branch CanIFly itself
-    // defaults to for its plan downloads. Deliberately NOT
-    // configurable: a settable remote fetch path inside a signed binary that writes
-    // files under %APPDATA% is a security conversation this PR should not start, so
-    // the pin stays a constant until someone decides to have that conversation.
-    private const string PlansContentsUrl =
-        "https://api.github.com/repos/guarzo/canifly/contents/plans?ref=main";
-
-    // github.com rejects API requests with no User-Agent ("Request forbidden by
-    // administrative rules"). Same product token as this file's own SendEsiAsync
-    // wrapper (:123) and TriffFleetsController's equivalent (:1506).
-    private const string GitHubUserAgent = "TriffView/1.0 TriffSkills";
-
-    // The only two hosts this tool will fetch from: the pinned contents listing lives on
-    // the API host, and every plan body must come from GitHub's raw host (the same value
-    // PlanCatalog validates download_url against). See GetGitHubStringAsync.
-    private const string GitHubApiHost = "api.github.com";
-
-    // Read budgets. The listing is one JSON array describing a few dozen files; a plan is
-    // a few kilobytes of "Skill Name <level>" lines. Both are generous by an order of
-    // magnitude, so they only ever fire on something that is not what it claims to be.
-    private const int MaxListingBytes = 4 * 1024 * 1024;
-    private const int MaxPlanBytes = 1024 * 1024;
-
     // Resolution order, first non-empty wins:
     //   1. %APPDATA%\TriffHud\TriffSkills\client-id.txt   (trimmed; a deliberate,
     //      discoverable file next to state.json, for a maintainer who does not want
@@ -100,8 +76,8 @@ internal sealed class TriffSkillsController
     {
         Timeout = TimeSpan.FromSeconds(20),
     };
-    // Shared by the ESI transport (SendEsiAsync, :123), the SSO token response parse
-    // (SendTokenRequestAsync, :332), and PostState (:854). In PostState, though, this is
+    // Shared by the ESI transport (SendEsiAsync, :122), the SSO token response parse
+    // (SendTokenRequestAsync, :353), and PostState (:887). In PostState, though, this is
     // NOT what determines the JSON the UI receives: that call only builds
     // _lastPostedStateJson, the string compared to skip an identical repost. The actual
     // wire message is the same anonymous object handed to _postToHud, which
@@ -123,16 +99,10 @@ internal sealed class TriffSkillsController
     private string _lastPostedStateJson = "";
     private bool _authInProgress;
 
-    // Two independent operations, two flags. They were one, which meant a plan refresh
-    // made RefreshCharactersAsync a no-op - including the post-auth refresh
-    // StartAuthAsync fires, so a character added during a plan refresh appeared with no
-    // skills and no error. The UI still sees a single refreshInFlight (PostState) because
-    // it disables both buttons for either operation, which is the behaviour we want.
     private bool _charactersRefreshInFlight;
     private bool _charactersRefreshPending;
-    private bool _plansRefreshInFlight;
     private List<SkillPlan> _plans = new();
-    private DateTimeOffset? _plansFetchedUtc;
+    private DateTimeOffset? _plansUpdatedUtc;
 
     // Takes no Dispatcher, unlike its three siblings in MainWindow: every entry point
     // here is either a web message or a continuation of one, so there is nothing to
@@ -142,7 +112,7 @@ internal sealed class TriffSkillsController
         _postToHud = postToHud;
         _state = TriffSkillsState.Load();
         _skillIds = SkillIdCache.Load();
-        LoadCachedPlans();
+        LoadPlans();
     }
 
     // The transport, retry policy, and EsiResponse<T> are shared with TriffFleets
@@ -183,7 +153,10 @@ internal sealed class TriffSkillsController
                 _ = RefreshCharactersAsync();
                 return true;
             case "triffskills:refresh-plans":
-                _ = RefreshPlansAsync();
+                _ = ReloadPlansAsync();
+                return true;
+            case "triffskills:open-plans-folder":
+                OpenPlansFolder();
                 return true;
             default:
                 return false;
@@ -837,180 +810,78 @@ internal sealed class TriffSkillsController
         return false;
     }
 
-    private void LoadCachedPlans()
+    private void LoadPlans()
     {
         try
         {
             _plans = PlanCache.LoadAll(TriffSkillsPaths.PlansDir).ToList();
-            _plansFetchedUtc = Directory.Exists(TriffSkillsPaths.PlansDir) && _plans.Count > 0
+            _plansUpdatedUtc = Directory.Exists(TriffSkillsPaths.PlansDir) && _plans.Count > 0
                 ? new DateTimeOffset(Directory.GetLastWriteTimeUtc(TriffSkillsPaths.PlansDir), TimeSpan.Zero)
                 : null;
         }
         catch (Exception ex)
         {
-            // Deliberately leaves _plans and _plansFetchedUtc exactly as they were.
-            // LoadAll now isolates a bad file per-file (PlanCache.cs), so a throw out of
-            // here is a directory-level failure (e.g. Recover's Directory.Move racing an
-            // antivirus scan) rather than one bad plan. This method also runs after a
-            // successful RefreshPlansAsync has already populated a good in-memory list -
-            // discarding that on a later, possibly transient, re-read would throw away
-            // plans the user could still use. Surface the error; keep what was loaded.
-            PostError("plans", $"Could not read the cached plans: {ex.Message}");
+            // Deliberately leaves _plans and _plansUpdatedUtc exactly as they were. LoadAll
+            // isolates a bad file per-file (PlanCache.cs), so a throw out of here is a
+            // directory-level failure (a permission-denied %APPDATA%, an antivirus scan
+            // holding the directory) rather than one bad plan - and discarding an
+            // already-good in-memory list on a later, possibly transient, re-read would
+            // throw away plans the user could still use. Surface it; keep what was loaded.
+            PostError("plans", $"Could not read the plans folder: {ex.Message}");
         }
     }
 
-    // Manual refresh only - there is no background poll. Unauthenticated GitHub API
-    // requests are capped at 60/hour per IP, shared with everything else on that IP,
-    // so this runs when the user asks and at no other time.
-    private async Task RefreshPlansAsync()
+    // Re-reads the plans folder so a file the user just dropped in is picked up without
+    // restarting the app. Nothing is downloaded and nothing is written: the folder holds
+    // whatever the user put there.
+    private async Task ReloadPlansAsync()
     {
-        if (_plansRefreshInFlight)
-        {
-            PostError("plans", "A plan refresh is already in progress.");
-            return;
-        }
-
-        _plansRefreshInFlight = true;
+        LoadPlans();
         PostState(force: true);
 
-        var staging = "";
+        // A newly-added plan may name skills the ID cache has never seen. Resolve them now
+        // so the matrix does not report them Unknown until some later refresh. Best-effort,
+        // and reported separately: the plans are loaded either way, so a name-resolution
+        // outage must not read as "could not read the plans folder". The only consequence
+        // of failing here is that those plans read Unknown for now, which is exactly the
+        // degradation the matrix is built to show.
         try
         {
-            var listingJson = await GetGitHubStringAsync(PlansContentsUrl, GitHubApiHost, MaxListingBytes);
-            var remoteFiles = PlanCatalog.ParseContentsListing(listingJson);
-            if (remoteFiles.Count == 0)
+            var names = _plans
+                .SelectMany(plan => plan.Requirements.Select(requirement => requirement.SkillName))
+                .Where(name => !_skillIds.Map.ContainsKey(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (names.Count > 0)
             {
-                throw new InvalidDataException(
-                    "The GitHub plans directory listed no .txt files. The cached plans were left alone.");
-            }
-
-            // Everything downloads into a sibling staging directory first. Any failure
-            // below abandons it, so a half-finished refresh can never be what the user
-            // is left with.
-            staging = PlanCache.BeginStaging(TriffSkillsPaths.PlansDir);
-            foreach (var remoteFile in remoteFiles)
-            {
-                PlanCache.WritePlan(
-                    staging,
-                    remoteFile.Name,
-                    await GetGitHubStringAsync(remoteFile.DownloadUrl, PlanCatalog.RawContentHost, MaxPlanBytes));
-            }
-
-            PlanCache.Commit(TriffSkillsPaths.PlansDir, staging);
-            staging = "";
-            LoadCachedPlans();
-
-            // Newly-arrived plans may name skills the cache has never seen. Resolve them
-            // now so the matrix does not report them Unknown until the next refresh.
-            //
-            // This runs AFTER the cache swap has already committed, so its failure is not
-            // a plan-refresh failure - the plans are on disk and loaded either way. It gets
-            // its own try/catch and its own message so a name-resolution outage cannot
-            // report "could not refresh plans" for a refresh that in fact succeeded. The
-            // only consequence of failing here is that some plans read Unknown until the
-            // next refresh, which is exactly the degradation the matrix is built to show.
-            try
-            {
-                var names = _plans
-                    .SelectMany(plan => plan.Requirements.Select(requirement => requirement.SkillName))
-                    .Where(name => !_skillIds.Map.ContainsKey(name))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-                if (names.Count > 0)
-                {
-                    await _skillIds.ResolveMissingAsync(names, ResolveNamesBatchAsync);
-                }
-            }
-            catch (Exception ex)
-            {
-                PostError("plans", $"Plans updated, but some skill names could not be resolved: {ex.Message}");
+                await _skillIds.ResolveMissingAsync(names, ResolveNamesBatchAsync);
+                PostState(force: true);
             }
         }
         catch (Exception ex)
         {
-            // The cache is untouched on every path that reaches here: either the failure
-            // happened before BeginStaging, or the staging directory is abandoned below.
-            // Name resolution is deliberately outside this scope - see its own catch above.
-            PostError("plans", $"Could not refresh plans from GitHub: {ex.Message}");
-        }
-        finally
-        {
-            if (!string.IsNullOrEmpty(staging))
-            {
-                try { PlanCache.Abandon(staging); } catch { }
-            }
-            _plansRefreshInFlight = false;
-            PostState(force: true);
+            PostError("plans", $"Plans reloaded, but some skill names could not be resolved: {ex.Message}");
         }
     }
 
-    // Every GitHub fetch names the host it expects and the number of bytes it is willing
-    // to read. The listing URL is a compile-time constant, but download_url comes out of
-    // that listing's JSON and therefore chooses its own host: a spoofed or compromised
-    // listing could otherwise point this at an arbitrary server, and ReadAsStringAsync
-    // would buffer whatever it sent until the 20-second HttpClient timeout. The host is
-    // also checked at parse time (PlanCatalog.ParseContentsListing); this is the second
-    // half of the same guard, kept here because only the caller knows the byte budget.
-    private static async Task<string> GetGitHubStringAsync(string url, string expectedHost, int maxBytes)
+    // Opens the plans folder in Explorer. Without this nobody finds the path, and a tool
+    // whose plan list is empty until you populate a folder you cannot locate looks broken.
+    // Created first so the button works on a fresh install, where nothing has written it
+    // yet. Same launch and error-reporting shape as EveSettingsController.ShowInFolder
+    // (:528) - no CanRevealPath equivalent is needed, since the path is a constant here
+    // rather than something the web message chose.
+    private void OpenPlansFolder()
     {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
-            || uri.Scheme != Uri.UriSchemeHttps
-            || !string.Equals(uri.Host, expectedHost, StringComparison.OrdinalIgnoreCase))
+        try
         {
-            throw new InvalidDataException($"Refusing to fetch '{url}': expected an https URL on {expectedHost}.");
+            var full = TriffSkillsPaths.PlansDir;
+            Directory.CreateDirectory(full);
+            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{full}\"") { UseShellExecute = true });
         }
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        request.Headers.UserAgent.ParseAdd(GitHubUserAgent);
-
-        using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-        if (!response.IsSuccessStatusCode)
+        catch (Exception ex)
         {
-            var rateLimitRemaining = response.Headers.TryGetValues("X-RateLimit-Remaining", out var values)
-                ? string.Join(",", values)
-                : "";
-            var suffix = string.IsNullOrEmpty(rateLimitRemaining)
-                ? ""
-                : $" (GitHub rate limit remaining: {rateLimitRemaining})";
-            throw new InvalidOperationException($"GET {url} returned {(int)response.StatusCode}.{suffix}");
+            PostError("open-plans-folder", ex.Message);
         }
-
-        return await ReadBoundedStringAsync(response, maxBytes, url);
-    }
-
-    // Reads at most maxBytes and throws rather than truncating - a plan silently cut in
-    // half would parse into a shorter, wrong requirement list, which is worse than a
-    // failed refresh that leaves the previous cache in place. Content-Length is only a
-    // hint (it can be absent, or a lie), so the streaming loop enforces the cap either way.
-    private static async Task<string> ReadBoundedStringAsync(HttpResponseMessage response, int maxBytes, string url)
-    {
-        var declared = response.Content.Headers.ContentLength;
-        if (declared.HasValue && declared.Value > maxBytes)
-        {
-            throw new InvalidDataException($"GET {url} declared {declared.Value} bytes, over the {maxBytes} byte limit.");
-        }
-
-        await using var stream = await response.Content.ReadAsStreamAsync();
-        using var buffer = new MemoryStream();
-        var chunk = new byte[8192];
-        int read;
-        while ((read = await stream.ReadAsync(chunk)) > 0)
-        {
-            if (buffer.Length + read > maxBytes)
-            {
-                throw new InvalidDataException($"GET {url} returned more than the {maxBytes} byte limit.");
-            }
-
-            buffer.Write(chunk, 0, read);
-        }
-
-        // StreamReader rather than Encoding.UTF8.GetString so a byte-order mark is
-        // consumed rather than left as a U+FEFF on the first character - which is what
-        // HttpContent.ReadAsStringAsync did before, and what SkillPlanParser expects
-        // (a BOM would otherwise become part of the first plan line's skill name).
-        buffer.Position = 0;
-        using var reader = new StreamReader(buffer, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-        return await reader.ReadToEndAsync();
     }
 
     private void PostState(bool force = false)
@@ -1035,9 +906,7 @@ internal sealed class TriffSkillsController
                 type = "triffskills:state",
                 authConfigured = ResolveClientId() is { Length: > 0 } id && id != "REPLACE_WITH_OUR_DEV_REGISTRATION",
                 authInProgress = _authInProgress,
-                // One flag for the UI: it disables both refresh buttons while either
-                // operation runs, even though the two are now independent internally.
-                refreshInFlight = _charactersRefreshInFlight || _plansRefreshInFlight,
+                refreshInFlight = _charactersRefreshInFlight,
                 characters = _state.Characters.Select(character => new
                 {
                     character.CharacterId,
@@ -1050,9 +919,9 @@ internal sealed class TriffSkillsController
                 }).ToArray(),
                 plans = wire.Plans,
                 matrix = wire.Matrix,
-                // The UI types this as a string and renders "No plans cached" when it is
+                // The UI types this as a string and renders "No plans yet" when it is
                 // empty, so emit "" rather than null.
-                plansFetchedUtc = _plansFetchedUtc?.ToString("o") ?? "",
+                plansUpdatedUtc = _plansUpdatedUtc?.ToString("o") ?? "",
             };
             var json = JsonSerializer.Serialize(state, JsonOptions);
             if (!force && string.Equals(json, _lastPostedStateJson, StringComparison.Ordinal)) return;

@@ -37,7 +37,7 @@ type TriffSkillsState = {
   matrix: MatrixEntry[];
   refreshInFlight: boolean;
   authInProgress: boolean;
-  plansFetchedUtc: string;
+  plansUpdatedUtc: string;
 };
 
 const EMPTY_STATE: TriffSkillsState = {
@@ -47,7 +47,7 @@ const EMPTY_STATE: TriffSkillsState = {
   matrix: [],
   refreshInFlight: false,
   authInProgress: false,
-  plansFetchedUtc: "",
+  plansUpdatedUtc: "",
 };
 
 const READINESS_META: Record<Readiness, { glyph: string; label: string; className: string }> = {
@@ -153,12 +153,11 @@ export default function TriffSkills() {
             >
               {state.refreshInFlight ? "Refreshing..." : "Refresh characters"}
             </button>
-            <button
-              type="button"
-              onClick={() => send("triffskills:refresh-plans")}
-              disabled={state.refreshInFlight}
-            >
-              Refresh plans
+            <button type="button" onClick={() => send("triffskills:open-plans-folder")}>
+              Open plans folder
+            </button>
+            <button type="button" onClick={() => send("triffskills:refresh-plans")}>
+              Reload plans
             </button>
           </div>
           {!state.authConfigured ? (
@@ -181,10 +180,10 @@ export default function TriffSkills() {
           <header className="triffview-section-header">
             <div>
               <h2>Skill plan readiness</h2>
-              <p>Every character is scored against every cached plan. Failures show per row or per cell.</p>
+              <p>Every character is scored against every plan in your plans folder. Failures show per row or per cell.</p>
             </div>
             <span className="triffskills-plans-stamp">
-              {state.plansFetchedUtc ? `Plans cached ${formatUtc(state.plansFetchedUtc)}` : "No plans cached"}
+              {state.plansUpdatedUtc ? `Plans updated ${formatUtc(state.plansUpdatedUtc)}` : "No plans yet"}
             </span>
           </header>
 
@@ -207,7 +206,10 @@ export default function TriffSkills() {
 
           {!state.plans.length ? (
             <div className="eve-settings-empty">
-              No plans cached yet. Use <strong>Refresh plans</strong> to download the community plans from GitHub.
+              No plans yet. TriffSkills scores your characters against the plan files in{" "}
+              <code>%APPDATA%\TriffHud\TriffSkills\plans</code>. Use <strong>Open plans folder</strong> to
+              get there, drop in one <code>.txt</code> per plan (one skill per line, name then level,
+              as in <em>Navigation V</em>), then use <strong>Reload plans</strong>.
             </div>
           ) : null}
 
