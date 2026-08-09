@@ -4278,6 +4278,22 @@ button:disabled {
   gap: 12px;
 }
 
+/* Same shape as .eve-settings' header (:3295): the stamp rides on the right
+   rather than costing a third stacked line of chrome above a dense grid. */
+.triffskills .triffview-section-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.triffskills .triffview-section-header p {
+  margin: 4px 0 0;
+  color: var(--tv-muted);
+  font-size: 11px;
+}
+
 .triffskills-legend {
   display: flex;
   flex-direction: column;
@@ -4327,6 +4343,7 @@ button:disabled {
 }
 
 .triffskills-plans-stamp {
+  flex: 0 0 auto;
   color: var(--tv-muted);
   font-size: 11px;
   text-transform: uppercase;
@@ -4335,19 +4352,27 @@ button:disabled {
 /* The grid owns both scroll axes. position: sticky resolves against the nearest
    scrolling ancestor, so bounding this box here - rather than letting it grow and
    scroll inside .triffview-section-content - is what keeps the plan column and the
-   character headers stuck to their own edges instead of to the section. */
+   character headers stuck to their own edges instead of to the section.
+   It takes whatever height the flex column has left rather than a guessed
+   fraction of the viewport, so the detail panel below it stays on screen. */
 .triffskills-grid-scroll {
-  min-height: 0;
-  max-height: 58vh;
+  min-height: 132px;
+  flex: 1 1 auto;
   overflow: auto;
   border: 1px solid var(--tv-border-soft);
   background: rgba(var(--tv-bg-rgb), 0.88);
 }
 
-/* Separate borders, not collapsed: a collapsed border belongs to the table, not
-   to the cell, and scrolls out from under a sticky cell. */
+/* width: max-content is load-bearing, not tidiness. Under table-layout: fixed a
+   table with width: auto sizes its box to the container while the columns keep
+   their declared widths and paint outside it - so the scroll box measures no
+   overflow, offers no horizontal scrollbar, and every column past the right edge
+   becomes unreachable. Sizing the table to its own columns is what makes the
+   overflow real. Separate borders for the same reason as ever: a collapsed
+   border belongs to the table, not the cell, and scrolls out from under a
+   sticky cell. */
 .triffskills-grid {
-  width: auto;
+  width: max-content;
   border-collapse: separate;
   border-spacing: 0;
   table-layout: fixed;
@@ -4371,11 +4396,14 @@ button:disabled {
   vertical-align: top;
 }
 
+/* 104px, not more: the header block is dead space above every row, and on a
+   540px-tall viewport it is the difference between six rows visible and ten.
+   90px of that is name, which clears the longest EVE character names. */
 .triffskills-grid thead th {
   position: sticky;
   top: 0;
   z-index: 2;
-  height: 132px;
+  height: 104px;
   background: var(--tv-table-head-bg);
   color: var(--tv-text-strong);
   font-weight: 800;
@@ -4414,7 +4442,7 @@ button:disabled {
 /* vertical-rl alone reads top-to-bottom; the 180deg turn is what makes the name
    climb from the column it labels. */
 .triffskills-head-button span {
-  max-height: 118px;
+  max-height: 90px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4516,10 +4544,16 @@ button:disabled {
   background: rgba(var(--tv-accent-rgb), 0.28);
 }
 
+/* Capped and independently scrollable so a 30-character group list cannot push
+   the grid off the top, and so the panel itself is never below the fold - a
+   click on a cell has to visibly do something. */
 .triffskills-detail {
   display: flex;
+  max-height: 42%;
+  flex: 0 1 auto;
   flex-direction: column;
   gap: 9px;
+  overflow: auto;
   border: 1px solid var(--tv-border-soft);
   background: var(--tv-control-bg-alt);
   padding: 11px 13px;
@@ -4528,6 +4562,15 @@ button:disabled {
 
 .triffskills-detail.is-empty {
   color: var(--tv-muted);
+}
+
+/* The grid is flex: 1 1 auto and the panel is 0 1 auto, so without a floor the
+   grid wins every contested pixel and a selected panel collapses to a ~46px
+   sliver - technically scrollable, but it reads as "clicking did nothing".
+   The floor applies only when something is selected; the empty prompt has no
+   claim on the space. The grid's own min-height still bounds how far it yields. */
+.triffskills-detail:not(.is-empty) {
+  min-height: 148px;
 }
 
 .triffskills-detail-head {
@@ -4546,6 +4589,17 @@ button:disabled {
 
 .triffskills-detail-head small {
   color: var(--tv-muted);
+}
+
+/* Pushed to the far end of the header rather than given a slot of its own, so it
+   sits in the same place whether the header carries one line of meta or two.
+   In the is-empty panel there is no header to sit in, so it aligns itself. */
+.triffskills-detail-head .triffskills-detail-dismiss {
+  margin-left: auto;
+}
+
+.triffskills-detail.is-empty .triffskills-detail-dismiss {
+  align-self: flex-start;
 }
 
 .triffskills-groups {

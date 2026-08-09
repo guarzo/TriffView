@@ -48,6 +48,19 @@ type Selection =
   | { kind: "character"; characterId: number }
   | null;
 
+// Selecting what is already selected clears it, so every affordance that opens
+// the detail panel also closes it. Without this the panel is a one-way door:
+// there is no "no selection" target to click once one is set.
+function sameSelection(a: Selection, b: Selection) {
+  if (!a || !b || a.kind !== b.kind) return false;
+  if (a.kind === "cell" && b.kind === "cell") {
+    return a.characterId === b.characterId && a.planName === b.planName;
+  }
+  if (a.kind === "plan" && b.kind === "plan") return a.planName === b.planName;
+  if (a.kind === "character" && b.kind === "character") return a.characterId === b.characterId;
+  return false;
+}
+
 type DetailRow = {
   key: string;
   label: string;
@@ -198,9 +211,30 @@ export default function TriffSkills() {
   const selectedPlan = selection && selection.kind !== "character" ? plansByName.get(selection.planName) || null : null;
 
   function select(next: Selection) {
-    setSelection(next);
+    setSelection((current) => (sameSelection(current, next) ? null : next));
     setConfirmForgetId(0);
   }
+
+  function clearSelection() {
+    setSelection(null);
+    setConfirmForgetId(0);
+  }
+
+  // Escape is the third way out, and the one keyboard users reach for. Cells are
+  // buttons reached by tab, so a mouse-only dismiss would leave them in the same
+  // dead end. Bound only while something is selected, so it never swallows an
+  // Escape the rest of the app might want.
+  useEffect(() => {
+    if (!selection) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setSelection(null);
+      setConfirmForgetId(0);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selection]);
 
   function confirmForget(characterId: number) {
     send("triffskills:forget-character", { characterId });
@@ -405,6 +439,7 @@ export default function TriffSkills() {
                 onAskForget={() => selectedCharacter && setConfirmForgetId(selectedCharacter.characterId)}
                 onCancelForget={() => setConfirmForgetId(0)}
                 onConfirmForget={() => selectedCharacter && confirmForget(selectedCharacter.characterId)}
+                onClear={clearSelection}
               />
             </>
           ) : null}
@@ -425,6 +460,7 @@ function DetailPanel({
   onAskForget,
   onCancelForget,
   onConfirmForget,
+  onClear,
 }: {
   selection: Selection;
   character: SkillCharacter | null;
@@ -436,6 +472,7 @@ function DetailPanel({
   onAskForget: () => void;
   onCancelForget: () => void;
   onConfirmForget: () => void;
+  onClear: () => void;
 }) {
   if (!selection) {
     return (
@@ -447,7 +484,7 @@ function DetailPanel({
   }
 
   if (selection.kind === "cell") {
-    if (!character || !plan) return <StaleSelection />;
+    if (!character || !plan) return <StaleSelection onClear={onClear} />;
     return (
       <div className="triffskills-detail">
         <header className="triffskills-detail-head">
@@ -455,6 +492,7 @@ function DetailPanel({
             {character.characterName} / {plan.name}
           </h3>
           <small>{plan.requirementCount} skills in this plan</small>
+          <DetailDismiss onClear={onClear} />
         </header>
         <CellDetail entry={cells.get(matrixKey(character.characterId, plan.name)) || null} stale={isDegraded(character)} />
       </div>
@@ -462,7 +500,7 @@ function DetailPanel({
   }
 
   if (selection.kind === "plan") {
-    if (!plan) return <StaleSelection />;
+    if (!plan) return <StaleSelection onClear={onClear} />;
     const rows: DetailRow[] = characters.map((item) => ({
       key: String(item.characterId),
       label: item.characterName,
@@ -476,13 +514,14 @@ function DetailPanel({
           <small>
             {plan.requirementCount} skills / {characters.length} characters
           </small>
+          <DetailDismiss onClear={onClear} />
         </header>
         <DetailGroups rows={rows} />
       </div>
     );
   }
 
-  if (!character) return <StaleSelection />;
+  if (!character) return <StaleSelection onClear={onClear} />;
   const degraded = isDegraded(character);
   const stamp = formatUtc(character.fetchedUtc);
   const rows: DetailRow[] = plans.map((item) => ({
@@ -496,6 +535,7 @@ function DetailPanel({
       <header className="triffskills-detail-head">
         <h3>{character.characterName}</h3>
         <small>{stamp ? `${degraded ? "Last good" : "Updated"} ${stamp}` : "Never fetched"}</small>
+        <DetailDismiss onClear={onClear} />
       </header>
 
       {character.needsReauth ? (
@@ -547,8 +587,24 @@ function DetailPanel({
   );
 }
 
-function StaleSelection() {
-  return <div className="triffskills-detail is-empty">That selection no longer exists. Pick another cell.</div>;
+function StaleSelection({ onClear }: { onClear: () => void }) {
+  return (
+    <div className="triffskills-detail is-empty">
+      That selection no longer exists. Pick another cell.
+      <DetailDismiss onClear={onClear} />
+    </div>
+  );
+}
+
+// A real button with a text label rather than a bare glyph: the toggle-to-clear
+// behaviour above is not discoverable on its own, and a wordless x is not much
+// of an improvement on that for anyone reading the panel with a screen reader.
+function DetailDismiss({ onClear }: { onClear: () => void }) {
+  return (
+    <button type="button" className="triffskills-detail-dismiss" onClick={onClear}>
+      Clear selection
+    </button>
+  );
 }
 
 function DetailGroups({ rows }: { rows: DetailRow[] }) {
