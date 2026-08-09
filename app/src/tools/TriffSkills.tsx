@@ -68,8 +68,11 @@ type DetailRow = {
 };
 
 // A client-side, preview-only echo of SkillPlanParser.Parse (SkillPlanParser.cs).
-// This is advisory: it exists so the import modal can show a count and a few
-// sample lines before anything is sent, not to decide what gets written.
+// "Preview-only" describes what a parsed result is used for - the import modal's
+// count and sample lines - not what a failed parse does: a null return is what
+// gates the modal from opening at all, and the clipboard read reports a plain
+// error instead (see the pendingClipboardImport effect below). That gate is
+// deliberate and matches the brief; only the wording here was misleading.
 // TriffSkillsController re-parses nothing - it writes the clipboard text
 // verbatim - so a difference between this and the real parser affects only the
 // preview, never the saved file.
@@ -184,8 +187,12 @@ const UNKNOWN_META = { glyph: "?", label: "Unknown", className: "is-unscored" };
 const REAUTH_HINT =
   "Needs re-authentication for esi-skills.read_skills.v1 and esi-skills.read_skillqueue.v1. Use Add character to reauthorize.";
 
+// Returns postNative's own true/false (bridge present or not) so callers that
+// track "waiting for a reply" state - startClipboardImport is the one that
+// currently matters - can clear it immediately on a false return instead of
+// waiting forever for a reply that was never going to arrive.
 function send(type: string, payload: Record<string, unknown> = {}) {
-  postNative({ type, ...payload });
+  return postNative({ type, ...payload });
 }
 
 function formatUtc(value?: string | null) {
@@ -335,8 +342,23 @@ export default function TriffSkills() {
       setSelection(null);
       setConfirmForgetId(0);
     }
+    // Escape pressed while the EVE client has focus is forwarded here as a
+    // triff:hud-keydown CustomEvent, not a keydown (nativeBridge.js's own
+    // Escape handling just blurs the focused control otherwise) - same
+    // dual-listener pattern as TriffViewSettings.jsx's hotkey recorder.
+    function onHudKeyDown(event: Event) {
+      const detail = (event as CustomEvent).detail;
+      if (detail?.key !== "Escape") return;
+      event.preventDefault();
+      setSelection(null);
+      setConfirmForgetId(0);
+    }
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("triff:hud-keydown", onHudKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("triff:hud-keydown", onHudKeyDown);
+    };
   }, [selection, importDraft]);
 
   function confirmForget(characterId: number) {
@@ -347,7 +369,10 @@ export default function TriffSkills() {
 
   function startClipboardImport() {
     setPendingClipboardImport(true);
-    send("read-clipboard");
+    // No bridge (dev/browser today) means no "clipboard" reply is ever coming,
+    // so the button would otherwise sit on "Reading clipboard..." forever with
+    // no way to retry. In-app this is unreachable - ReadClipboard always replies.
+    if (!send("read-clipboard")) setPendingClipboardImport(false);
   }
 
   function closeImportModal() {
@@ -356,6 +381,22 @@ export default function TriffSkills() {
     setImportCollision(false);
     setImportSubmitError("");
     setImportBusy(false);
+  }
+
+  // Wiring setImportName straight through as onNameChange was the Critical
+  // defect from review: importCollision described whichever name triggered it
+  // and then just outlived every subsequent edit, so retyping to a second,
+  // different, also-colliding name still showed Replace - sourced from the
+  // stale flag, not the name on screen - and Replace sends whatever name is
+  // currently in the box. Clearing the flag here means the footer (which
+  // switches Replace back in only while collision is true) reverts to plain
+  // Import the moment the name changes, and a fresh submit is what decides
+  // whether the new name collides, never a leftover answer to a question
+  // about a different name.
+  function changeImportName(value: string) {
+    setImportName(value);
+    setImportCollision(false);
+    setImportSubmitError("");
   }
 
   function submitImport(replace: boolean) {
@@ -429,8 +470,21 @@ export default function TriffSkills() {
       event.stopPropagation();
       closeImportModal();
     }
+    // Same triff:hud-keydown gap as the selection handler above, and the same
+    // fix: without this, Escape forwarded from the EVE client never reaches a
+    // plain keydown listener at all - nativeBridge.js just blurs the input.
+    function onHudKeyDown(event: Event) {
+      const detail = (event as CustomEvent).detail;
+      if (detail?.key !== "Escape") return;
+      event.preventDefault();
+      closeImportModal();
+    }
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("triff:hud-keydown", onHudKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("triff:hud-keydown", onHudKeyDown);
+    };
   }, [importDraft]);
 
   return (
@@ -644,7 +698,7 @@ export default function TriffSkills() {
         <ImportPlanModal
           draft={importDraft}
           name={importName}
-          onNameChange={setImportName}
+          onNameChange={changeImportName}
           collision={importCollision}
           submitError={importSubmitError}
           busy={importBusy}
@@ -921,7 +975,9 @@ function ImportPlanModal({
   onReplace: () => void;
 }) {
   const trimmedName = name.trim();
-  const hint = planNameHint(name);
+  // Hinted on the trimmed value, same as submit: hinting on the raw field
+  // would grey out Import over a trailing space the controller strips anyway.
+  const hint = planNameHint(trimmedName);
   const remaining = draft.preview.count - draft.preview.lines.length;
 
   return (
@@ -981,7 +1037,12 @@ function ImportPlanModal({
             Cancel
           </button>
           {collision ? (
-            <button type="button" className="danger-action" onClick={onReplace} disabled={busy}>
+            <button
+              type="button"
+              className="danger-action"
+              onClick={onReplace}
+              disabled={busy || !trimmedName || Boolean(hint)}
+            >
               Replace
             </button>
           ) : (
