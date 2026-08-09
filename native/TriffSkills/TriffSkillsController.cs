@@ -157,17 +157,17 @@ internal sealed class TriffSkillsController
     // TriffFleetsController speaks HTTP by hand (:436-476). Read only the request
     // line, drain the headers, then write a minimal HTTP response so the browser
     // tab shows a completion message rather than a connection error.
-    private static async Task<Uri> ReadCallbackUrlAsync(NetworkStream stream)
+    private static async Task<Uri> ReadCallbackUrlAsync(NetworkStream stream, CancellationToken cancellationToken)
     {
         using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
-        var requestLine = await reader.ReadLineAsync() ?? "";
+        var requestLine = await reader.ReadLineAsync(cancellationToken) ?? "";
         var parts = requestLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 2)
         {
             throw new InvalidDataException("Local SSO callback was not a valid HTTP request.");
         }
 
-        while (!string.IsNullOrEmpty(await reader.ReadLineAsync()))
+        while (!string.IsNullOrEmpty(await reader.ReadLineAsync(cancellationToken)))
         {
             // Drain headers before writing the callback page.
         }
@@ -353,6 +353,7 @@ internal sealed class TriffSkillsController
         PostState(force: true);
 
         using var listener = new TcpListener(IPAddress.Loopback, 51778);
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         try
         {
             var state = Base64Url(RandomNumberGenerator.GetBytes(32));
@@ -363,69 +364,112 @@ internal sealed class TriffSkillsController
             var authUrl = BuildAuthorizeUrl(state, challenge);
             Process.Start(new ProcessStartInfo(authUrl) { UseShellExecute = true });
 
-            var contextTask = listener.AcceptTcpClientAsync();
-            var completed = await Task.WhenAny(contextTask, Task.Delay(TimeSpan.FromMinutes(5)));
-            if (completed != contextTask)
+            var callbackPath = new Uri(RedirectUri).AbsolutePath;
+
+            // Diverges from TriffFleetsController.StartAuthAsync (:366-372), which
+            // awaits AcceptTcpClientAsync exactly once and trusts whatever socket
+            // wins the race. A browser routinely opens more than one connection
+            // around a redirect (preconnects, an abandoned tab from a prior
+            // attempt), and any of those can win the accept ahead of the real
+            // callback, misreporting a successful login as a parse failure. Loop
+            // until a request actually lands on the callback path and carries
+            // `code` or `error`, discarding everything else - all under the one
+            // 5-minute budget shared by every accept and read below via `cts`,
+            // not 5 minutes per socket.
+            while (true)
             {
-                PostError("auth", "EVE SSO authentication timed out.");
+                using var client = await listener.AcceptTcpClientAsync(cts.Token);
+                await using var stream = client.GetStream();
+
+                Uri callbackUrl;
+                try
+                {
+                    callbackUrl = await ReadCallbackUrlAsync(stream, cts.Token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Not a well-formed HTTP request - e.g. a preconnect socket
+                    // that never sent a request line, or an unrelated local
+                    // connection. Discard this candidate and keep waiting.
+                    continue;
+                }
+
+                var query = ParseQuery(callbackUrl.Query);
+                var hasCode = query.ContainsKey("code");
+                var hasError = query.ContainsKey("error");
+                if (callbackUrl.AbsolutePath != callbackPath || (!hasCode && !hasError))
+                {
+                    // Some other local connection, or a request to the right port
+                    // that isn't the SSO redirect. Discard and keep waiting.
+                    continue;
+                }
+
+                var error = hasError ? query["error"] : "";
+                var code = hasCode ? query["code"] : "";
+                var returnedState = query.TryGetValue("state", out var stateValue) ? stateValue : "";
+
+                if (!string.IsNullOrWhiteSpace(error))
+                {
+                    await WriteCallbackHtmlAsync(stream, "TriffSkills authentication was cancelled or denied. You can close this tab.");
+                    PostError("auth", $"EVE SSO returned: {error}");
+                    return;
+                }
+
+                if (!string.Equals(state, returnedState, StringComparison.Ordinal))
+                {
+                    await WriteCallbackHtmlAsync(stream, "TriffSkills blocked this login because the SSO state did not match. You can close this tab.");
+                    PostError("auth", "EVE SSO state did not match. Authentication was blocked.");
+                    return;
+                }
+
+                if (string.IsNullOrWhiteSpace(code))
+                {
+                    await WriteCallbackHtmlAsync(stream, "TriffSkills did not receive an authorization code. You can close this tab.");
+                    PostError("auth", "EVE SSO did not return an authorization code.");
+                    return;
+                }
+
+                var token = await ExchangeCodeAsync(code, verifier);
+                var identity = DecodeEveJwt(token.AccessToken);
+
+                if (!identity.Scopes.Contains("esi-skills.read_skills.v1") || !identity.Scopes.Contains("esi-skills.read_skillqueue.v1"))
+                {
+                    throw new InvalidDataException("The selected character did not grant the required skill scopes (esi-skills.read_skills.v1, esi-skills.read_skillqueue.v1).");
+                }
+
+                if (string.IsNullOrWhiteSpace(token.RefreshToken))
+                {
+                    throw new InvalidDataException("EVE SSO did not return a refresh token.");
+                }
+
+                var character = _state.Upsert(identity.CharacterId);
+                character.CharacterName = identity.CharacterName;
+                character.Scopes = identity.Scopes.ToList();
+                character.AuthenticatedUtc = DateTimeOffset.UtcNow;
+                character.Error = "";
+                character.NeedsReauth = false;
+                _state.SelectedCharacterId = identity.CharacterId;
+                _state.Save();
+
+                // Diverges from TriffFleetsController.StartAuthAsync (:398-399),
+                // which writes the refresh token to Credential Manager before
+                // calling _state.Save(). If Save() then threw (disk full, an AV
+                // lock, a redirected/OneDrive %APPDATA%), that ordering leaves a
+                // live refresh token in Credential Manager with no character row
+                // to drive ForgetCharacter against - the "forgotten character
+                // still has a live token" defect, reached by a different route.
+                // Saving state first means a Save() failure never leaves behind a
+                // credential the app has no way to remove.
+                CredentialStore.Write(RefreshTokenTarget(identity.CharacterId), token.RefreshToken);
+                _accessTokens[identity.CharacterId] = new AccessTokenCache(token.AccessToken, DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, token.ExpiresIn - 60)));
+
+                await WriteCallbackHtmlAsync(stream, "TriffSkills authentication complete. You can close this tab and return to TriffView.");
                 return;
             }
-
-            using var client = await contextTask;
-            await using var stream = client.GetStream();
-            var callbackUrl = await ReadCallbackUrlAsync(stream);
-            var query = ParseQuery(callbackUrl.Query);
-            var error = query.TryGetValue("error", out var errorValue) ? errorValue : "";
-            var code = query.TryGetValue("code", out var codeValue) ? codeValue : "";
-            var returnedState = query.TryGetValue("state", out var stateValue) ? stateValue : "";
-
-            if (!string.IsNullOrWhiteSpace(error))
-            {
-                await WriteCallbackHtmlAsync(stream, "TriffSkills authentication was cancelled or denied. You can close this tab.");
-                PostError("auth", $"EVE SSO returned: {error}");
-                return;
-            }
-
-            if (!string.Equals(state, returnedState, StringComparison.Ordinal))
-            {
-                await WriteCallbackHtmlAsync(stream, "TriffSkills blocked this login because the SSO state did not match. You can close this tab.");
-                PostError("auth", "EVE SSO state did not match. Authentication was blocked.");
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(code))
-            {
-                await WriteCallbackHtmlAsync(stream, "TriffSkills did not receive an authorization code. You can close this tab.");
-                PostError("auth", "EVE SSO did not return an authorization code.");
-                return;
-            }
-
-            var token = await ExchangeCodeAsync(code, verifier);
-            var identity = DecodeEveJwt(token.AccessToken);
-
-            if (!identity.Scopes.Contains("esi-skills.read_skills.v1") || !identity.Scopes.Contains("esi-skills.read_skillqueue.v1"))
-            {
-                throw new InvalidDataException("The selected character did not grant the required skill scopes (esi-skills.read_skills.v1, esi-skills.read_skillqueue.v1).");
-            }
-
-            if (string.IsNullOrWhiteSpace(token.RefreshToken))
-            {
-                throw new InvalidDataException("EVE SSO did not return a refresh token.");
-            }
-
-            CredentialStore.Write(RefreshTokenTarget(identity.CharacterId), token.RefreshToken);
-            _accessTokens[identity.CharacterId] = new AccessTokenCache(token.AccessToken, DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, token.ExpiresIn - 60)));
-
-            var character = _state.Upsert(identity.CharacterId);
-            character.CharacterName = identity.CharacterName;
-            character.Scopes = identity.Scopes.ToList();
-            character.AuthenticatedUtc = DateTimeOffset.UtcNow;
-            character.Error = "";
-            character.NeedsReauth = false;
-            _state.SelectedCharacterId = identity.CharacterId;
-            _state.Save();
-
-            await WriteCallbackHtmlAsync(stream, "TriffSkills authentication complete. You can close this tab and return to TriffView.");
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            PostError("auth", "EVE SSO authentication timed out.");
         }
         catch (SocketException ex)
         {
@@ -438,6 +482,7 @@ internal sealed class TriffSkillsController
         finally
         {
             _authInProgress = false;
+            cts.Cancel();
             listener.Stop();
             PostState(force: true);
         }
