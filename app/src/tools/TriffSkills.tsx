@@ -40,6 +40,20 @@ type TriffSkillsState = {
   plansUpdatedUtc: string;
 };
 
+// One selection drives the detail panel, whichever of the three affordances set
+// it - a cell, a plan row header, or a character column header.
+type Selection =
+  | { kind: "cell"; characterId: number; planName: string }
+  | { kind: "plan"; planName: string }
+  | { kind: "character"; characterId: number }
+  | null;
+
+type DetailRow = {
+  key: string;
+  label: string;
+  entry: MatrixEntry | null;
+};
+
 const EMPTY_STATE: TriffSkillsState = {
   authConfigured: false,
   characters: [],
@@ -57,6 +71,13 @@ const READINESS_META: Record<Readiness, { glyph: string; label: string; classNam
 };
 
 const READINESS_ORDER: Readiness[] = ["Ready", "Training", "Missing"];
+
+// No entry for a character x plan pair at all - the pair has not been scored.
+const UNSCORED_META = { glyph: "?", label: "Not scored", className: "is-unscored" };
+
+// An entry whose readiness is outside the three known strings. Distinct wording
+// from UNSCORED_META because the causes differ, but the same muted vocabulary.
+const UNKNOWN_META = { glyph: "?", label: "Unknown", className: "is-unscored" };
 
 const REAUTH_HINT =
   "Needs re-authentication for esi-skills.read_skills.v1 and esi-skills.read_skillqueue.v1. Use Add character to reauthorize.";
@@ -94,10 +115,52 @@ function isDegraded(character: SkillCharacter) {
   return Boolean(character.error) || Boolean(character.needsReauth);
 }
 
+// A readiness value outside the three known strings is an anomaly, not a
+// confident "Missing" - route it to the same unscored/unknown vocabulary the
+// null-entry branch uses, rather than silently reading as Missing.
+function bucketOf(entry: MatrixEntry | null): Readiness | null {
+  if (!entry) return null;
+  return READINESS_META[entry.readiness] ? entry.readiness : null;
+}
+
+function metaFor(entry: MatrixEntry | null) {
+  if (!entry) return UNSCORED_META;
+  return READINESS_META[entry.readiness] ?? UNKNOWN_META;
+}
+
+// One-line gist of an entry, used by the grouped lists in the detail panel.
+function summarize(entry: MatrixEntry | null) {
+  const bucket = bucketOf(entry);
+  if (!entry) return "No result yet - use Refresh characters";
+  if (bucket === "Ready") return "All requirements met";
+  if (bucket === "Training") {
+    const eta = formatUtc(entry.estimatedFinishUtc);
+    return eta ? `Done ${eta}` : "ETA unknown (queue paused)";
+  }
+  if (bucket === "Missing") {
+    const count = (entry.missingSkills || []).length;
+    return count === 1 ? "1 skill missing" : `${count} skills missing`;
+  }
+  return "Unrecognised readiness value";
+}
+
+// Buckets in READINESS_ORDER, then anything unscored. Empty groups are dropped.
+function groupRows(rows: DetailRow[]) {
+  const groups: { key: string; meta: { glyph: string; label: string; className: string }; rows: DetailRow[] }[] = [];
+  for (const readiness of READINESS_ORDER) {
+    const members = rows.filter((row) => bucketOf(row.entry) === readiness);
+    if (members.length) groups.push({ key: readiness, meta: READINESS_META[readiness], rows: members });
+  }
+  const unscored = rows.filter((row) => bucketOf(row.entry) === null);
+  if (unscored.length) groups.push({ key: "Unscored", meta: UNSCORED_META, rows: unscored });
+  return groups;
+}
+
 export default function TriffSkills() {
   const [state, setState] = useState<TriffSkillsState>(EMPTY_STATE);
   const [error, setError] = useState("");
   const [confirmForgetId, setConfirmForgetId] = useState(0);
+  const [selection, setSelection] = useState<Selection>(null);
 
   useEffect(() => {
     const unsubscribe = onNativeMessage((message) => {
@@ -120,11 +183,29 @@ export default function TriffSkills() {
   }, []);
 
   const cells = useMemo(() => indexMatrix(state.matrix), [state.matrix]);
+  const charactersById = useMemo(
+    () => new Map(state.characters.map((character) => [character.characterId, character])),
+    [state.characters],
+  );
+  const plansByName = useMemo(() => new Map(state.plans.map((plan) => [plan.name, plan])), [state.plans]);
   const hasMatrix = state.characters.length > 0 && state.plans.length > 0;
+
+  // The selection is resolved against the live state on every render rather
+  // than pruned by an effect, so a character forgotten or a plan file deleted
+  // elsewhere simply stops resolving instead of leaving a dangling panel.
+  const selectedCharacter =
+    selection && selection.kind !== "plan" ? charactersById.get(selection.characterId) || null : null;
+  const selectedPlan = selection && selection.kind !== "character" ? plansByName.get(selection.planName) || null : null;
+
+  function select(next: Selection) {
+    setSelection(next);
+    setConfirmForgetId(0);
+  }
 
   function confirmForget(characterId: number) {
     send("triffskills:forget-character", { characterId });
     setConfirmForgetId(0);
+    setSelection(null);
   }
 
   return (
@@ -173,6 +254,10 @@ export default function TriffSkills() {
                 {READINESS_META[key].label}
               </span>
             ))}
+            <span className={UNSCORED_META.className}>
+              <em aria-hidden="true">{UNSCORED_META.glyph}</em>
+              {UNSCORED_META.label}
+            </span>
           </div>
         </aside>
 
@@ -180,7 +265,9 @@ export default function TriffSkills() {
           <header className="triffview-section-header">
             <div>
               <h2>Skill plan readiness</h2>
-              <p>Every character is scored against every plan in your plans folder. Failures show per row or per cell.</p>
+              <p>
+                Rows are plans, columns are characters. Pick a cell, a plan or a character for the detail below.
+              </p>
             </div>
             <span className="triffskills-plans-stamp">
               {state.plansUpdatedUtc ? `Plans updated ${formatUtc(state.plansUpdatedUtc)}` : "No plans yet"}
@@ -214,44 +301,112 @@ export default function TriffSkills() {
           ) : null}
 
           {hasMatrix ? (
-            <div className="triffskills-matrix-scroll" data-hud-scroll>
-              <table className="triffskills-matrix">
-                <thead>
-                  <tr>
-                    <th scope="col">Character</th>
-                    {state.plans.map((plan) => (
-                      <th scope="col" key={plan.name}>
-                        <span>{plan.name}</span>
-                        <small>{plan.requirementCount} skills</small>
-                      </th>
+            <>
+              <div className="triffskills-grid-scroll" data-hud-scroll>
+                <table className="triffskills-grid">
+                  <colgroup>
+                    <col className="triffskills-grid-label-col" />
+                    {state.characters.map((character) => (
+                      <col key={character.characterId} className="triffskills-grid-cell-col" />
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {state.characters.map((character) => (
-                    <tr key={character.characterId} className={isDegraded(character) ? "is-degraded" : ""}>
-                      <th scope="row">
-                        <CharacterCell
-                          character={character}
-                          confirming={confirmForgetId === character.characterId}
-                          onAskForget={() => setConfirmForgetId(character.characterId)}
-                          onCancelForget={() => setConfirmForgetId(0)}
-                          onConfirmForget={() => confirmForget(character.characterId)}
-                        />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th scope="col" className="triffskills-grid-corner">
+                        Plan
                       </th>
-                      {state.plans.map((plan) => (
-                        <td key={plan.name}>
-                          <MatrixCell
-                            entry={cells.get(matrixKey(character.characterId, plan.name)) || null}
-                            stale={isDegraded(character)}
-                          />
-                        </td>
+                      {state.characters.map((character) => (
+                        <th
+                          scope="col"
+                          key={character.characterId}
+                          className={isDegraded(character) ? "triffskills-grid-head is-degraded" : "triffskills-grid-head"}
+                        >
+                          <button
+                            type="button"
+                            className={
+                              selection?.kind === "character" && selection.characterId === character.characterId
+                                ? "triffskills-head-button is-selected"
+                                : "triffskills-head-button"
+                            }
+                            title={character.characterName}
+                            aria-label={`Character ${character.characterName}${isDegraded(character) ? ", degraded" : ""}`}
+                            onClick={() => select({ kind: "character", characterId: character.characterId })}
+                          >
+                            <span>{character.characterName}</span>
+                          </button>
+                        </th>
                       ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {state.plans.map((plan) => (
+                      <tr key={plan.name}>
+                        <th scope="row" className="triffskills-grid-label">
+                          <button
+                            type="button"
+                            className={
+                              selection?.kind === "plan" && selection.planName === plan.name
+                                ? "triffskills-plan-button is-selected"
+                                : "triffskills-plan-button"
+                            }
+                            title={plan.name}
+                            aria-label={`Plan ${plan.name}, ${plan.requirementCount} skills`}
+                            onClick={() => select({ kind: "plan", planName: plan.name })}
+                          >
+                            <strong>{plan.name}</strong>
+                            <small>{plan.requirementCount} skills</small>
+                          </button>
+                        </th>
+                        {state.characters.map((character) => {
+                          const entry = cells.get(matrixKey(character.characterId, plan.name)) || null;
+                          const meta = metaFor(entry);
+                          const stale = isDegraded(character);
+                          const selected =
+                            selection?.kind === "cell" &&
+                            selection.characterId === character.characterId &&
+                            selection.planName === plan.name;
+
+                          return (
+                            <td key={character.characterId} className={stale ? "is-degraded" : ""}>
+                              <button
+                                type="button"
+                                className={[
+                                  "triffskills-glyph",
+                                  meta.className,
+                                  stale ? "is-stale" : "",
+                                  selected ? "is-selected" : "",
+                                ]
+                                  .filter(Boolean)
+                                  .join(" ")}
+                                aria-label={`${character.characterName}, ${plan.name}: ${meta.label}${stale ? ", stale" : ""}`}
+                                onClick={() =>
+                                  select({ kind: "cell", characterId: character.characterId, planName: plan.name })
+                                }
+                              >
+                                <em aria-hidden="true">{meta.glyph}</em>
+                              </button>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <DetailPanel
+                selection={selection}
+                character={selectedCharacter}
+                plan={selectedPlan}
+                characters={state.characters}
+                plans={state.plans}
+                cells={cells}
+                confirming={Boolean(selectedCharacter) && confirmForgetId === selectedCharacter?.characterId}
+                onAskForget={() => selectedCharacter && setConfirmForgetId(selectedCharacter.characterId)}
+                onCancelForget={() => setConfirmForgetId(0)}
+                onConfirmForget={() => selectedCharacter && confirmForget(selectedCharacter.characterId)}
+              />
+            </>
           ) : null}
         </div>
       </section>
@@ -259,26 +414,89 @@ export default function TriffSkills() {
   );
 }
 
-function CharacterCell({
+function DetailPanel({
+  selection,
   character,
+  plan,
+  characters,
+  plans,
+  cells,
   confirming,
   onAskForget,
   onCancelForget,
   onConfirmForget,
 }: {
-  character: SkillCharacter;
+  selection: Selection;
+  character: SkillCharacter | null;
+  plan: SkillPlanSummary | null;
+  characters: SkillCharacter[];
+  plans: SkillPlanSummary[];
+  cells: Map<string, MatrixEntry>;
   confirming: boolean;
   onAskForget: () => void;
   onCancelForget: () => void;
   onConfirmForget: () => void;
 }) {
+  if (!selection) {
+    return (
+      <div className="triffskills-detail is-empty">
+        Nothing selected. Pick a cell for one character against one plan, a plan name for every character, or a
+        character name for every plan and that character&apos;s controls.
+      </div>
+    );
+  }
+
+  if (selection.kind === "cell") {
+    if (!character || !plan) return <StaleSelection />;
+    return (
+      <div className="triffskills-detail">
+        <header className="triffskills-detail-head">
+          <h3>
+            {character.characterName} / {plan.name}
+          </h3>
+          <small>{plan.requirementCount} skills in this plan</small>
+        </header>
+        <CellDetail entry={cells.get(matrixKey(character.characterId, plan.name)) || null} stale={isDegraded(character)} />
+      </div>
+    );
+  }
+
+  if (selection.kind === "plan") {
+    if (!plan) return <StaleSelection />;
+    const rows: DetailRow[] = characters.map((item) => ({
+      key: String(item.characterId),
+      label: item.characterName,
+      entry: cells.get(matrixKey(item.characterId, plan.name)) || null,
+    }));
+
+    return (
+      <div className="triffskills-detail">
+        <header className="triffskills-detail-head">
+          <h3>{plan.name}</h3>
+          <small>
+            {plan.requirementCount} skills / {characters.length} characters
+          </small>
+        </header>
+        <DetailGroups rows={rows} />
+      </div>
+    );
+  }
+
+  if (!character) return <StaleSelection />;
   const degraded = isDegraded(character);
   const stamp = formatUtc(character.fetchedUtc);
+  const rows: DetailRow[] = plans.map((item) => ({
+    key: item.name,
+    label: item.name,
+    entry: cells.get(matrixKey(character.characterId, item.name)) || null,
+  }));
 
   return (
-    <div className="triffskills-character">
-      <strong>{character.characterName}</strong>
-      <small>{stamp ? `${degraded ? "Last good" : "Updated"} ${stamp}` : "Never fetched"}</small>
+    <div className="triffskills-detail">
+      <header className="triffskills-detail-head">
+        <h3>{character.characterName}</h3>
+        <small>{stamp ? `${degraded ? "Last good" : "Updated"} ${stamp}` : "Never fetched"}</small>
+      </header>
 
       {character.needsReauth ? (
         <span className="triffskills-flag">
@@ -299,6 +517,10 @@ function CharacterCell({
         </span>
       ) : null}
 
+      <DetailGroups rows={rows} />
+
+      {/* The 34px column header cannot hold a destructive control and its confirmation
+          copy, so Forget lives here - selecting the character is what surfaces it. */}
       {confirming ? (
         <>
           <div className="triffskills-row-actions">
@@ -325,23 +547,52 @@ function CharacterCell({
   );
 }
 
-function MatrixCell({ entry, stale }: { entry: MatrixEntry | null; stale: boolean }) {
+function StaleSelection() {
+  return <div className="triffskills-detail is-empty">That selection no longer exists. Pick another cell.</div>;
+}
+
+function DetailGroups({ rows }: { rows: DetailRow[] }) {
+  const groups = groupRows(rows);
+  if (!groups.length) return null;
+
+  return (
+    <div className="triffskills-groups">
+      {groups.map((group) => (
+        <section key={group.key} className={`triffskills-group ${group.meta.className}`}>
+          <h4>
+            <em aria-hidden="true">{group.meta.glyph}</em>
+            {group.meta.label}
+            <span>{group.rows.length}</span>
+          </h4>
+          <ul>
+            {group.rows.map((row) => (
+              <li key={row.key}>
+                <strong>{row.label}</strong>
+                <small>{summarize(row.entry)}</small>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function CellDetail({ entry, stale }: { entry: MatrixEntry | null; stale: boolean }) {
   if (!entry) {
     return (
       <div className="triffskills-cell is-unscored">
         <span className="triffskills-state">
-          <em aria-hidden="true">?</em>
-          Not scored
+          <em aria-hidden="true">{UNSCORED_META.glyph}</em>
+          {UNSCORED_META.label}
         </span>
         <small>No result for this character and plan yet. Use Refresh characters.</small>
       </div>
     );
   }
 
-  // A readiness value outside the three known strings is an anomaly, not a
-  // confident "Missing" - route it to the same unscored/unknown vocabulary
-  // the null-entry branch above uses, rather than silently reading as Missing.
-  const meta = READINESS_META[entry.readiness] ?? { glyph: "?", label: "Unknown", className: "is-unscored" };
+  const meta = metaFor(entry);
+  const bucket = bucketOf(entry);
   const missing = entry.missingSkills || [];
   const unknown = entry.unknownSkills || [];
   const eta = formatUtc(entry.estimatedFinishUtc);
@@ -355,11 +606,9 @@ function MatrixCell({ entry, stale }: { entry: MatrixEntry | null; stale: boolea
 
       {stale ? <small className="triffskills-stale">Stale - last good data</small> : null}
 
-      {entry.readiness === "Training" ? (
-        <small>{eta ? `Done ${eta}` : "Training, ETA unknown (queue paused)"}</small>
-      ) : null}
+      {bucket === "Training" ? <small>{eta ? `Done ${eta}` : "Training, ETA unknown (queue paused)"}</small> : null}
 
-      {entry.readiness === "Missing" && missing.length ? (
+      {bucket === "Missing" && missing.length ? (
         <ul className="triffskills-skill-list">
           {missing.map((skill) => (
             <li key={`${skill.skillName}-${skill.level}`}>
