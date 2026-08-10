@@ -3,8 +3,8 @@ using System.IO;
 namespace TriffView.TriffSkills;
 
 // Pure, I/O-free rules for a plan name arriving in a triffskills:import-plan web
-// message. Split out of TriffSkillsController for the same reason PlanCache is its own
-// file (PlanCache.cs): TriffSkillsController.cs pulls in HttpClient, CredentialStore and
+// message. Split out of TriffSkillsController for the same reason PlanStore is its own
+// file (PlanStore.cs): TriffSkillsController.cs pulls in HttpClient, CredentialStore and
 // the rest of the SSO/ESI plumbing, none of which this logic needs or should have to
 // link against just to be exercised in .scratch-tests.
 //

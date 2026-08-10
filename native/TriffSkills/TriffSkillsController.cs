@@ -122,6 +122,7 @@ internal sealed class TriffSkillsController
         _postToHud = postToHud;
         _state = TriffSkillsState.Load();
         _skillIds = SkillIdCache.Load();
+        PlanStore.EnsureSeeded(TriffSkillsPaths.PlansDir);
         LoadPlans();
     }
 
@@ -868,7 +869,7 @@ internal sealed class TriffSkillsController
     {
         try
         {
-            _plans = PlanCache.LoadAll(TriffSkillsPaths.PlansDir).ToList();
+            _plans = PlanStore.LoadAll(TriffSkillsPaths.PlansDir).ToList();
             _plansUpdatedUtc = Directory.Exists(TriffSkillsPaths.PlansDir) && _plans.Count > 0
                 ? new DateTimeOffset(Directory.GetLastWriteTimeUtc(TriffSkillsPaths.PlansDir), TimeSpan.Zero)
                 : null;
@@ -876,7 +877,7 @@ internal sealed class TriffSkillsController
         catch (Exception ex)
         {
             // Deliberately leaves _plans and _plansUpdatedUtc exactly as they were. LoadAll
-            // isolates a bad file per-file (PlanCache.cs), so a throw out of here is a
+            // isolates a bad file per-file (PlanStore.cs), so a throw out of here is a
             // directory-level failure (a permission-denied %APPDATA%, an antivirus scan
             // holding the directory) rather than one bad plan - and discarding an
             // already-good in-memory list on a later, possibly transient, re-read would
