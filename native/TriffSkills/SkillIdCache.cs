@@ -61,7 +61,6 @@ internal sealed class SkillIdCache
     public void Save()
     {
         var path = CachePath;
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
         // Unique per save for the same reason TriffSkillsState.Save uses one: a fixed
         // ".tmp" is shared state between concurrent saves. This cache is pure derived
@@ -70,6 +69,11 @@ internal sealed class SkillIdCache
         var temp = $"{path}.{Guid.NewGuid():N}.tmp";
         try
         {
+            // Inside the guard for the same reason as TriffSkillsState.Save: this throws
+            // on a locked or redirected profile directory, and dropping the write rather
+            // than propagating it is the documented behavior.
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+
             File.WriteAllText(temp, JsonSerializer.Serialize(Map, JsonOptions), new UTF8Encoding(false));
 
             // Write-temp-then-replace, so a crash mid-write leaves the previous file rather

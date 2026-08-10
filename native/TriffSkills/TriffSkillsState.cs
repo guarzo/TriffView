@@ -70,9 +70,6 @@ internal sealed class TriffSkillsState
 
     public void Save()
     {
-        Directory.CreateDirectory(TriffSkillsPaths.Root);
-        var json = JsonSerializer.Serialize(Normalize(), TriffSkillsJson.Options);
-
         // Diverges from EveSettingsLocalState.Save (EveSettingsController.cs:1136-1140),
         // which calls File.WriteAllText directly. state.json holds every character's
         // last-good skills and queue, so a crash mid-write would cost real data that
@@ -87,6 +84,12 @@ internal sealed class TriffSkillsState
         var tempPath = $"{TriffSkillsPaths.StatePath}.{Guid.NewGuid():N}.tmp";
         try
         {
+            // CreateDirectory belongs inside the guard: a locked or redirected profile
+            // directory throws UnauthorizedAccessException here, and the whole point of
+            // the catch below is that a failed write must not abort the caller's pass.
+            Directory.CreateDirectory(TriffSkillsPaths.Root);
+            var json = JsonSerializer.Serialize(Normalize(), TriffSkillsJson.Options);
+
             File.WriteAllText(tempPath, json, new UTF8Encoding(false));
             if (File.Exists(TriffSkillsPaths.StatePath))
             {

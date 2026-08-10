@@ -88,6 +88,18 @@ internal sealed class TriffSkillsController
         return DefaultClientId;
     }
 
+    // Resolved once per process. ResolveClientId does a File.Exists plus a ReadAllText,
+    // and PostState asks for the client ID on every post - once per character during a
+    // refresh pass - so leaving it uncached put a file probe on a hot path for no gain.
+    // It also fixes a subtler problem: BuildAuthorizeUrl and the token exchange resolved
+    // independently, so editing client-id.txt between the two sent SSO a different
+    // client_id than the authorization was issued for and the exchange failed with an
+    // opaque error. One value for the process means one value for the whole flow.
+    // Cost of caching: an override now takes effect on restart rather than immediately.
+    private static readonly Lazy<string> LazyClientId = new(ResolveClientId);
+
+    private static string ClientId => LazyClientId.Value;
+
     // Mirrors TriffFleetsController's own check (:1539): a blank client ID means the build
     // has no usable registration, whether that came from the constant or from an override.
     // Kept as a helper because both StartAuthAsync and PostState need the same answer.
@@ -265,7 +277,7 @@ internal sealed class TriffSkillsController
         {
             ["response_type"] = "code",
             ["redirect_uri"] = RedirectUri,
-            ["client_id"] = ResolveClientId(),
+            ["client_id"] = ClientId,
             ["scope"] = Scopes,
             ["state"] = state,
             ["code_challenge"] = challenge,
@@ -443,7 +455,7 @@ internal sealed class TriffSkillsController
         {
             ["grant_type"] = "authorization_code",
             ["code"] = code,
-            ["client_id"] = ResolveClientId(),
+            ["client_id"] = ClientId,
             ["code_verifier"] = verifier,
             ["redirect_uri"] = RedirectUri,
         };
@@ -470,7 +482,7 @@ internal sealed class TriffSkillsController
         {
             ["grant_type"] = "refresh_token",
             ["refresh_token"] = refreshToken,
-            ["client_id"] = ResolveClientId(),
+            ["client_id"] = ClientId,
         };
         var token = await SendTokenRequestAsync(form);
         if (!string.IsNullOrWhiteSpace(token.RefreshToken))
@@ -506,7 +518,7 @@ internal sealed class TriffSkillsController
             return;
         }
 
-        var clientId = ResolveClientId();
+        var clientId = ClientId;
         if (!IsClientIdConfigured(clientId))
         {
             PostError("auth", $"TriffSkills has no EVE SSO client ID. Set {ClientIdEnvVar}, or put the ID in {Path.Combine(TriffSkillsPaths.Root, "client-id.txt")}.");
@@ -517,7 +529,11 @@ internal sealed class TriffSkillsController
         _authInProgress = true;
         PostState(force: true);
 
-        using var listener = new TcpListener(IPAddress.Loopback, 51777);
+        // Port comes from RedirectUri rather than a second literal. The two must agree —
+        // EVE SSO redirects to the registered URL, so a listener on any other port waits
+        // out the full 5-minute timeout with nothing to accept — and one source cannot
+        // disagree with itself.
+        using var listener = new TcpListener(IPAddress.Loopback, new Uri(RedirectUri).Port);
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         var authSucceeded = false;
         try
@@ -1059,7 +1075,7 @@ internal sealed class TriffSkillsController
             var state = new
             {
                 type = "triffskills:state",
-                authConfigured = IsClientIdConfigured(ResolveClientId()),
+                authConfigured = IsClientIdConfigured(ClientId),
                 authInProgress = _authInProgress,
                 refreshInFlight = _charactersRefreshInFlight,
                 characters = _state.Characters.Select(character => new

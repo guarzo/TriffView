@@ -5232,6 +5232,17 @@ button:disabled {
   color: var(--tv-danger-text);
 }
 
+/* Must come after the two action rules above. `button:disabled` alone never declares a
+   background, so a disabled Import or Replace kept the accent or danger fill and read as
+   enabled — ImportPlanModal disables them whenever the name is empty or the hint returns
+   a message, so that state is reachable in normal use. */
+.triffskills-import-actions .primary-action:disabled,
+.triffskills-import-actions .danger-action:disabled {
+  border-color: var(--tv-border);
+  background: var(--tv-control-bg);
+  color: var(--tv-disabled);
+}
+
 @media (max-width: 980px) {
   .triffskills-grid {
     --tv-skills-label-w: 150px;

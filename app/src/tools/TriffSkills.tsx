@@ -1556,10 +1556,15 @@ function ImportPlanModal({
 
   return (
     <div className="triffview-modal-backdrop">
-      <section className="triffview-hotkey-modal triffskills-import-modal">
+      <section
+        className="triffview-hotkey-modal triffskills-import-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="triffskills-import-title"
+      >
         <header>
           <div>
-            <h3>Import plan from clipboard</h3>
+            <h3 id="triffskills-import-title">Import plan from clipboard</h3>
             <p>
               {draft.preview.count === 1 ? "1 skill parsed." : `${draft.preview.count} skills parsed.`} Name the plan
               to save it.

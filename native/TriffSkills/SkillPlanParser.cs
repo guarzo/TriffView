@@ -51,7 +51,14 @@ internal static class SkillPlanParser
                 continue;
             }
 
-            var skillName = line[..lastSpace];
+            // TrimEnd because the split is on the *last* space, so "Survey  IV" leaves the
+            // extra space on the name. SkillIdCache stores trimmed keys and
+            // SkillPlanEvaluator looks the name up directly, so an untrimmed name resolves
+            // to no typeID and the whole plan scores Missing for every character. Plan
+            // files are hand-written, so column-aligned lines reach this.
+            // No empty-name guard is needed: line is already trimmed, so it cannot begin
+            // with a space, so lastSpace > 0 and the name has a non-space first character.
+            var skillName = line[..lastSpace].TrimEnd();
             if (!TryParseLevel(line[(lastSpace + 1)..], out var level))
             {
                 continue;
