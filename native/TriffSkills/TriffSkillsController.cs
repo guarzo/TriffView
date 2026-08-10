@@ -16,19 +16,34 @@ namespace TriffView.TriffSkills;
 
 internal sealed class TriffSkillsController
 {
-    // TriffSkills carries its own SSO registration constants rather than reusing
-    // TriffFleetsController's. The client ID names the *application* to CCP, so the
-    // two tools must be able to point at different registrations, and
-    // port 51778 deliberately differs from TriffFleets' 51777
-    // (TriffFleetsController.cs:23, listener at :324) so the loopback listeners cannot collide.
+    // TriffSkills shares TriffFleets' EVE application registration rather than carrying
+    // its own. An EVE app is pinned to exactly one callback URL, so a second registration
+    // would mean a second callback URL and a second loopback port for no gain: the two
+    // tools are the same application to CCP, shipped in the same binary, and the scopes an
+    // app may request are editable on the developer site at any time. Sharing means the
+    // maintainer adds esi-skills.read_skills.v1 and esi-skills.read_skillqueue.v1 to the
+    // registration he already has, and nothing here needs configuring.
+    //
+    // The client ID and redirect below therefore match TriffFleetsController.cs:22-23
+    // verbatim, including the /trifffleets/ path - that string is the registered callback,
+    // not a claim about which tool is listening. Duplicated as constants rather than
+    // referenced from TriffFleetsController so this branch does not have to widen the
+    // visibility of a field in the maintainer's file.
+    //
+    // Consequence to know about: both tools now bind 127.0.0.1:51777 during an
+    // authorization. The listener only lives for the duration of one auth flow, so this
+    // collides only if a user starts both logins at once - the second gets a SocketException
+    // reported through the catch in StartAuthAsync. Scopes travel on the per-request
+    // `scope` parameter, so Fleet Manager's consent screen is unchanged by any of this,
+    // and refresh tokens stay separated by the TriffView.TriffSkills. credential prefix.
     //
     // Unlike TriffFleets, which hardcodes its client ID (TriffFleetsController.cs:22),
-    // TriffSkills resolves the effective value at runtime so a maintainer running his
-    // own EVE application does not have to edit and rebuild. The const below is only
-    // the fallback. See ResolveClientId().
-    private const string DefaultClientId = "REPLACE_WITH_OUR_DEV_REGISTRATION";
+    // TriffSkills resolves the effective value at runtime so anyone building against their
+    // own EVE application does not have to edit and rebuild. The const below is only the
+    // fallback. See ResolveClientId().
+    private const string DefaultClientId = "7d2454c3191c4254a4b67d8f71f2b972";
     private const string ClientIdEnvVar = "TRIFFVIEW_TRIFFSKILLS_CLIENT_ID";
-    private const string RedirectUri = "http://127.0.0.1:51778/triffskills/callback/";
+    private const string RedirectUri = "http://127.0.0.1:51777/trifffleets/callback/";
     private const string AuthorizeEndpoint = "https://login.eveonline.com/v2/oauth/authorize";
     private const string TokenEndpoint = "https://login.eveonline.com/v2/oauth/token";
     private const string Scopes = "esi-skills.read_skills.v1 esi-skills.read_skillqueue.v1";
@@ -73,13 +88,12 @@ internal sealed class TriffSkillsController
         return DefaultClientId;
     }
 
-    // The placeholder is a real string that resolves successfully, so "did we get a value"
-    // is not the same question as "can we authenticate". Both call sites need the second
-    // one, and comparing against the constant keeps them from drifting apart if the
-    // placeholder is ever replaced with a real registration.
+    // Mirrors TriffFleetsController's own check (:1539): a blank client ID means the build
+    // has no usable registration, whether that came from the constant or from an override.
+    // Kept as a helper because both StartAuthAsync and PostState need the same answer.
     private static bool IsClientIdConfigured(string? clientId)
     {
-        return !string.IsNullOrWhiteSpace(clientId) && clientId != DefaultClientId;
+        return !string.IsNullOrWhiteSpace(clientId);
     }
 
     private static readonly HttpClient Http = new()
@@ -284,8 +298,8 @@ internal sealed class TriffSkillsController
     }
 
     // Path comparison for the callback request. An exact ordinal compare against
-    // "/triffskills/callback/" discards a request to "/triffskills/callback" or
-    // "/TriffSkills/Callback/", and a discarded candidate is silent by design - so a
+    // "/trifffleets/callback/" discards a request to "/trifffleets/callback" or
+    // "/TriffFleets/Callback/", and a discarded candidate is silent by design - so a
     // near-miss redirect would present as a five-minute hang with nothing in the UI to
     // explain it. URL paths are not case sensitive in practice here (the same origin,
     // the same registration), and the trailing slash carries no meaning, so both are
@@ -495,7 +509,7 @@ internal sealed class TriffSkillsController
         var clientId = ResolveClientId();
         if (!IsClientIdConfigured(clientId))
         {
-            PostError("auth", $"TriffSkills needs a registered EVE SSO client ID carrying esi-skills.read_skills.v1 and esi-skills.read_skillqueue.v1. Set {ClientIdEnvVar}, or put the ID in {Path.Combine(TriffSkillsPaths.Root, "client-id.txt")}.");
+            PostError("auth", $"TriffSkills has no EVE SSO client ID. Set {ClientIdEnvVar}, or put the ID in {Path.Combine(TriffSkillsPaths.Root, "client-id.txt")}.");
             PostState(force: true);
             return;
         }
@@ -503,7 +517,7 @@ internal sealed class TriffSkillsController
         _authInProgress = true;
         PostState(force: true);
 
-        using var listener = new TcpListener(IPAddress.Loopback, 51778);
+        using var listener = new TcpListener(IPAddress.Loopback, 51777);
         using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         var authSucceeded = false;
         try
@@ -539,7 +553,7 @@ internal sealed class TriffSkillsController
                 // and then sends nothing (exactly what a browser preconnect socket is) would
                 // block this loop forever. The 5-minute CTS would fire and nothing would
                 // happen: no timeout message, no `finally`, _authInProgress stuck true and
-                // port 51778 still bound until the app restarted. Registering a Dispose on
+                // port 51777 still bound until the app restarted. Registering a Dispose on
                 // the candidate token is what actually breaks the read - closing the socket
                 // faults the pending receive into the catch below, and the loop moves on to
                 // the next candidate with the 5-minute budget still running.

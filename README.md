@@ -48,7 +48,7 @@ TriffSkills shows which shared skill plans your characters can already fly. Auth
 
 Nothing is downloaded. Each plan is a plain `.txt` file in `%APPDATA%\TriffHud\TriffSkills\plans`, named after the plan, one skill per line as name then level (`Navigation V`). TriffSkills reads that folder on start; Open plans folder takes you there and Reload plans picks up what you added without restarting. One starter plan, Core Ship Skills, is written there the first time TriffSkills runs so the matrix has something to score against — delete it if you do not want it and it will not come back.
 
-TriffSkills needs its own EVE SSO client ID, because the ID that ships in the build is a placeholder. Register an application at the EVE developer portal with the `esi-skills.read_skills.v1` and `esi-skills.read_skillqueue.v1` scopes and a `http://127.0.0.1:51778/triffskills/callback/` callback URL, then supply the ID either in `client-id.txt` under `%APPDATA%\TriffHud\TriffSkills\` or through the `TRIFFVIEW_TRIFFSKILLS_CLIENT_ID` environment variable. Until one of those is set, adding a character reports what is missing and does nothing else.
+TriffSkills uses the same EVE application registration as Fleet Manager, so there is nothing to configure — the consent screen asks for `esi-skills.read_skills.v1` and `esi-skills.read_skillqueue.v1` and nothing else. If you are building TriffView against your own registration, point TriffSkills at it with `client-id.txt` under `%APPDATA%\TriffHud\TriffSkills\` or the `TRIFFVIEW_TRIFFSKILLS_CLIENT_ID` environment variable; the callback URL is `http://127.0.0.1:51777/trifffleets/callback/`.
 
 TriffSkills is read-only. It does not train skills, buy skill injectors, change your queue, or control EVE clients.
 
