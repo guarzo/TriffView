@@ -473,7 +473,8 @@ internal static class LabelOverlayPlan
 - [ ] **Step 5: Run the tests and verify they pass**
 
 Run the test command from Global Constraints.
-Expected: `Passed! - Failed: 0, Passed: 29` (15 existing + 14 new).
+Expected: `Passed! - Failed: 0, Passed: 31` (15 existing + 16 new — the
+`AnyContentChangeIsARepaint` theory contributes 4 cases).
 
 If `FormBoundsEqualTheFrameWhenTheLabelFitsInside` fails, the shadow inflation is pushing bounds past the frame on a case where the label fits — check that `LabelRect` is being clamped by `Rectangle.Union` with the frame rather than replacing it.
 
@@ -887,7 +888,7 @@ Expected: no output. `TriffViewLabelOverlayItemForm` is a different name and wil
 - [ ] **Step 5: Run the tests**
 
 Run the test command from Global Constraints.
-Expected: `Passed! - Failed: 0, Passed: 29`
+Expected: `Passed! - Failed: 0, Passed: 31`
 
 - [ ] **Step 6: Commit**
 
