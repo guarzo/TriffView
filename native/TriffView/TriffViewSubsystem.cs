@@ -2002,7 +2002,6 @@ internal sealed class ActivePreviewAlert
 internal sealed class TriffViewOverlayForm : Forms.Form
 {
     private const int ResizeHitSize = 16;
-    private const int DragThreshold = 4;
     private readonly Dictionary<nint, PreviewState> _previews = new();
     private readonly Dictionary<int, TriffViewHotkeyCommand> _hotkeys = new();
     private readonly Forms.Timer _alertTimer = new() { Interval = 80 };
@@ -2420,7 +2419,8 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 
         var deltaX = e.Location.X - _mouseDownPoint.X;
         var deltaY = e.Location.Y - _mouseDownPoint.Y;
-        if (_mouseMode == MouseMode.PendingClick && Math.Abs(deltaX) + Math.Abs(deltaY) > DragThreshold)
+        if (_mouseMode == MouseMode.PendingClick
+            && !PreviewPointerGesture.IsClick(_mouseDownPoint, e.Location, Forms.SystemInformation.DragSize))
         {
             _mouseMode = _profile.LockPreviews ? MouseMode.None : MouseMode.Move;
         }
@@ -2466,6 +2466,23 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 
         if (mode is MouseMode.Move or MouseMode.Resize)
         {
+            // A left press that drifted past the drag metric enters Move mode and never leaves
+            // it, even if the cursor comes back. Judging the gesture on where the press actually
+            // ended means an imprecise click still switches clients instead of being swallowed
+            // and silently nudging the preview a few pixels.
+            if (mode == MouseMode.Move
+                && e.Button == Forms.MouseButtons.Left
+                && PreviewPointerGesture.IsClick(_mouseDownPoint, e.Location, Forms.SystemInformation.DragSize))
+            {
+                preview.FrameRect = _mouseStartRect;
+                UpdateThumbnail(preview);
+                UpdateWindowRegion();
+                RefreshLabelOverlay();
+                Invalidate();
+                ActivateRequested?.Invoke(preview.Client);
+                return;
+            }
+
             PreviewLayoutChanged?.Invoke(preview.Client.StableKey, TriffViewRect.FromRectangle(preview.FrameRect));
             return;
         }

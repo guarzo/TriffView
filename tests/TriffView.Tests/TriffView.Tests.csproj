@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>TriffView.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Link the pure logic files directly. NOT a ProjectReference: TriffView.csproj is
+       net8.0-windows with UseWPF, and these types are internal. These files depend only on
+       System.Drawing.Primitives, which is cross-platform, so they build and test on net8.0. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffView\PreviewPointerGesture.cs" Link="PreviewPointerGesture.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+</Project>
