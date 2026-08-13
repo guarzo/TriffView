@@ -3008,6 +3008,315 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 }
 
 
+/// <summary>
+/// One label, on its own small layered window sitting above its preview's DWM thumbnail.
+///
+/// <para>Window styles are copied from the original desktop-spanning overlay: only the size and
+/// number of windows changed, so anything that behaved correctly before still does.</para>
+///
+/// <para>This form always repaints its whole surface. A partial <c>Invalidate(rect)</c> does not
+/// reach a layered window's composited surface - it leaves stale "ghost" text behind - which is
+/// exactly why the surface is now small enough that a full repaint is cheap. Do not add bounded
+/// invalidation here.</para>
+/// </summary>
+internal sealed class TriffViewLabelOverlayItemForm : Forms.Form
+{
+    private static readonly Color TransparentBackColor = Color.FromArgb(1, 2, 3);
+
+    private TriffViewLabelOverlayItem? _item;
+    private int _textHeight;
+    private bool _allowTopmost = true;
+
+    public TriffViewLabelOverlayItemForm()
+    {
+        FormBorderStyle = Forms.FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = Forms.FormStartPosition.Manual;
+        BackColor = TransparentBackColor;
+        TransparencyKey = TransparentBackColor;
+        DoubleBuffered = true;
+        Font = new Font("Segoe UI", 9, FontStyle.Regular);
+    }
+
+    public bool AllowTopmost
+    {
+        get => _allowTopmost;
+        set => _allowTopmost = value;
+    }
+
+    protected override bool ShowWithoutActivation => true;
+
+    protected override Forms.CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= TriffViewNativeMethods.WsExToolWindow
+                | TriffViewNativeMethods.WsExNoActivate
+                | TriffViewNativeMethods.WsExTransparent
+                | TriffViewNativeMethods.WsExLayered;
+            if (_allowTopmost) cp.ExStyle |= TriffViewNativeMethods.WsExTopmost;
+            return cp;
+        }
+    }
+
+    protected override void WndProc(ref Forms.Message m)
+    {
+        if (m.Msg == TriffViewNativeMethods.WmNcHitTest)
+        {
+            m.Result = TriffViewNativeMethods.HtTransparent;
+            return;
+        }
+
+        base.WndProc(ref m);
+    }
+
+    /// <summary>
+    /// Measures the label the same way the painter does, so the form's bounds and its drawing
+    /// cannot disagree about how tall the text is.
+    /// </summary>
+    public int MeasureTextHeight(TriffViewLabelOverlayItem item)
+    {
+        var fontSize = Math.Max(8, Math.Min(32, item.FontSize));
+        using var labelFont = new Font(Font.FontFamily, fontSize, FontStyle.Regular, GraphicsUnit.Point);
+        using var graphics = CreateGraphics();
+        return Math.Max(18, (int)Math.Ceiling(labelFont.GetHeight(graphics)) + 8);
+    }
+
+    /// <summary>Repositions without repainting. Used when only the preview's location changed.</summary>
+    public void MoveTo(TriffViewLabelOverlayItem item, Rectangle screenBounds)
+    {
+        _item = item;
+        if (Bounds != screenBounds) Bounds = screenBounds;
+    }
+
+    /// <summary>Repositions and repaints. Used when the size or any drawn property changed.</summary>
+    public void SetContent(TriffViewLabelOverlayItem item, Rectangle screenBounds, int textHeight)
+    {
+        _item = item;
+        _textHeight = textHeight;
+        if (Bounds != screenBounds) Bounds = screenBounds;
+        Invalidate();
+    }
+
+    public void ApplyTopmostPolicy(bool force = false)
+    {
+        if (!force && TopMost == _allowTopmost) return;
+        TopMost = _allowTopmost;
+        if (!IsHandleCreated) return;
+
+        TriffViewNativeMethods.SetWindowPos(
+            Handle,
+            _allowTopmost ? TriffViewNativeMethods.HwndTopmost : TriffViewNativeMethods.HwndNotTopmost,
+            0,
+            0,
+            0,
+            0,
+            TriffViewNativeMethods.SwpNoMove | TriffViewNativeMethods.SwpNoSize | TriffViewNativeMethods.SwpNoActivate
+        );
+    }
+
+    protected override void OnPaint(Forms.PaintEventArgs e)
+    {
+        e.Graphics.Clear(TransparentBackColor);
+        if (_item == null) return;
+
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+        // The item's rectangles are in virtual-desktop client space; this form's client area
+        // starts at its own bounds, so shift the item so it draws at the right place locally.
+        var localFrame = _item.Frame;
+        localFrame.Offset(-Bounds.X + _formOriginOffset.X, -Bounds.Y + _formOriginOffset.Y);
+        DrawItem(e.Graphics, _item with { Frame = localFrame }, _textHeight);
+    }
+
+    /// <summary>
+    /// Offset from virtual-desktop client space to screen space, i.e. the virtual desktop origin.
+    /// Set by the controller, which owns that value.
+    /// </summary>
+    private Point _formOriginOffset;
+
+    public void SetVirtualDesktopOrigin(Point origin) => _formOriginOffset = origin;
+
+    private void DrawItem(Graphics graphics, TriffViewLabelOverlayItem item, int textHeight)
+    {
+        if (string.IsNullOrWhiteSpace(item.Text)) return;
+
+        var fontSize = Math.Max(8, Math.Min(32, item.FontSize));
+        using var labelFont = new Font(Font.FontFamily, fontSize, FontStyle.Regular, GraphicsUnit.Point);
+        using var textBrush = new SolidBrush(item.TextColor);
+        using var shadowBrush = new SolidBrush(Color.FromArgb(205, 0, 0, 0));
+        using var format = new StringFormat
+        {
+            Trimming = StringTrimming.EllipsisCharacter,
+            LineAlignment = StringAlignment.Center,
+            Alignment = StringAlignment.Center,
+        };
+
+        var labelRect = (RectangleF)LabelOverlayPlan.LabelRect(item, textHeight);
+        var shadowRect = labelRect;
+        shadowRect.Offset(1, 1);
+        graphics.DrawString(item.Text, labelFont, shadowBrush, shadowRect, format);
+        graphics.DrawString(item.Text, labelFont, textBrush, labelRect, format);
+    }
+}
+
+/// <summary>
+/// Owns one <see cref="TriffViewLabelOverlayItemForm"/> per preview, keyed by the client's
+/// window handle - the same identity <c>_previews</c> uses.
+///
+/// <para>Replaces a single form spanning the whole virtual desktop, whose every repaint covered
+/// ~62.6M pixels and cost ~40ms on the UI thread. Dragging a preview changes only the frame's
+/// location, which is handled here by moving a window and not repainting at all.</para>
+///
+/// <para>Forms are pooled rather than destroyed when a client goes away: client open/close
+/// cycles are frequent, and creating and destroying real windows each time invites flicker and
+/// handle churn.</para>
+/// </summary>
+internal sealed class TriffViewLabelOverlayController : IDisposable
+{
+    private readonly Dictionary<nint, TriffViewLabelOverlayItemForm> _forms = new();
+    private readonly Dictionary<nint, TriffViewLabelOverlayItem> _rendered = new();
+
+    // Caches each form's last-measured text height alongside _rendered. A Move only ever fires
+    // when content (including FontSize) is unchanged from the last Create/Repaint, so the text
+    // height cannot have changed either - re-measuring on every Move would construct a Font and
+    // a Graphics per call, and a single drag produces roughly 960 moves. Populated on
+    // Create/Repaint, removed on Retire; do not let it drift out of sync with _rendered.
+    private readonly Dictionary<nint, int> _textHeights = new();
+    private readonly Stack<TriffViewLabelOverlayItemForm> _pool = new();
+
+    private Forms.Form? _owner;
+    private Rectangle _virtualDesktop;
+    private bool _allowTopmost = true;
+
+    public Forms.Form? Owner
+    {
+        get => _owner;
+        set
+        {
+            _owner = value;
+            foreach (var form in _forms.Values) form.Owner = value;
+        }
+    }
+
+    public bool AllowTopmost
+    {
+        get => _allowTopmost;
+        set
+        {
+            _allowTopmost = value;
+            foreach (var form in _forms.Values) form.AllowTopmost = value;
+        }
+    }
+
+    public void SetVirtualDesktop(Rectangle virtualDesktop)
+    {
+        if (_virtualDesktop == virtualDesktop) return;
+        _virtualDesktop = virtualDesktop;
+
+        // Every form's screen position is derived from this origin, so they all have to move.
+        // Reuse the cached text height rather than re-measuring; see the field comment above.
+        foreach (var (handle, form) in _forms)
+        {
+            if (!_rendered.TryGetValue(handle, out var item)) continue;
+            if (!_textHeights.TryGetValue(handle, out var textHeight)) continue;
+            form.SetVirtualDesktopOrigin(_virtualDesktop.Location);
+            form.MoveTo(item, ToScreen(LabelOverlayPlan.FormBounds(item, textHeight)));
+        }
+    }
+
+    public void ApplyTopmostPolicy(bool force = false)
+    {
+        foreach (var form in _forms.Values) form.ApplyTopmostPolicy(force);
+    }
+
+    public void SetItems(IReadOnlyList<TriffViewLabelOverlayItem> items)
+    {
+        foreach (var action in LabelOverlayPlan.Compute(_rendered, items))
+        {
+            switch (action.Kind)
+            {
+                case LabelOverlayActionKind.Create:
+                    Create(action.Item!);
+                    break;
+                case LabelOverlayActionKind.Move:
+                    Move(action.Item!);
+                    break;
+                case LabelOverlayActionKind.Repaint:
+                    Repaint(action.Item!);
+                    break;
+                case LabelOverlayActionKind.Retire:
+                    Retire(action.Handle);
+                    break;
+            }
+        }
+    }
+
+    private void Create(TriffViewLabelOverlayItem item)
+    {
+        var form = _pool.Count > 0 ? _pool.Pop() : new TriffViewLabelOverlayItemForm();
+        form.Owner = _owner;
+        form.AllowTopmost = _allowTopmost;
+        form.SetVirtualDesktopOrigin(_virtualDesktop.Location);
+        _forms[item.Handle] = form;
+
+        var textHeight = form.MeasureTextHeight(item);
+        form.SetContent(item, ToScreen(LabelOverlayPlan.FormBounds(item, textHeight)), textHeight);
+        _rendered[item.Handle] = item;
+        _textHeights[item.Handle] = textHeight;
+
+        if (!form.Visible) form.Show();
+        form.ApplyTopmostPolicy(force: true);
+    }
+
+    private void Move(TriffViewLabelOverlayItem item)
+    {
+        if (!_forms.TryGetValue(item.Handle, out var form)) return;
+        // Content is unchanged from the last Create/Repaint on a Move, so FontSize - and
+        // therefore the measured text height - cannot have changed. Reuse the cached value
+        // instead of measuring again; see the field comment on _textHeights.
+        if (!_textHeights.TryGetValue(item.Handle, out var textHeight)) textHeight = form.MeasureTextHeight(item);
+        form.MoveTo(item, ToScreen(LabelOverlayPlan.FormBounds(item, textHeight)));
+        _rendered[item.Handle] = item;
+    }
+
+    private void Repaint(TriffViewLabelOverlayItem item)
+    {
+        if (!_forms.TryGetValue(item.Handle, out var form)) return;
+        var textHeight = form.MeasureTextHeight(item);
+        form.SetContent(item, ToScreen(LabelOverlayPlan.FormBounds(item, textHeight)), textHeight);
+        _rendered[item.Handle] = item;
+        _textHeights[item.Handle] = textHeight;
+    }
+
+    private void Retire(nint handle)
+    {
+        if (!_forms.Remove(handle, out var form)) return;
+        _rendered.Remove(handle);
+        _textHeights.Remove(handle);
+        form.Hide();
+        _pool.Push(form);
+    }
+
+    private Rectangle ToScreen(Rectangle clientRect)
+    {
+        var screen = clientRect;
+        screen.Offset(_virtualDesktop.Left, _virtualDesktop.Top);
+        return screen;
+    }
+
+    public void Dispose()
+    {
+        foreach (var form in _forms.Values) form.Dispose();
+        _forms.Clear();
+        _rendered.Clear();
+        _textHeights.Clear();
+        while (_pool.Count > 0) _pool.Pop().Dispose();
+    }
+}
+
 internal sealed class TriffViewLabelOverlayForm : Forms.Form
 {
     private static readonly Color TransparentBackColor = Color.FromArgb(1, 2, 3);
