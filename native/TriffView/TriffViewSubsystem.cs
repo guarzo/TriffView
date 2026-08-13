@@ -2638,6 +2638,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         var items = _previews.Values
             .Where(state => state.Visible)
             .Select(state => new TriffViewLabelOverlayItem(
+                state.Client.Handle,
                 ToClientRect(state.FrameRect),
                 _profile.PreviewLabelFor(state.Client),
                 ColorFromString(_profile.LabelTextColor, Color.FromArgb(217, 226, 238)),
@@ -3006,13 +3007,6 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     }
 }
 
-internal sealed record TriffViewLabelOverlayItem(
-    Rectangle Frame,
-    string Text,
-    Color TextColor,
-    int FontSize,
-    string Position,
-    int BorderThickness);
 
 internal sealed class TriffViewLabelOverlayForm : Forms.Form
 {
