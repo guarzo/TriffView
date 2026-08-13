@@ -12,6 +12,9 @@
        System.Drawing.Primitives, which is cross-platform, so they build and test on net8.0. -->
   <ItemGroup>
     <Compile Include="..\..\native\TriffView\PreviewPointerGesture.cs" Link="PreviewPointerGesture.cs" />
+    <Compile Include="..\..\native\TriffView\TriffViewRect.cs" Link="TriffViewRect.cs" />
+    <Compile Include="..\..\native\TriffView\RememberedPreviewFrames.cs" Link="RememberedPreviewFrames.cs" />
+    <Compile Include="..\..\native\TriffView\PreviewFrameResolver.cs" Link="PreviewFrameResolver.cs" />
   </ItemGroup>
 
   <ItemGroup>

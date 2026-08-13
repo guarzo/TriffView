@@ -13,12 +13,6 @@ using Forms = System.Windows.Forms;
 
 namespace TriffView.Preview;
 
-internal static class TriffViewPreviewDimensions
-{
-    public const int Minimum = 16;
-    public const int Maximum = 32767;
-}
-
 internal sealed class TriffViewController : IDisposable
 {
     private const int SwitchSettleBeforeMinimizeMs = 10;
@@ -2068,6 +2062,13 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 {
     private const int ResizeHitSize = 16;
     private readonly Dictionary<nint, PreviewState> _previews = new();
+
+    /// <summary>
+    /// Last frame each client window was shown at. See <see cref="RememberedPreviewFrames"/> for
+    /// why this is keyed by window rather than by character, and why it lives here rather than on
+    /// <see cref="PreviewState"/>.
+    /// </summary>
+    private readonly RememberedPreviewFrames _rememberedFrames = new();
     private readonly Dictionary<int, TriffViewHotkeyCommand> _hotkeys = new();
     private readonly Forms.Timer _alertTimer = new() { Interval = 80 };
     private readonly TriffViewLabelOverlayForm _labelOverlay = new();
@@ -2171,6 +2172,8 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         _profile = profile;
         _foreground = foreground;
         SizeToVirtualDesktop();
+        ResetRememberedFramesOnProfileChange(profile);
+        PruneRememberedFrames(clients);
 
         var highlightHandle = activeHandle != nint.Zero ? activeHandle : foreground;
         DwmAvailable = TriffViewNativeMethods.DwmIsCompositionEnabled(out var compositionEnabled) == 0 && compositionEnabled;
@@ -2198,6 +2201,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 
             state.Client = client;
             state.FrameRect = ResolveFrameRect(client, visibleIndex++);
+            _rememberedFrames.Remember(RememberedFrameKey(client), state.FrameRect);
             state.Active = client.Handle == highlightHandle;
             state.Visible = DwmAvailable;
             UpdateThumbnail(state);
@@ -2213,11 +2217,15 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 
     public IReadOnlyDictionary<string, TriffViewRect> CurrentPreviewLayouts()
     {
-        return _previews.Values.ToDictionary(
-            state => state.Client.StableKey,
-            state => TriffViewRect.FromRectangle(state.FrameRect),
-            StringComparer.OrdinalIgnoreCase
-        );
+        // Nameless clients (character select) key on their window handle in hex, which would be an
+        // orphan the moment the window closes. Save only layouts that can be matched again.
+        return _previews.Values
+            .Where(state => !string.IsNullOrWhiteSpace(state.Client.CharacterName))
+            .ToDictionary(
+                state => state.Client.StableKey,
+                state => TriffViewRect.FromRectangle(state.FrameRect),
+                StringComparer.OrdinalIgnoreCase
+            );
     }
 
     public void MarkActiveClient(nint activeHandle)
@@ -2261,6 +2269,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     {
         _clients = clients;
         _foreground = foreground;
+        PruneRememberedFrames(clients);
 
         var shouldHideForLostFocus = _profile.HideOnLostFocus && clients.All(client => client.Handle != foreground);
         var lostFocusVisibilityChanged = _suppressLabelOverlay != shouldHideForLostFocus;
@@ -2317,6 +2326,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             state.Client = client;
             state.Active = false;
             state.Visible = DwmAvailable;
+            _rememberedFrames.Remember(RememberedFrameKey(client), state.FrameRect);
             UpdateThumbnail(state);
             visibleIndex++;
         }
@@ -2540,6 +2550,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
                 && PreviewPointerGesture.IsClick(_mouseDownPoint, e.Location, Forms.SystemInformation.DragSize))
             {
                 preview.FrameRect = _mouseStartRect;
+                _rememberedFrames.Remember(RememberedFrameKey(preview.Client), preview.FrameRect);
                 UpdateThumbnail(preview);
                 UpdateWindowRegion();
                 RefreshLabelOverlay();
@@ -2547,6 +2558,13 @@ internal sealed class TriffViewOverlayForm : Forms.Form
                 ActivateRequested?.Invoke(preview.Client);
                 return;
             }
+
+            _rememberedFrames.Remember(RememberedFrameKey(preview.Client), preview.FrameRect);
+
+            // A client at character select has no name, so its StableKey is the window handle in hex.
+            // Persisting under that key would write an orphan into settings that can never match again
+            // and is never pruned. The remembered frame above still honours the drag on screen.
+            if (string.IsNullOrWhiteSpace(preview.Client.CharacterName)) return;
 
             PreviewLayoutChanged?.Invoke(preview.Client.StableKey, TriffViewRect.FromRectangle(preview.FrameRect));
             return;
@@ -2571,30 +2589,50 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         }
     }
 
+    private static PreviewWindowKey RememberedFrameKey(EveClientWindow client)
+    {
+        return new PreviewWindowKey(client.Handle, client.ProcessId);
+    }
+
     private Rectangle ResolveFrameRect(EveClientWindow client, int index)
     {
-        if (_profile.PreviewLayouts.TryGetValue(client.StableKey, out var saved) && saved.IsUsable)
+        var windowKey = RememberedFrameKey(client);
+        return PreviewFrameResolver.Resolve(
+            client.StableKey,
+            windowKey,
+            _profile.PreviewLayouts,
+            _rememberedFrames,
+            () => TitleFallbackRect(client),
+            // The slot index follows the visible client list, which the reset signature cannot see,
+            // so a slot can be both "next in line" and still held by a client that outlived a
+            // closure earlier in the stack. Probe past those rather than stack two previews.
+            () => DefaultFrameRect(_rememberedFrames.FindFreeSlot(index, windowKey, DefaultFrameRect)));
+    }
+
+    private Rectangle? TitleFallbackRect(EveClientWindow client)
+    {
+        if (!string.IsNullOrWhiteSpace(client.CharacterName)
+            || !_profile.PreviewLayouts.TryGetValue(client.Title, out var titleSaved)
+            || !titleSaved.IsUsable)
         {
-            return saved.ToRectangle();
+            return null;
         }
 
-        if (string.IsNullOrWhiteSpace(client.CharacterName)
-            && _profile.PreviewLayouts.TryGetValue(client.Title, out var titleSaved)
-            && titleSaved.IsUsable)
+        var rect = titleSaved.ToRectangle();
+        var sameTitleIndex = _clients
+            .TakeWhile(item => item.Handle != client.Handle)
+            .Count(item => string.Equals(item.Title, client.Title, StringComparison.OrdinalIgnoreCase)
+                && string.IsNullOrWhiteSpace(item.CharacterName));
+        if (sameTitleIndex > 0)
         {
-            var rect = titleSaved.ToRectangle();
-            var sameTitleIndex = _clients
-                .TakeWhile(item => item.Handle != client.Handle)
-                .Count(item => string.Equals(item.Title, client.Title, StringComparison.OrdinalIgnoreCase)
-                    && string.IsNullOrWhiteSpace(item.CharacterName));
-            if (sameTitleIndex > 0)
-            {
-                rect.Y += sameTitleIndex * (rect.Height + 10);
-            }
-
-            return ClampToVirtualDesktop(rect);
+            rect.Y += sameTitleIndex * (rect.Height + 10);
         }
 
+        return ClampToVirtualDesktop(rect);
+    }
+
+    private Rectangle DefaultFrameRect(int index)
+    {
         var primary = ScreenGeometry.PrimaryScreenPixels();
         var width = Math.Clamp(
             _profile.PreviewWidth,
@@ -2615,6 +2653,34 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         }
 
         return new Rectangle(x, y, width, height);
+    }
+
+    /// <summary>
+    /// Forgets every remembered frame when anything that feeds the default stack changes: the
+    /// profile, the preview size, the ordering inputs that decide which slot a preview lands in, or
+    /// the primary screen the stack is laid out against. A remembered frame outranks the default
+    /// stack, so without this a preview that has never been dragged would keep its old size and slot
+    /// forever - the size sliders, character reordering and the hidden-client list would all appear
+    /// to do nothing for it, and a resolution change would leave it pinned to stale coordinates.
+    ///
+    /// This is deliberately a whole-memory reset driven by a changed signature, not a per-preview
+    /// check. The primary screen rectangle is only ever stringified into the signature; no preview
+    /// position is ever compared against it. See the coordinate-spaces section of CLAUDE.md.
+    /// </summary>
+    private void ResetRememberedFramesOnProfileChange(TriffViewProfile profile)
+    {
+        _rememberedFrames.ResetIfChanged(RememberedPreviewFrames.ComposeSignature(
+            profile.Id,
+            profile.PreviewWidth,
+            profile.PreviewHeight,
+            profile.CharacterOrder,
+            profile.HiddenClients,
+            ScreenGeometry.PrimaryScreenPixels()));
+    }
+
+    private void PruneRememberedFrames(IReadOnlyList<EveClientWindow> clients)
+    {
+        _rememberedFrames.PruneTo(clients.Select(RememberedFrameKey));
     }
 
     private void UpdateThumbnail(PreviewState state)
@@ -3660,30 +3726,6 @@ internal sealed class TriffViewProfile
         }
 
         return result;
-    }
-}
-
-internal sealed class TriffViewRect
-{
-    public int X { get; set; }
-    public int Y { get; set; }
-    public int Width { get; set; }
-    public int Height { get; set; }
-
-    public bool IsUsable => Width >= TriffViewPreviewDimensions.Minimum
-        && Height >= TriffViewPreviewDimensions.Minimum;
-
-    public Rectangle ToRectangle() => new(X, Y, Width, Height);
-
-    public static TriffViewRect FromRectangle(Rectangle rect)
-    {
-        return new TriffViewRect
-        {
-            X = rect.X,
-            Y = rect.Y,
-            Width = rect.Width,
-            Height = rect.Height,
-        };
     }
 }
 
