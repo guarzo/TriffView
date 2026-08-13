@@ -99,7 +99,52 @@ internal sealed class TriffViewController : IDisposable
         }
 
         StartForegroundTracking();
+        StartDisplayTracking();
+        LogLayoutSnapshot("startup");
         PostState();
+    }
+
+    /// <summary>
+    /// Observes display changes without acting on them. A monitor that drops out on sleep and
+    /// returns at a different origin is invisible in any after-the-fact snapshot, so the event
+    /// is logged as it happens. Nothing else in the app's behaviour changes.
+    /// </summary>
+    private void StartDisplayTracking()
+    {
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+    }
+
+    private void StopDisplayTracking()
+    {
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        // Raised on an arbitrary thread; settings access is dispatcher-affine.
+        _dispatcher.BeginInvoke(() =>
+        {
+            if (_disposed) return;
+            LogLayoutSnapshot("display-changed");
+        });
+    }
+
+    /// <summary>
+    /// Records the monitor set alongside every saved preview position. Comparing snapshots
+    /// across a sleep/wake cycle shows whether a display returned at a different origin, and
+    /// which previews that left pointing somewhere invisible.
+    /// </summary>
+    private void LogLayoutSnapshot(string category)
+    {
+        var profile = Settings.ActiveProfileFast();
+        var layouts = profile.PreviewLayouts
+            .Select(entry => $"{entry.Key}@{entry.Value.X},{entry.Value.Y}")
+            .ToArray();
+
+        TriffViewDiagnostics.Log(
+            category,
+            $"monitors={TriffViewDiagnostics.Monitors()} layouts=" +
+            (layouts.Length == 0 ? "<none>" : string.Join(" ", layouts)));
     }
 
     public bool HandleWebMessage(string type, JsonObject? message)
@@ -279,6 +324,7 @@ internal sealed class TriffViewController : IDisposable
         _timer.Stop();
         _switchStateTimer.Stop();
         StopForegroundTracking();
+        StopDisplayTracking();
         _alerts.Dispose();
         _overlay.Dispose();
     }
@@ -520,6 +566,7 @@ internal sealed class TriffViewController : IDisposable
     private void SavePreviewLayout(string key, TriffViewRect rect)
     {
         var profile = Settings.ActiveProfile();
+        TriffViewDiagnostics.RecordLayoutWrite("drag-or-resize", key, rect.ToRectangle());
         profile.PreviewLayouts[key] = rect;
         Settings.Save();
         PostState();
@@ -531,6 +578,7 @@ internal sealed class TriffViewController : IDisposable
         var profile = Settings.ActiveProfile();
         foreach (var layout in layouts)
         {
+            TriffViewDiagnostics.RecordLayoutWrite("save-all-layouts", layout.Key, layout.Value.ToRectangle());
             profile.PreviewLayouts[layout.Key] = layout.Value;
         }
 
@@ -1826,6 +1874,23 @@ internal sealed class TriffViewController : IDisposable
     }
 
     private bool ActivateWindow(EveClientWindow client, TriffViewProfile profile)
+    {
+        var activated = TryActivateWindow(client, profile);
+        if (!activated)
+        {
+            // Windows refuses SetForegroundWindow from a background process under several
+            // conditions. Recording the refusal turns "sometimes clicking a preview does
+            // nothing" into something diagnosable from a log.
+            TriffViewDiagnostics.RecordActivationFailure(
+                client.CharacterName,
+                client.Handle,
+                TriffViewNativeMethods.GetForegroundWindow() == client.Handle);
+        }
+
+        return activated;
+    }
+
+    private static bool TryActivateWindow(EveClientWindow client, TriffViewProfile profile)
     {
         var activated = TriffViewNativeMethods.SetForegroundWindow(client.Handle);
         TriffViewNativeMethods.SetFocus(client.Handle);
