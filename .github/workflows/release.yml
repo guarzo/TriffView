@@ -1,15 +1,11 @@
 name: release
 
+# Triggered by pushing a tag, which runs the workflow from the tag's own ref. A
+# workflow_dispatch trigger would require this file to live on the fork's default branch,
+# and that branch is kept as a clean mirror of upstream.
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to create for this release (e.g. v1.6.2-fork.1)"
-        required: true
-      prerelease:
-        description: "Mark as a pre-release"
-        type: boolean
-        default: true
+  push:
+    tags: ["v*"]
 
 jobs:
   release:
@@ -44,8 +40,7 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag }}
-          prerelease: ${{ inputs.prerelease }}
+          prerelease: true
           generate_release_notes: true
           files: |
             release/TriffView.exe
@@ -58,5 +53,5 @@ jobs:
             `TriffView.exe.sha256.txt` if you want to be sure of what you have.
 
             This build writes a diagnostics log. See
-            [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) for what it records and
-            how to send it in.
+            [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) for what it records, what it
+            does not, and how to send it in.
