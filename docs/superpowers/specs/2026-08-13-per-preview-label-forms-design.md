@@ -22,6 +22,13 @@ v1.6.3 already removed the repaints that drew unchanged content (44% of
 `SetItems` calls painted, now 4.5% — a 9.5x reduction). The repaints that
 remain are still ~40 ms each.
 
+**Baseline.** This design is written against `fork/main` at v1.6.3, where
+`SetItems` already skips repaints via `ItemsEqual`. It is not written against
+`upstream/main`, which predates that fix and still invalidates unconditionally.
+The implementation branch is based on `fork/main` for the same reason: the new
+controller replaces the very method v1.6.3 changed, so building on
+`upstream/main` would guarantee a conflict when merging back.
+
 ## Why the obvious fix does not work
 
 Bounding the invalidation to only the changed rectangles was implemented and
@@ -75,10 +82,30 @@ mirroring `_previews` (`Dictionary<nint, PreviewState>`). Handle is the natural
 identity: collision-free, already the identity used for previews, and stable for
 the lifetime of the client window.
 
+**The handle must be added to the item contract.**
+`TriffViewLabelOverlayItem` currently carries no handle
+(`TriffViewSubsystem.cs:2927`), and `RefreshLabelOverlay` enumerates
+`_previews.Values`, discarding the dictionary keys
+(`TriffViewSubsystem.cs:2556`). The handle is nonetheless reachable without
+restructuring: `PreviewState.Client` is an `EveClientWindow`
+(`TriffViewSubsystem.cs:2874`) and `_previews` is keyed by `client.Handle`
+(`TriffViewSubsystem.cs:2132`). So the change is to add a handle field to the
+item record, populated from `state.Client.Handle`. Without this the
+handle-keyed identity is not implementable.
+
 Each form:
 
-- is sized and positioned to its preview's frame, in **screen** coordinates.
-  `item.Frame` is client-relative to the virtual desktop origin (built via
+- is sized and positioned to **the union of its preview's frame and the label
+  rectangle it draws**, in **screen** coordinates. Sizing to the frame alone is
+  not safe: preview dimensions may be as small as
+  `TriffViewPreviewDimensions.Minimum` (16 px,
+  `TriffViewSubsystem.cs:16`), while label height is at least 18 px plus inset
+  (`TriffViewSubsystem.cs:3056`), so on a small preview the label overflows its
+  frame. The desktop-spanning form drew that overflow without issue because it
+  owned the whole desktop; a frame-sized form would clip it. Note this
+  contradicts the earlier assumption that the drawn label is always inside
+  `item.Frame` — that assumption is false at minimum preview size.
+- `item.Frame` is client-relative to the virtual desktop origin (built via
   `ToClientRect`), so screen position is `item.Frame` offset by the virtual
   desktop origin — the exact inverse of the transform the current single form
   relies on.
@@ -97,8 +124,15 @@ the form's own client area.
 
 On each `SetItems`, for each item:
 
-- **only `Frame` differs** from the form's current state -> reposition via
+- **only `Frame.Location` differs, `Frame.Size` unchanged** -> reposition via
   `SetBounds` and **do not invalidate**
+- **`Frame.Size` differs** -> resize and **fully invalidate**. A resize is not a
+  move: `MouseMode.Resize` changes the frame's width and height
+  (`TriffViewSubsystem.cs:2438`, clamped against
+  `TriffViewPreviewDimensions.Minimum`), and the label's own geometry depends on
+  those dimensions — its width is `Frame.Width - inset*2`, and `center` and
+  `bottom` positions are computed from `Frame.Height`. Treating a resize as
+  move-only would leave the label laid out for the previous size.
 - **any other field differs** (Text, TextColor, FontSize, Position,
   BorderThickness) -> reposition if needed, then fully `Invalidate()` that one
   form
@@ -107,10 +141,15 @@ On each `SetItems`, for each item:
   fully invalidate
 - **form whose handle is no longer present** -> hide and return to the pool
 
-This is where the win comes from. A drag changes only `Frame`, so it produces
-window moves and zero repaints. Prototype measurement across one drag plus 50 s
-of rapid client switching: **960 move-only operations, 0 repaints, 5 creations,
-0 destructions.**
+This is where the win comes from. A drag changes only `Frame.Location`, so it
+produces window moves and zero repaints. Prototype measurement across one drag
+plus 50 s of rapid client switching: **960 move-only operations, 0 repaints, 5
+creations, 0 destructions.**
+
+**Caveat on that measurement: the prototype never resized a preview.** All 960
+move-only operations came from dragging. The move-only half of this rule is
+measured; the resize half is reasoned from the code and is unverified. A resize
+test on real hardware is required before this ships.
 
 Label content does not change when switching clients — the active-state
 highlight is a border drawn by the preview overlay, not part of the label — so
@@ -171,8 +210,23 @@ Caveats, stated because they matter:
 - The 479 us figure comes from **5 creation-time paints only**; there were no
   steady-state repaints to measure, because nothing changed content. True
   steady-state cost is unmeasured and probably lower.
+- **The prototype never resized a preview.** Every one of the 960 move-only
+  operations came from dragging, so the rule's resize branch is unvalidated.
+  This is the largest gap in the evidence.
 - dwm did not rise, so the concern that this trades application CPU for
   compositor cost appears unfounded — but see the client-count caveat.
+
+### Required before shipping
+
+Beyond unit tests, these must be exercised on Windows with real clients:
+
+- **Resize a preview**, including down to `TriffViewPreviewDimensions.Minimum`,
+  and confirm the label re-lays-out correctly and is not clipped. This covers
+  both the unvalidated resize branch and the frame-overflow case.
+- Drag a preview: confirm no ghost and no label lag.
+- Close and reopen clients repeatedly: confirm forms are pooled and GDI/USER
+  handle counts stay bounded.
+- Rapid client switching: confirm no label falls behind its thumbnail.
 
 ## Testing
 
@@ -186,9 +240,10 @@ dependency-free file, with a `Compile Include` added to
 (`System.Drawing.Primitives` is cross-platform and already used in tests).
 
 That logic is the part most likely to break and the only part unit-testable.
-Cases worth covering: frame-only change produces move without repaint; content
-change produces repaint; disappearing handle retires its form; reappearing
-handle reuses a pooled form; empty list retires everything.
+Cases worth covering: location-only change produces move without repaint;
+**size change produces a repaint, not a move**; content change produces repaint;
+disappearing handle retires its form; reappearing handle reuses a pooled form;
+empty list retires everything.
 
 Window creation, z-order, and repaint behaviour cannot be unit-tested and must
 be verified by running on Windows with real clients.
