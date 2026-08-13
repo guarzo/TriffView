@@ -1,7 +1,66 @@
 # Per-preview label overlay forms
 
 Date: 2026-08-13
-Status: designed, not implemented
+Status: **implemented, tested on hardware, and REJECTED — do not merge**
+
+## Outcome
+
+The design was implemented in full and verified on the target hardware. It works
+on a single monitor and fails on mixed-DPI multi-monitor setups, which is the
+configuration this project exists to serve.
+
+**Measured on the target machine:**
+
+```
+DISPLAY1 (primary) 3840x2160  effDPI=192 -> 200%
+DISPLAY2           2560x1440  effDPI=96  -> 100%
+DISPLAY3           2560x1440  effDPI=96  -> 100%
+```
+
+TriffView is **system-DPI-aware** (awareness level 1). Windows therefore reports
+every coordinate in the primary monitor's 200% space and DPI-virtualizes any of
+the app's windows that sit on a 100% monitor, scaling and repositioning them by
+roughly half.
+
+Labels landed correctly on the primary monitor and roughly half a screen out of
+position on the other two. Confirmed both ways: dragging a preview onto a 100%
+monitor produced the offset, dragging it back to the primary removed it.
+
+**Why the design this replaces does not have the problem.** One window spanning
+the whole virtual desktop receives a single DPI treatment, and the DWM thumbnails
+and label text are composited inside that one coordinate space, so they stay
+mutually consistent wherever they are drawn. Splitting labels into one window per
+preview makes each window virtualize independently of the overlay it has to align
+with, and the two coordinate spaces diverge.
+
+This is not a patchable offset. It is per-window DPI virtualization meeting an
+architecture built from many small windows. Making it work would require the
+application to become per-monitor-DPI-aware first — a manifest change touching
+preview geometry, the WPF settings UI, and thumbnail placement, which is exactly
+the area `CLAUDE.md` documents as having produced repeated coordinate-space
+regressions.
+
+**What ships instead:** v1.6.3's change, already released, which skips repaints of
+unchanged content for a measured 9.5x reduction in label paint work and has no
+mixed-DPI regression.
+
+**How the prototype missed it.** The prototype that justified this design produced
+960 move-only operations with zero repaints, no ghosts, and no z-order faults. That
+testing was almost certainly confined to the primary monitor, so mixed DPI was never
+exercised. The measurements were real; generalising them to "the approach works" was
+not warranted. Any future prototype acceptance for this application must include a
+mixed-DPI monitor as an explicit case.
+
+**Also worth recording:** a first attempt to measure per-monitor DPI reported 96 for
+all three monitors and was wrong. `GetDpiForMonitor` with `MDT_EFFECTIVE_DPI` returns
+96 for every monitor when the *calling* process is DPI-unaware. The real values only
+appear from a `PER_MONITOR_AWARE_V2` context.
+
+---
+
+The original design follows, unchanged, as the record of what was built and why.
+
+---
 
 ## Problem
 
