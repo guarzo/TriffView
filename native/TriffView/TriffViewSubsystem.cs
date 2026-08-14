@@ -194,6 +194,11 @@ internal sealed class TriffViewController : IDisposable
             case "triffview:export-settings-backup":
                 ExportSettingsBackup();
                 return true;
+            case "triffview:export-combat-logs":
+                ExportCombatLogs(
+                    message?["fromUtc"]?.GetValue<string>(),
+                    message?["toUtc"]?.GetValue<string>());
+                return true;
             case "triffview:restore-settings-backup":
                 RestoreSettingsBackup();
                 return true;
@@ -1097,6 +1102,103 @@ internal sealed class TriffViewController : IDisposable
         }
     }
 
+    /// <summary>
+    /// Packages the Gamelogs covering a fight into a zip for manual upload to
+    /// Discord, where eve-intel's fight-aar skill reads it with
+    /// <c>parse_fights.py --zip</c>.
+    ///
+    /// With no window supplied, the last run of combat alerts is used. That
+    /// history lives in memory and is capped, so it only reaches back through
+    /// the current app session -- the explicit window is what covers everything
+    /// older, and both timestamps are UTC (EVE time).
+    /// </summary>
+    private async void ExportCombatLogs(string? fromUtc, string? toUtc)
+    {
+        try
+        {
+            var window = BuildCombatLogWindow(fromUtc, toUtc);
+            if (window == null)
+            {
+                PostError(
+                    "export-combat-logs",
+                    "No recent fight found in the alert history. Alerts must be enabled and a fight " +
+                    "must have happened while TriffView was running, or you can enter a UTC time range.");
+                return;
+            }
+
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                Title = "Export combat logs for eve-intel",
+                Filter = "Zip archive (*.zip)|*.zip|All files (*.*)|*.*",
+                FileName = CombatLogExport.SuggestFileName(window),
+                DefaultExt = ".zip",
+                AddExtension = true,
+                OverwritePrompt = true,
+            };
+
+            if (dialog.ShowDialog() != true)
+            {
+                // Still a terminal message: the UI disables its export buttons
+                // while a run is in flight, so a silent return on cancel would
+                // leave them disabled until the next state post.
+                _postToHud(new { type = "triffview:combat-log-export", cancelled = true });
+                return;
+            }
+
+            var destination = dialog.FileName;
+            var gamelogsPath = _alerts.GamelogsPath;
+            // Off the dispatcher: a long session's logs can run to hundreds of
+            // megabytes, and compressing them on the UI thread would stall
+            // every preview for the duration.
+            var result = await Task.Run(() => CombatLogExport.Export(
+                gamelogsPath, window.StartUtc, window.EndUtc, destination));
+
+            _postToHud(new
+            {
+                type = "triffview:combat-log-export",
+                result = result.ToState(),
+            });
+        }
+        catch (Exception ex)
+        {
+            PostError("export-combat-logs", ex.Message);
+        }
+    }
+
+    private CombatLogFightWindow? BuildCombatLogWindow(string? fromUtc, string? toUtc)
+    {
+        // Only an entirely empty range means "use the last fight". A range that
+        // was typed but does not parse is an error, not a cue to quietly export
+        // some other window than the one that was asked for.
+        if (string.IsNullOrWhiteSpace(fromUtc) && string.IsNullOrWhiteSpace(toUtc))
+        {
+            return CombatLogExport.DetectLastFight(_alerts.History);
+        }
+
+        if (!TryParseUtc(fromUtc, out var start) || !TryParseUtc(toUtc, out var end))
+        {
+            throw new InvalidOperationException(
+                "Enter both a start and an end time in UTC, for example 2026-08-14 20:10.");
+        }
+
+        if (end < start) (start, end) = (end, start);
+        return new CombatLogFightWindow { StartUtc = start, EndUtc = end };
+    }
+
+    private static bool TryParseUtc(string? value, out DateTime utc)
+    {
+        utc = default;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        // AssumeUniversal so a bare "2026-08-14T20:15" from the window inputs is
+        // read as EVE time rather than being shifted by the local offset.
+        return DateTime.TryParse(
+            value,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal
+                | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out utc);
+    }
+
     private void RestoreSettingsBackup()
     {
         try
@@ -1810,6 +1912,10 @@ internal sealed class TriffViewController : IDisposable
     private void PostState(bool force = false)
     {
         var profile = Settings.ActiveProfile();
+        // One snapshot for both the history list and the fight detection below:
+        // the property clones every event under a lock, and this runs on each
+        // state post.
+        var alertHistory = _alerts.History;
         var payload = new
         {
             type = "triffview:state",
@@ -1837,7 +1943,11 @@ internal sealed class TriffViewController : IDisposable
                 key = client.StableKey,
             }).ToArray(),
             alerts = Settings.Alerts.ToState(),
-            alertHistory = _alerts.History.Select(alert => alert.ToState()).ToArray(),
+            alertHistory = alertHistory.Select(alert => alert.ToState()).ToArray(),
+            // Derived from the in-memory alert history only -- no directory scan,
+            // so it stays cheap enough to recompute on every state post. The logs
+            // themselves are not touched until an export is actually requested.
+            lastFight = CombatLogExport.DetectLastFight(alertHistory)?.ToState(),
             hotkeyFailures = _overlay.HotkeyFailures,
             dwmAvailable = _overlay.DwmAvailable,
         };
