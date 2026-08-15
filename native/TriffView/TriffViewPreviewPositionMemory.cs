@@ -67,6 +67,45 @@ internal sealed class TriffViewPreviewPositionMemory
         }
     }
 
+    /// <summary>
+    /// How many default-stack slots <see cref="FindFreeSlot"/> will try before giving up. The
+    /// stack wraps into columns and its column/row arithmetic is not injective, so there is no
+    /// guarantee a free slot exists at all; the bound stops a pathological state from spinning.
+    /// </summary>
+    private const int SlotProbeLimit = 32;
+
+    /// <summary>
+    /// The first default-stack slot at or after <paramref name="slotIndex"/> whose rectangle no
+    /// other window is already remembered at.
+    ///
+    /// The slot index follows the visible client list, which the context signature cannot see, so
+    /// a slot can be both "next in line" and still held by a client that outlived a closure
+    /// earlier in the stack. Taking it regardless stacks two previews on the same rectangle.
+    /// </summary>
+    public int FindFreeSlot(int slotIndex, PreviewClientIdentity requester, Func<int, Rectangle> slotRect)
+    {
+        if (_positions.Count == 0) return slotIndex;
+
+        for (var probe = 0; probe < SlotProbeLimit; probe++)
+        {
+            var candidate = slotIndex + probe;
+            if (!IsHeldByAnother(slotRect(candidate), requester)) return candidate;
+        }
+
+        return slotIndex;
+    }
+
+    private bool IsHeldByAnother(Rectangle rect, PreviewClientIdentity requester)
+    {
+        foreach (var (identity, position) in _positions)
+        {
+            if (identity.Equals(requester)) continue;
+            if (position == rect) return true;
+        }
+
+        return false;
+    }
+
     public static Rectangle Resolve(
         Rectangle? savedForCurrentKey,
         Rectangle? rememberedForClient,
