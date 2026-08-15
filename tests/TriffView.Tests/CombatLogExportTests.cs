@@ -178,6 +178,25 @@ public class CombatLogExportTests
         Assert.False(CombatLogExport.TryParseCharacterId("2026081_115000_98000001.txt", out _));
     }
 
+    [Fact]
+    public void OnlyATxtFileCanCarryACharacterId()
+    {
+        // The stem alone is not enough: the archive also holds a .json manifest,
+        // and a name that happens to match the Gamelog shape must not be read as
+        // a pilot's log just because its stem parses.
+        Assert.False(CombatLogExport.TryParseCharacterId("20260814_115000_98000001.json", out _));
+        Assert.False(CombatLogExport.TryParseCharacterId("20260814_115000_98000001", out _));
+    }
+
+    [Fact]
+    public void TheExtensionCheckIsCaseInsensitive()
+    {
+        // The directory scan that feeds this is case-insensitive on Windows, so
+        // rejecting .TXT here would silently drop the id for a real Gamelog.
+        Assert.True(CombatLogExport.TryParseCharacterId("20260814_115000_98000001.TXT", out var id));
+        Assert.Equal(98000001, id);
+    }
+
     // ---- Export ----
 
     private sealed class TempDir : IDisposable
@@ -446,6 +465,12 @@ public class CombatLogExportTests
 
         var zip = System.IO.Path.Combine(dir.Path, "out.zip");
         CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        // The literal name, not the constant: eve-intel and every other consumer
+        // sees the string on the wire, so renaming or nesting the entry is a
+        // breaking change that a test resolving CombatLogExport.ManifestEntryName
+        // would follow silently.
+        Assert.Contains("triffview-manifest.json", ReadArchive(zip).Keys);
 
         var manifest = ReadManifest(zip);
         Assert.Equal("triffview.combat-log-export/1", manifest.GetProperty("schema").GetString());

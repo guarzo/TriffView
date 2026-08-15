@@ -134,9 +134,10 @@ several session files, which the export already collects deliberately.
 **`unattributedFiles`** lists exported logs with no readable `Listener:` header.
 These are exported today with an empty character name and no way to notice.
 
-**`window.source`** is `last-fight` or `manual-range`, distinguishing a window
-derived from combat alerts from one typed by hand. It tells eve-intel how much
-to trust the window's edges.
+**`window.source`** is `last-fight`, `manual-range`, or `unspecified`,
+distinguishing a window derived from combat alerts from one typed by hand, with
+`unspecified` meaning the caller did not state which. It tells eve-intel how
+much to trust the window's edges.
 
 ## Implementation shape
 

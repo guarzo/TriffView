@@ -432,10 +432,19 @@ public static class CombatLogExport
     /// trailing all-digit segment would read that file's six-digit *time* as a
     /// character id. A wrong id is worse than none: it looks authoritative and
     /// collides across dates.
+    ///
+    /// Only <c>.txt</c> qualifies. Nothing else in the archive is a Gamelog, and
+    /// the comparison is case-insensitive because the directory scan that feeds
+    /// this is itself case-insensitive on Windows.
     /// </summary>
     internal static bool TryParseCharacterId(string fileName, out long characterId)
     {
         characterId = 0;
+        if (!string.Equals(Path.GetExtension(fileName), ".txt", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         var parts = Path.GetFileNameWithoutExtension(fileName).Split('_');
         if (parts.Length != 3) return false;
         if (parts[0].Length != 8 || !parts[0].All(char.IsAsciiDigit)) return false;
