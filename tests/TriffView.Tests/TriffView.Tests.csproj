@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>TriffView.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Link the pure logic files directly. NOT a ProjectReference: TriffView.csproj is
+       net8.0-windows with UseWPF, and these types are internal. These files depend only on
+       System.Drawing.Primitives, which is cross-platform, so they build and test on net8.0. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffView\PreviewPointerGesture.cs" Link="PreviewPointerGesture.cs" />
+    <Compile Include="..\..\native\TriffView\TriffViewRect.cs" Link="TriffViewRect.cs" />
+  </ItemGroup>
+
+  <!-- Same arrangement for the combat log export. CombatLogExport needs TriffAlertEvent, which
+       lives in TriffAlertsService.cs; both files are plain BCL (IO, compression, regex, JSON)
+       with no WPF or Forms dependency, so they build on net8.0 like the files above. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAlerts\TriffAlertsService.cs" Link="TriffAlertsService.cs" />
+    <Compile Include="..\..\native\TriffAlerts\CombatLogExport.cs" Link="CombatLogExport.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+</Project>
