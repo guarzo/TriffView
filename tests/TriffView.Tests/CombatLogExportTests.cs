@@ -150,6 +150,32 @@ public class CombatLogExportTests
         Assert.Equal("triffview-fight-20260814-1200Z-1pilot.zip", CombatLogExport.SuggestFileName(fight!));
     }
 
+    // ---- Character ids ----
+
+    [Fact]
+    public void ACharacterIdIsReadFromTheGamelogFilename()
+    {
+        Assert.True(CombatLogExport.TryParseCharacterId("20260814_115000_98000001.txt", out var id));
+        Assert.Equal(98000001, id);
+    }
+
+    [Fact]
+    public void AnIdLessFilenameDoesNotYieldItsTimeAsAnId()
+    {
+        // The trap: older clients wrote YYYYMMDD_HHMMSS.txt with no id. A rule
+        // that took "the trailing all-digit segment" would report 90000 here --
+        // a confident, wrong id that collides across dates.
+        Assert.False(CombatLogExport.TryParseCharacterId("20260814_090000.txt", out _));
+    }
+
+    [Fact]
+    public void AnUnrecognisedFilenameHasNoCharacterId()
+    {
+        Assert.False(CombatLogExport.TryParseCharacterId("during.txt", out _));
+        Assert.False(CombatLogExport.TryParseCharacterId("20260814_115000_98000001_extra.txt", out _));
+        Assert.False(CombatLogExport.TryParseCharacterId("2026081_115000_98000001.txt", out _));
+    }
+
     // ---- Export ----
 
     private sealed class TempDir : IDisposable

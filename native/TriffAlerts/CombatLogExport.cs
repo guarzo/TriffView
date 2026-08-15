@@ -314,6 +314,26 @@ public static class CombatLogExport
         catch (UnauthorizedAccessException) { }
     }
 
+    /// <summary>
+    /// Reads the character id out of a Gamelog filename. EVE names these
+    /// <c>YYYYMMDD_HHMMSS_&lt;characterID&gt;.txt</c>, but older clients wrote
+    /// <c>YYYYMMDD_HHMMSS.txt</c> with no id -- and a looser rule taking the
+    /// trailing all-digit segment would read that file's six-digit *time* as a
+    /// character id. A wrong id is worse than none: it looks authoritative and
+    /// collides across dates.
+    /// </summary>
+    internal static bool TryParseCharacterId(string fileName, out long characterId)
+    {
+        characterId = 0;
+        var parts = Path.GetFileNameWithoutExtension(fileName).Split('_');
+        if (parts.Length != 3) return false;
+        if (parts[0].Length != 8 || !parts[0].All(char.IsAsciiDigit)) return false;
+        if (parts[1].Length != 6 || !parts[1].All(char.IsAsciiDigit)) return false;
+        if (parts[2].Length == 0 || !parts[2].All(char.IsAsciiDigit)) return false;
+        return long.TryParse(
+            parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out characterId);
+    }
+
     private static void ReadHeader(string path, out string listener, out DateTime? sessionStartUtc)
     {
         listener = "";
