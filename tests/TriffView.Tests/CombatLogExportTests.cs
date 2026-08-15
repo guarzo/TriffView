@@ -360,9 +360,18 @@ public class CombatLogExportTests
         var occupied = System.IO.Path.Combine(dir.Path, "out.zip");
         Directory.CreateDirectory(occupied);
 
-        Assert.ThrowsAny<IOException>(
+        // The move fails because a directory occupies the destination, but which
+        // exception that surfaces as is platform-specific -- Linux reports an
+        // IOException, Windows can report UnauthorizedAccessException from
+        // MoveFileEx. Only the cleanup is being specified here, so the assertion
+        // is that it threw at all, and that it got past selection rather than
+        // failing early with an empty window (which would make the check below
+        // vacuous).
+        var error = Record.Exception(
             () => CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), occupied));
 
+        Assert.NotNull(error);
+        Assert.IsNotType<InvalidOperationException>(error);
         Assert.Empty(Directory.GetFiles(dir.Path, "*.tmp"));
     }
 
