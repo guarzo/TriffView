@@ -1,5 +1,7 @@
+using System.Globalization;
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
 using TriffView.Alerts;
 using Xunit;
 
@@ -223,6 +225,31 @@ public class CombatLogExportTests
             });
     }
 
+    /// <summary>The archive's game logs, excluding the manifest.</summary>
+    private static Dictionary<string, string> ReadLogs(string zipPath)
+    {
+        return ReadArchive(zipPath)
+            .Where(entry => entry.Key != CombatLogExport.ManifestEntryName)
+            .ToDictionary(entry => entry.Key, entry => entry.Value);
+    }
+
+    private static JsonElement ReadManifest(string zipPath)
+    {
+        using var archive = ZipFile.OpenRead(zipPath);
+        var entry = archive.GetEntry(CombatLogExport.ManifestEntryName);
+        Assert.NotNull(entry);
+        using var reader = new StreamReader(entry!.Open());
+        // Clone: the JsonDocument is disposed on the way out and the caller
+        // would otherwise be handed elements backed by freed memory.
+        return JsonDocument.Parse(reader.ReadToEnd()).RootElement.Clone();
+    }
+
+    private static string[] StringsAt(JsonElement element, string property)
+    {
+        return element.GetProperty(property).EnumerateArray()
+            .Select(item => item.GetString()!).ToArray();
+    }
+
     [Fact]
     public void OnlyLogsOverlappingTheWindowAreCollected()
     {
@@ -238,7 +265,7 @@ public class CombatLogExportTests
 
         Assert.Equal(1, result.FileCount);
         Assert.Equal(new[] { "Alpha" }, result.Characters);
-        Assert.Equal(new[] { "during.txt" }, ReadArchive(zip).Keys.ToArray());
+        Assert.Equal(new[] { "during.txt" }, ReadLogs(zip).Keys.ToArray());
     }
 
     [Fact]
@@ -286,7 +313,7 @@ public class CombatLogExportTests
         var zip = System.IO.Path.Combine(dir.Path, "out.zip");
         CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
 
-        var entries = ReadArchive(zip);
+        var entries = ReadLogs(zip);
         Assert.Equal(new[] { "20260814_115000_98000001.txt" }, entries.Keys.ToArray());
         Assert.Equal(expected, entries["20260814_115000_98000001.txt"]);
     }
@@ -354,7 +381,7 @@ public class CombatLogExportTests
         var result = CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
 
         Assert.Equal(1, result.FileCount);
-        Assert.Equal(new[] { "during.txt" }, ReadArchive(zip).Keys.ToArray());
+        Assert.Equal(new[] { "during.txt" }, ReadLogs(zip).Keys.ToArray());
     }
 
     [Fact]
@@ -409,5 +436,231 @@ public class CombatLogExportTests
             Noon,
             Noon.AddMinutes(5),
             System.IO.Path.Combine(System.IO.Path.GetTempPath(), "out.zip")));
+    }
+
+    [Fact]
+    public void TheArchiveCarriesAManifest()
+    {
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        var manifest = ReadManifest(zip);
+        Assert.Equal("triffview.combat-log-export/1", manifest.GetProperty("schema").GetString());
+        Assert.Equal("TriffView", manifest.GetProperty("tool").GetProperty("name").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(
+            manifest.GetProperty("tool").GetProperty("version").GetString()));
+        Assert.Equal(0, manifest.GetProperty("droppedFileCount").GetInt32());
+
+        // The window is the whole basis for what got collected, so it has to
+        // survive into the archive exactly, and in UTC.
+        var window = manifest.GetProperty("window");
+        Assert.Equal(Noon, DateTime.Parse(
+            window.GetProperty("startUtc").GetString()!,
+            CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+        Assert.Equal(Noon.AddMinutes(5), DateTime.Parse(
+            window.GetProperty("endUtc").GetString()!,
+            CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+
+        // Value is a clock read and cannot be asserted, but the shape can:
+        // "non-blank" would happily accept "banana".
+        var exported = DateTime.Parse(
+            manifest.GetProperty("exportedUtc").GetString()!,
+            CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        Assert.Equal(DateTimeKind.Utc, exported.Kind);
+    }
+
+    [Fact]
+    public void TheManifestIsWrittenWithoutAByteOrderMark()
+    {
+        // Read as bytes on purpose: StreamReader silently swallows a BOM, so a
+        // test that decodes through it cannot see the thing being asserted.
+        // A leading BOM breaks strict JSON parsers, Python's json.loads included.
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        using var archive = ZipFile.OpenRead(zip);
+        using var stream = archive.GetEntry(CombatLogExport.ManifestEntryName)!.Open();
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        var bytes = buffer.ToArray();
+
+        Assert.NotEqual(new byte[] { 0xEF, 0xBB, 0xBF }, bytes.Take(3).ToArray());
+        Assert.Equal((byte)'{', bytes[0]);
+    }
+
+    [Fact]
+    public void TheManifestGroupsEverySessionFileUnderItsCharacter()
+    {
+        // A pilot who relogged mid-fight has two session files; both belong to
+        // the one character, and the whole point of the manifest is that the
+        // characters in it are one human's.
+        using var dir = new TempDir();
+        dir.WriteLog("20260814_115000_98000001.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(1));
+        dir.WriteLog("20260814_120200_98000001.txt", "Alpha", Noon.AddMinutes(2), Noon.AddMinutes(10));
+        dir.WriteLog("20260814_115500_98000002.txt", "Bravo", Noon.AddMinutes(-5), Noon.AddMinutes(5));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        var characters = ReadManifest(zip).GetProperty("operator")
+            .GetProperty("characters").EnumerateArray().ToArray();
+
+        Assert.Equal(2, characters.Length);
+        Assert.Equal("Alpha", characters[0].GetProperty("name").GetString());
+        Assert.Equal(98000001, characters[0].GetProperty("id").GetInt64());
+        Assert.Equal(
+            new[] { "20260814_115000_98000001.txt", "20260814_120200_98000001.txt" },
+            StringsAt(characters[0], "files"));
+        Assert.Equal("Bravo", characters[1].GetProperty("name").GetString());
+        Assert.Equal(98000002, characters[1].GetProperty("id").GetInt64());
+    }
+
+    [Fact]
+    public void ACharacterWithNoIdInItsFilenameIsListedWithANullId()
+    {
+        using var dir = new TempDir();
+        dir.WriteLog("20260814_090000.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        var character = ReadManifest(zip).GetProperty("operator")
+            .GetProperty("characters").EnumerateArray().Single();
+
+        Assert.Equal("Alpha", character.GetProperty("name").GetString());
+        Assert.Equal(JsonValueKind.Null, character.GetProperty("id").ValueKind);
+    }
+
+    [Fact]
+    public void ALogWithNoListenerHeaderIsNotAttributedToAnyone()
+    {
+        // Exported today with an empty character name and no way to notice it.
+        // It cannot be claimed as anyone's, so it is listed separately.
+        //
+        // The Session Started header is required even though Listener is not:
+        // without it TryDescribeLog falls back to the file's creation time,
+        // which is now, putting the log outside the window entirely.
+        using var dir = new TempDir();
+        var orphan = System.IO.Path.Combine(dir.Path, "headerless.txt");
+        File.WriteAllText(orphan,
+            "------------------------------------------------------------\n"
+            + "  Gamelog\n"
+            + $"  Session Started: {Noon.AddMinutes(-10):yyyy.MM.dd HH:mm:ss}\n"
+            + "------------------------------------------------------------\n"
+            + "[ 2026.08.14 12:01:00 ] (combat) 142 to HostileOne\n");
+        File.SetLastWriteTimeUtc(orphan, Noon.AddMinutes(1));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        var manifest = ReadManifest(zip);
+        Assert.Empty(manifest.GetProperty("operator").GetProperty("characters").EnumerateArray());
+        Assert.Equal(new[] { "headerless.txt" }, StringsAt(manifest, "unattributedFiles"));
+    }
+
+    [Fact]
+    public void TheManifestReportsLogsDroppedByTheFileCap()
+    {
+        // The cap is 64. An export that quietly covered part of a window would
+        // read as complete coverage in the resulting report, so the count of
+        // what was left out has to survive into the archive.
+        using var dir = new TempDir();
+        for (var i = 0; i < 65; i++)
+        {
+            dir.WriteLog(
+                $"20260814_1150{i:D2}_980000{i:D2}.txt", $"Pilot{i:D2}",
+                Noon.AddMinutes(-10), Noon.AddSeconds(i));
+        }
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        var result = CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        Assert.Equal(64, result.FileCount);
+        Assert.Equal(1, ReadManifest(zip).GetProperty("droppedFileCount").GetInt32());
+    }
+
+    [Fact]
+    public void ADetectedFightIsRecordedAsSuchInTheManifest()
+    {
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(
+            dir.Path, Noon, Noon.AddMinutes(5), zip, CombatLogWindowSource.LastFight);
+
+        Assert.Equal("last-fight",
+            ReadManifest(zip).GetProperty("window").GetProperty("source").GetString());
+    }
+
+    [Fact]
+    public void AHandTypedRangeIsRecordedAsSuchInTheManifest()
+    {
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(
+            dir.Path, Noon, Noon.AddMinutes(5), zip, CombatLogWindowSource.ManualRange);
+
+        Assert.Equal("manual-range",
+            ReadManifest(zip).GetProperty("window").GetProperty("source").GetString());
+    }
+
+    [Fact]
+    public void AnUnstatedWindowSourceSaysSoRatherThanGuessing()
+    {
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        Assert.Equal("unspecified",
+            ReadManifest(zip).GetProperty("window").GetProperty("source").GetString());
+    }
+
+    [Fact]
+    public void ADetectedFightWindowKnowsItWasDetected()
+    {
+        var fight = CombatLogExport.DetectLastFight(NewestFirst(Alert("attack", "Alpha", Noon)));
+
+        Assert.Equal(CombatLogWindowSource.LastFight, fight!.Source);
+    }
+
+    [Fact]
+    public void TheManifestDoesNotInflateTheReportedLogCount()
+    {
+        // The settings panel renders "Exported N logs". Counting the manifest
+        // there would be a quiet UI regression.
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        var result = CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        Assert.Equal(1, result.FileCount);
+        Assert.Equal(2, ReadArchive(zip).Count);
+    }
+
+    [Fact]
+    public void TheManifestIsNotMistakableForAGameLog()
+    {
+        // eve-intel globs *.txt and keys a header-less file as a phantom pilot.
+        // The .json extension is the contract, not a cosmetic choice.
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        Assert.Equal(new[] { "during.txt" },
+            ReadArchive(zip).Keys.Where(name => name.EndsWith(".txt")).ToArray());
     }
 }

@@ -1,10 +1,25 @@
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
+using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace TriffView.Alerts;
+
+/// <summary>Where an export's time window came from.</summary>
+public enum CombatLogWindowSource
+{
+    /// <summary>Not stated by the caller -- distinct from "not known".</summary>
+    Unspecified,
+
+    /// <summary>Derived from the run of combat alerts in the history.</summary>
+    LastFight,
+
+    /// <summary>Typed by hand as a UTC range.</summary>
+    ManualRange,
+}
 
 /// <summary>
 /// A detected stretch of fighting, derived from the alert history.
@@ -18,6 +33,7 @@ public sealed class CombatLogFightWindow
     public DateTime EndUtc { get; init; }
     public IReadOnlyList<string> Characters { get; init; } = Array.Empty<string>();
     public int AlertCount { get; init; }
+    public CombatLogWindowSource Source { get; init; } = CombatLogWindowSource.Unspecified;
 
     public object ToState()
     {
@@ -81,6 +97,18 @@ public static class CombatLogExport
 {
     /// <summary>Discord's default per-file attachment limit for users without Nitro.</summary>
     public const long DiscordAttachmentLimitBytes = 10L * 1024 * 1024;
+
+    /// <summary>
+    /// Name of the manifest entry. Deliberately not <c>*.txt</c>: eve-intel's
+    /// parser globs <c>*.txt</c> and keys any file lacking a "Listener:" header
+    /// as a phantom pilot, so the extension is load-bearing.
+    /// </summary>
+    public const string ManifestEntryName = "triffview-manifest.json";
+
+    private static readonly JsonSerializerOptions ManifestJsonOptions = new()
+    {
+        WriteIndented = true,
+    };
 
     /// <summary>Alert types that mean "a fight is happening", as opposed to ambient awareness.</summary>
     private static readonly string[] FightAlertTypes = { "attack", "warp_scramble" };
@@ -146,6 +174,7 @@ public static class CombatLogExport
                 .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
             AlertCount = cluster.Count,
+            Source = CombatLogWindowSource.LastFight,
         };
     }
 
@@ -154,7 +183,9 @@ public static class CombatLogExport
     /// into a zip at <paramref name="destinationZipPath"/>. Throws
     /// <see cref="InvalidOperationException"/> when no log overlaps the window.
     /// </summary>
-    public static CombatLogExportResult Export(string gamelogsPath, DateTime startUtc, DateTime endUtc, string destinationZipPath)
+    public static CombatLogExportResult Export(
+        string gamelogsPath, DateTime startUtc, DateTime endUtc, string destinationZipPath,
+        CombatLogWindowSource source = CombatLogWindowSource.Unspecified)
     {
         if (endUtc < startUtc) (startUtc, endUtc) = (endUtc, startUtc);
         if (!Directory.Exists(gamelogsPath))
@@ -188,7 +219,10 @@ public static class CombatLogExport
         {
             using (var archive = ZipFile.Open(stagingPath, ZipArchiveMode.Create))
             {
+                // rawBytes stays logs-only: it means "bytes of game log"
+                // everywhere it surfaces, and the manifest is not one.
                 rawBytes = selected.Sum(log => CopyIntoArchive(archive, log));
+                WriteManifest(archive, selected, startUtc, endUtc, source, droppedFiles);
             }
 
             File.Move(stagingPath, destinationZipPath, overwrite: true);
@@ -302,6 +336,83 @@ public static class CombatLogExport
         // log while it is being copied.
         return source.Position;
     }
+
+    /// <summary>
+    /// Records what this archive is and whose characters are in it. Every log
+    /// came from one machine's Gamelogs folder, and one machine is one player,
+    /// so the characters listed under "operator" are one human's -- a fact
+    /// eve-intel cannot recover from the logs, which say who was listening and
+    /// never who was at the keyboard.
+    /// </summary>
+    private static void WriteManifest(
+        ZipArchive archive, List<SelectedLog> selected,
+        DateTime startUtc, DateTime endUtc, CombatLogWindowSource source, int droppedFiles)
+    {
+        var characters = selected
+            .Where(log => !string.IsNullOrWhiteSpace(log.CharacterName))
+            .GroupBy(log => log.CharacterName, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new
+            {
+                name = group.Key,
+                id = group
+                    .Select(log => TryParseCharacterId(log.EntryName, out var id) ? id : (long?)null)
+                    .FirstOrDefault(value => value != null),
+                files = group
+                    .Select(log => log.EntryName)
+                    .OrderBy(name => name, StringComparer.Ordinal)
+                    .ToArray(),
+            })
+            .ToArray();
+
+        var manifest = new
+        {
+            schema = "triffview.combat-log-export/1",
+            tool = new { name = "TriffView", version = ToolVersion },
+            exportedUtc = DateTime.UtcNow.ToString("O"),
+            window = new
+            {
+                startUtc = startUtc.ToString("O"),
+                endUtc = endUtc.ToString("O"),
+                source = SourceToken(source),
+            },
+            // "operator" is a C# keyword; the @ is stripped when serialized.
+            @operator = new { characters },
+            unattributedFiles = selected
+                .Where(log => string.IsNullOrWhiteSpace(log.CharacterName))
+                .Select(log => log.EntryName)
+                .OrderBy(name => name, StringComparer.Ordinal)
+                .ToArray(),
+            droppedFileCount = droppedFiles,
+        };
+
+        var entry = archive.CreateEntry(ManifestEntryName, CompressionLevel.Optimal);
+        using var stream = entry.Open();
+        // No BOM: a leading byte-order mark breaks strict JSON parsers.
+        using var writer = new StreamWriter(stream, new UTF8Encoding(false));
+        writer.Write(JsonSerializer.Serialize(manifest, ManifestJsonOptions));
+    }
+
+    /// <summary>
+    /// Reported so a reader can tell which build produced an archive. Read from
+    /// this type's own assembly, which is the test assembly under test -- hence
+    /// asserted for shape rather than value.
+    /// </summary>
+    private static string ToolVersion =>
+        typeof(CombatLogExport).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? "unknown";
+
+    /// <summary>
+    /// Spelled out rather than using JsonStringEnumConverter, which would emit
+    /// "LastFight" and put the wire format at the mercy of a rename.
+    /// </summary>
+    private static string SourceToken(CombatLogWindowSource source) => source switch
+    {
+        CombatLogWindowSource.LastFight => "last-fight",
+        CombatLogWindowSource.ManualRange => "manual-range",
+        _ => "unspecified",
+    };
 
     /// <summary>
     /// Best-effort staging cleanup. A failure here must not replace the original
