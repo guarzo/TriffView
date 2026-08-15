@@ -11,9 +11,16 @@ that every character in the archive is one human's. eve-intel cannot recover
 that from the logs: a gamelog says who was listening, never who was at the
 keyboard.
 
-TriffView is the only place the fact exists, and it exists for free. The app
-already enumerates live EVE client windows to draw previews, so "these
-characters were flown together" is first-hand observation, not inference.
+TriffView is the only place the fact exists, and it exists for free. Every log
+the export collects comes from one machine's Gamelogs folder, and one machine is
+one player — so every character with a log there is that player's.
+
+**Assumption, recorded deliberately:** one machine, one human. A shared machine
+would break the linkage, and the design does not defend against it. That is a
+decision, not an oversight: it is not a situation this project has. Note the
+attribution comes from folder membership, *not* from the live client windows
+TriffView enumerates for previews — those are current state at export time and
+would silently drop a character who closed their client before the export ran.
 
 ## Why the linkage matters
 
@@ -62,6 +69,25 @@ Consuming the manifest is separate work in eve-intel: widen `own` to include
 every character the manifest lists, and surface provenance in the AAR. Absent a
 manifest, current behavior must be unchanged — archives predating this change
 stay readable.
+
+## Disclosure
+
+The manifest is always written. No opt-in, no extra confirmation: exporting logs
+for upload is already the act of sharing this, and gating it behind a checkbox
+would add a decision without adding a choice.
+
+Two lines of existing copy become inaccurate and must change, concisely — the
+archive is no longer only game logs:
+
+- `app/src/tools/TriffViewSettings.jsx:1827` — "Game logs only, copied as-is.
+  Chat logs are never included."
+- `README.md:59` — "Logs are copied exactly as EVE wrote them, one file per
+  character session, and only from the Gamelogs folder."
+
+The substance of both promises survives and is worth keeping: logs are still
+copied byte-for-byte, and chat logs are still never included. Only the "nothing
+else is in the archive" implication is now wrong, so the edit is a short clause
+naming the manifest, not a rewrite.
 
 ## Schema
 
@@ -115,11 +141,30 @@ to trust the window's edges.
 ## Implementation shape
 
 `CombatLogFightWindow` gains a `Source` property (enum, `LastFight` /
-`ManualRange`). It is already the object flowing from `BuildCombatLogWindow` to
-the `Export` call, so it carries its own provenance rather than threading a
-loose parameter. `DetectLastFight` sets `LastFight`; the manual branch of
-`BuildCombatLogWindow` sets `ManualRange`. `Export` takes the source as an
-optional parameter, so existing callers and tests compile unchanged.
+`ManualRange`). `DetectLastFight` sets `LastFight`; the manual branch of
+`BuildCombatLogWindow` sets `ManualRange`. The window object is already in scope
+at the single call site, which today decomposes it
+(`TriffViewSubsystem.cs:1155`):
+
+```csharp
+// before
+CombatLogExport.Export(gamelogsPath, window.StartUtc, window.EndUtc, destination)
+
+// after
+CombatLogExport.Export(gamelogsPath, window.StartUtc, window.EndUtc, destination, window.Source)
+```
+
+so `Export` gains a trailing optional parameter:
+
+```csharp
+public static CombatLogExportResult Export(
+    string gamelogsPath, DateTime startUtc, DateTime endUtc, string destinationZipPath,
+    CombatLogWindowSource source = CombatLogWindowSource.Unspecified)
+```
+
+`Unspecified` is the default so existing callers and the current tests compile
+untouched; it serializes as `"unspecified"` rather than being omitted, so a
+consumer can tell "not stated" from "not known".
 
 The manifest is written as a final archive entry inside the existing staging
 block in `CombatLogExport.Export`, so a failed manifest write cleans up like any
@@ -147,6 +192,7 @@ appears.
   time segment as an id.
 - A log with no `Listener:` header lands in `unattributedFiles`, not `operator`.
 - `window.source` reflects detection versus a manual range.
+- The panel copy and README no longer claim the archive is only game logs.
 - `droppedFileCount` matches the 64-file cap path.
 - `FileCount` is unchanged by the manifest's presence — regression guard on the
   settings panel copy.
