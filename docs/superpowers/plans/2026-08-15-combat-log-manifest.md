@@ -17,7 +17,7 @@
 - The manifest is **always written**. No opt-in, no confirmation dialog.
 - JSON is UTF-8 **without a BOM**, indented, camelCase — matching `JsonNamingPolicy.CamelCase` + `WriteIndented` used at `native/TriffView/TriffViewSubsystem.cs:3541-3542`.
 - Both consuming projects target .NET 8 (`native/TriffView.csproj:4` is `net8.0-windows`, `tests/TriffView.Tests/TriffView.Tests.csproj:3` is `net8.0`), so `char.IsAsciiDigit` and `File.Move(overwrite:)` are available.
-- `native/TriffAlerts/CombatLogExport.cs` is compiled **directly into the test assembly** (`tests/TriffView.Tests/TriffView.Tests.csproj:24`), not referenced. `internal` members are therefore visible to tests — no `InternalsVisibleTo` needed.
+- `native/TriffAlerts/CombatLogExport.cs` is compiled **directly into the test assembly** (`tests/TriffView.Tests/TriffView.Tests.csproj:25`), not referenced. `internal` members are therefore visible to tests — no `InternalsVisibleTo` needed. `native/TriffView/TriffViewSubsystem.cs` is **not** linked in, so nothing in it is unit-testable.
 
 **Running the build on Linux** (CI runs `windows-latest` and needs neither flag):
 
@@ -125,12 +125,19 @@ git commit -m "Parse character ids from Gamelog filenames"
 ### Task 2: Write the manifest into the archive
 
 **Files:**
-- Modify: `native/TriffAlerts/CombatLogExport.cs` (`Export`, plus a new `WriteManifest`)
+- Modify: `native/TriffAlerts/CombatLogExport.cs` (new enum, `CombatLogFightWindow.Source`, `DetectLastFight`, `Export` signature, plus a new `WriteManifest`)
 - Modify: `tests/TriffView.Tests/CombatLogExportTests.cs` (three existing assertions break — see Step 1)
 
 **Interfaces:**
-- Consumes: `TryParseCharacterId` from Task 1; the existing `SelectedLog(string Path, string EntryName, string CharacterName, DateTime LastWriteUtc)` record at `CombatLogExport.cs:330`.
-- Produces: `public const string ManifestEntryName = "triffview-manifest.json"` on `CombatLogExport`. Task 3 writes into the same manifest; tests reference the constant.
+- Consumes: `TryParseCharacterId` from Task 1; the existing `SelectedLog(string Path, string EntryName, string CharacterName, DateTime LastWriteUtc)` record at `CombatLogExport.cs:360`.
+- Produces: `public const string ManifestEntryName = "triffview-manifest.json"`; `public enum CombatLogWindowSource { Unspecified, LastFight, ManualRange }`; `CombatLogFightWindow.Source`; `Export(..., CombatLogWindowSource source = CombatLogWindowSource.Unspecified)`. Task 3 supplies a real value for that parameter.
+
+> **Why the window source lands here and not in Task 3.** This task commits a
+> manifest stamped `schema: "triffview.combat-log-export/1"`. That string is a
+> contract, so `/1` has to mean one thing forever — emitting it without
+> `window.source` and adding the field later would silently redefine a published
+> version. The whole schema ships in this commit, defaulting to `"unspecified"`;
+> Task 3 only replaces that default with the truth.
 
 - [ ] **Step 1: Fix the three existing tests that assert exact archive contents**
 
@@ -157,7 +164,7 @@ Then change these three lines:
   // to
   Assert.Equal(new[] { "during.txt" }, ReadLogs(zip).Keys.ToArray());
   ```
-- Line 262, in `LogsAreCopiedVerbatimUnderTheirOwnNames` — change the `entries` assignment:
+- Line 263, in `LogsAreCopiedVerbatimUnderTheirOwnNames` — change the `entries` assignment (the assertions on line 264-265 need no edit):
   ```csharp
   // from
   var entries = ReadArchive(zip);
@@ -174,7 +181,7 @@ Then change these three lines:
 
 - [ ] **Step 2: Write the failing tests**
 
-Add `using System.Text.Json;` to the top of the test file. Add this helper below `ReadLogs`:
+Add `using System.Globalization;` and `using System.Text.Json;` to the top of the test file. Neither is covered by the project's implicit usings. Add this helper below `ReadLogs`:
 
 ```csharp
     private static JsonElement ReadManifest(string zipPath)
@@ -212,9 +219,46 @@ Then add these tests at the end of the class, before the closing brace:
         Assert.Equal("TriffView", manifest.GetProperty("tool").GetProperty("name").GetString());
         Assert.False(string.IsNullOrWhiteSpace(
             manifest.GetProperty("tool").GetProperty("version").GetString()));
-        // Shape, not value: the export takes no clock dependency for one field.
-        Assert.False(string.IsNullOrWhiteSpace(manifest.GetProperty("exportedUtc").GetString()));
         Assert.Equal(0, manifest.GetProperty("droppedFileCount").GetInt32());
+
+        // The window is the whole basis for what got collected, so it has to
+        // survive into the archive exactly, and in UTC.
+        var window = manifest.GetProperty("window");
+        Assert.Equal(Noon, DateTime.Parse(
+            window.GetProperty("startUtc").GetString()!,
+            CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+        Assert.Equal(Noon.AddMinutes(5), DateTime.Parse(
+            window.GetProperty("endUtc").GetString()!,
+            CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+
+        // Value is a clock read and cannot be asserted, but the shape can:
+        // "non-blank" would happily accept "banana".
+        var exported = DateTime.Parse(
+            manifest.GetProperty("exportedUtc").GetString()!,
+            CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        Assert.Equal(DateTimeKind.Utc, exported.Kind);
+    }
+
+    [Fact]
+    public void TheManifestIsWrittenWithoutAByteOrderMark()
+    {
+        // Read as bytes on purpose: StreamReader silently swallows a BOM, so a
+        // test that decodes through it cannot see the thing being asserted.
+        // A leading BOM breaks strict JSON parsers, Python's json.loads included.
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        using var archive = ZipFile.OpenRead(zip);
+        using var stream = archive.GetEntry(CombatLogExport.ManifestEntryName)!.Open();
+        using var buffer = new MemoryStream();
+        stream.CopyTo(buffer);
+        var bytes = buffer.ToArray();
+
+        Assert.NotEqual(new byte[] { 0xEF, 0xBB, 0xBF }, bytes.Take(3).ToArray());
+        Assert.Equal((byte)'{', bytes[0]);
     }
 
     [Fact]
@@ -309,186 +353,6 @@ Then add these tests at the end of the class, before the closing brace:
     }
 
     [Fact]
-    public void TheManifestDoesNotInflateTheReportedLogCount()
-    {
-        // The settings panel renders "Exported N logs". Counting the manifest
-        // there would be a quiet UI regression.
-        using var dir = new TempDir();
-        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
-
-        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
-        var result = CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
-
-        Assert.Equal(1, result.FileCount);
-        Assert.Equal(2, ReadArchive(zip).Count);
-    }
-
-    [Fact]
-    public void TheManifestIsNotMistakableForAGameLog()
-    {
-        // eve-intel globs *.txt and keys a header-less file as a phantom pilot.
-        // The .json extension is the contract, not a cosmetic choice.
-        using var dir = new TempDir();
-        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
-
-        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
-        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
-
-        Assert.Equal(new[] { "during.txt" },
-            ReadArchive(zip).Keys.Where(name => name.EndsWith(".txt")).ToArray());
-    }
-```
-
-- [ ] **Step 3: Run the tests to verify they fail**
-
-Run: `dotnet test tests/TriffView.Tests/TriffView.Tests.csproj -p:EnableSourceControlManagerQueries=false`
-
-Expected: FAIL to compile with `CS0117: 'CombatLogExport' does not contain a definition for 'ManifestEntryName'`. After Step 4 adds the constant but before the manifest is written, the seven new tests fail on `Assert.NotNull(entry)` instead. Either is a correct red.
-
-- [ ] **Step 4: Write the implementation**
-
-Add `using System.Text.Json;` to the top of `native/TriffAlerts/CombatLogExport.cs`.
-
-Add the constant beside `DiscordAttachmentLimitBytes` (around line 83):
-
-```csharp
-    /// <summary>
-    /// Name of the manifest entry. Deliberately not <c>*.txt</c>: eve-intel's
-    /// parser globs <c>*.txt</c> and keys any file lacking a "Listener:" header
-    /// as a phantom pilot, so the extension is load-bearing.
-    /// </summary>
-    public const string ManifestEntryName = "triffview-manifest.json";
-
-    private static readonly JsonSerializerOptions ManifestJsonOptions = new()
-    {
-        WriteIndented = true,
-    };
-```
-
-In `Export`, change only the archive block (lines 186-192) so the manifest is written before disposal, and keep `rawBytes` as logs-only:
-
-```csharp
-        long rawBytes;
-        try
-        {
-            using (var archive = ZipFile.Open(stagingPath, ZipArchiveMode.Create))
-            {
-                // rawBytes stays logs-only: it means "bytes of game log"
-                // everywhere it surfaces, and the manifest is not one.
-                rawBytes = selected.Sum(log => CopyIntoArchive(archive, log));
-                WriteManifest(archive, selected, startUtc, endUtc, droppedFiles);
-            }
-
-            File.Move(stagingPath, destinationZipPath, overwrite: true);
-        }
-        catch
-        {
-            TryDelete(stagingPath);
-            throw;
-        }
-```
-
-Add `WriteManifest` directly below `CopyIntoArchive`:
-
-```csharp
-    /// <summary>
-    /// Records what this archive is and whose characters are in it. Every log
-    /// came from one machine's Gamelogs folder, and one machine is one player,
-    /// so the characters listed under "operator" are one human's -- a fact
-    /// eve-intel cannot recover from the logs, which say who was listening and
-    /// never who was at the keyboard.
-    /// </summary>
-    private static void WriteManifest(
-        ZipArchive archive, List<SelectedLog> selected,
-        DateTime startUtc, DateTime endUtc, int droppedFiles)
-    {
-        var characters = selected
-            .Where(log => !string.IsNullOrWhiteSpace(log.CharacterName))
-            .GroupBy(log => log.CharacterName, StringComparer.OrdinalIgnoreCase)
-            .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
-            .Select(group => new
-            {
-                name = group.Key,
-                id = group
-                    .Select(log => TryParseCharacterId(log.EntryName, out var id) ? id : (long?)null)
-                    .FirstOrDefault(value => value != null),
-                files = group
-                    .Select(log => log.EntryName)
-                    .OrderBy(name => name, StringComparer.Ordinal)
-                    .ToArray(),
-            })
-            .ToArray();
-
-        var manifest = new
-        {
-            schema = "triffview.combat-log-export/1",
-            tool = new { name = "TriffView", version = ToolVersion },
-            exportedUtc = DateTime.UtcNow.ToString("O"),
-            window = new
-            {
-                startUtc = startUtc.ToString("O"),
-                endUtc = endUtc.ToString("O"),
-            },
-            // "operator" is a C# keyword; the @ is stripped when serialized.
-            @operator = new { characters },
-            unattributedFiles = selected
-                .Where(log => string.IsNullOrWhiteSpace(log.CharacterName))
-                .Select(log => log.EntryName)
-                .OrderBy(name => name, StringComparer.Ordinal)
-                .ToArray(),
-            droppedFileCount = droppedFiles,
-        };
-
-        var entry = archive.CreateEntry(ManifestEntryName, CompressionLevel.Optimal);
-        using var stream = entry.Open();
-        // No BOM: a leading byte-order mark breaks strict JSON parsers.
-        using var writer = new StreamWriter(stream, new UTF8Encoding(false));
-        writer.Write(JsonSerializer.Serialize(manifest, ManifestJsonOptions));
-    }
-
-    /// <summary>
-    /// Reported so a reader can tell which build produced an archive. Read from
-    /// this type's own assembly, which is the test assembly under test -- hence
-    /// asserted for shape rather than value.
-    /// </summary>
-    private static string ToolVersion =>
-        typeof(CombatLogExport).Assembly
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-        ?? "unknown";
-```
-
-Add `using System.Reflection;` to the top of the file for `AssemblyInformationalVersionAttribute`.
-
-- [ ] **Step 5: Run the tests to verify they pass**
-
-Run: `dotnet test tests/TriffView.Tests/TriffView.Tests.csproj -p:EnableSourceControlManagerQueries=false`
-
-Expected: PASS, 83 total (76 + 7 new), 0 failed. If `TheManifestGroupsEverySessionFileUnderItsCharacter` fails on ordering, check that `characters` is sorted by name and `files` by ordinal — both orderings are asserted.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add native/TriffAlerts/CombatLogExport.cs tests/TriffView.Tests/CombatLogExportTests.cs
-git commit -m "Write an export manifest into the combat log archive"
-```
-
----
-
-### Task 3: Record where the export window came from
-
-**Files:**
-- Modify: `native/TriffAlerts/CombatLogExport.cs` (new enum, `CombatLogFightWindow.Source`, `DetectLastFight`, `Export` signature, `WriteManifest`)
-- Modify: `native/TriffView/TriffViewSubsystem.cs:1155` (call site) and `:1185` (manual branch)
-- Test: `tests/TriffView.Tests/CombatLogExportTests.cs`
-
-**Interfaces:**
-- Consumes: `WriteManifest` and `ManifestEntryName` from Task 2.
-- Produces: `public enum CombatLogWindowSource { Unspecified, LastFight, ManualRange }`; `CombatLogFightWindow.Source`; `Export(..., CombatLogWindowSource source = CombatLogWindowSource.Unspecified)`.
-
-- [ ] **Step 1: Write the failing tests**
-
-```csharp
-    [Fact]
     public void ADetectedFightIsRecordedAsSuchInTheManifest()
     {
         using var dir = new TempDir();
@@ -536,17 +400,49 @@ git commit -m "Write an export manifest into the combat log archive"
 
         Assert.Equal(CombatLogWindowSource.LastFight, fight!.Source);
     }
+
+    [Fact]
+    public void TheManifestDoesNotInflateTheReportedLogCount()
+    {
+        // The settings panel renders "Exported N logs". Counting the manifest
+        // there would be a quiet UI regression.
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        var result = CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        Assert.Equal(1, result.FileCount);
+        Assert.Equal(2, ReadArchive(zip).Count);
+    }
+
+    [Fact]
+    public void TheManifestIsNotMistakableForAGameLog()
+    {
+        // eve-intel globs *.txt and keys a header-less file as a phantom pilot.
+        // The .json extension is the contract, not a cosmetic choice.
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        Assert.Equal(new[] { "during.txt" },
+            ReadArchive(zip).Keys.Where(name => name.EndsWith(".txt")).ToArray());
+    }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `dotnet test tests/TriffView.Tests/TriffView.Tests.csproj -p:EnableSourceControlManagerQueries=false`
 
-Expected: FAIL to compile — `CS0246: The type or namespace name 'CombatLogWindowSource' could not be found`.
+Expected: FAIL to compile with `CS0117: 'CombatLogExport' does not contain a definition for 'ManifestEntryName'` and `CS0246: The type or namespace name 'CombatLogWindowSource' could not be found`. After Step 4 adds those but before the manifest is written, the new tests fail on `Assert.NotNull(entry)` instead. Either is a correct red.
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 4: Write the implementation**
 
-In `native/TriffAlerts/CombatLogExport.cs`, add the enum above `CombatLogFightWindow`:
+Add `using System.Reflection;`, `using System.Text.Json;` to the top of `native/TriffAlerts/CombatLogExport.cs`. `System.Text` is already imported at line 4.
+
+Add the enum above `CombatLogFightWindow`:
 
 ```csharp
 /// <summary>Where an export's time window came from.</summary>
@@ -569,13 +465,29 @@ Add the property to `CombatLogFightWindow`, below `AlertCount`:
     public CombatLogWindowSource Source { get; init; } = CombatLogWindowSource.Unspecified;
 ```
 
-In `DetectLastFight`, add to the returned object initializer (after `AlertCount = cluster.Count,`):
+In `DetectLastFight`, add to the returned object initializer, after `AlertCount = cluster.Count,`:
 
 ```csharp
             Source = CombatLogWindowSource.LastFight,
 ```
 
-Change the `Export` signature:
+Add the constant and serializer options beside `DiscordAttachmentLimitBytes` (around line 83):
+
+```csharp
+    /// <summary>
+    /// Name of the manifest entry. Deliberately not <c>*.txt</c>: eve-intel's
+    /// parser globs <c>*.txt</c> and keys any file lacking a "Listener:" header
+    /// as a phantom pilot, so the extension is load-bearing.
+    /// </summary>
+    public const string ManifestEntryName = "triffview-manifest.json";
+
+    private static readonly JsonSerializerOptions ManifestJsonOptions = new()
+    {
+        WriteIndented = true,
+    };
+```
+
+In `Export`, change the signature to accept the window's provenance:
 
 ```csharp
     public static CombatLogExportResult Export(
@@ -583,34 +495,105 @@ Change the `Export` signature:
         CombatLogWindowSource source = CombatLogWindowSource.Unspecified)
 ```
 
-Pass it through to the manifest — change the `WriteManifest` call to:
+The parameter is optional so the existing call site and every current test
+compile untouched; Task 3 supplies the real value.
+
+Then change only the archive block (currently lines 186-200) so the manifest is written before disposal, and keep `rawBytes` as logs-only:
 
 ```csharp
+        long rawBytes;
+        try
+        {
+            using (var archive = ZipFile.Open(stagingPath, ZipArchiveMode.Create))
+            {
+                // rawBytes stays logs-only: it means "bytes of game log"
+                // everywhere it surfaces, and the manifest is not one.
+                rawBytes = selected.Sum(log => CopyIntoArchive(archive, log));
                 WriteManifest(archive, selected, startUtc, endUtc, source, droppedFiles);
+            }
+
+            File.Move(stagingPath, destinationZipPath, overwrite: true);
+        }
+        catch
+        {
+            TryDelete(stagingPath);
+            throw;
+        }
 ```
 
-Change `WriteManifest`'s signature to accept it, and its `window` object:
+Add `WriteManifest` directly below `CopyIntoArchive`:
 
 ```csharp
+    /// <summary>
+    /// Records what this archive is and whose characters are in it. Every log
+    /// came from one machine's Gamelogs folder, and one machine is one player,
+    /// so the characters listed under "operator" are one human's -- a fact
+    /// eve-intel cannot recover from the logs, which say who was listening and
+    /// never who was at the keyboard.
+    /// </summary>
     private static void WriteManifest(
         ZipArchive archive, List<SelectedLog> selected,
         DateTime startUtc, DateTime endUtc, CombatLogWindowSource source, int droppedFiles)
-```
+    {
+        var characters = selected
+            .Where(log => !string.IsNullOrWhiteSpace(log.CharacterName))
+            .GroupBy(log => log.CharacterName, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group => new
+            {
+                name = group.Key,
+                id = group
+                    .Select(log => TryParseCharacterId(log.EntryName, out var id) ? id : (long?)null)
+                    .FirstOrDefault(value => value != null),
+                files = group
+                    .Select(log => log.EntryName)
+                    .OrderBy(name => name, StringComparer.Ordinal)
+                    .ToArray(),
+            })
+            .ToArray();
 
-```csharp
+        var manifest = new
+        {
+            schema = "triffview.combat-log-export/1",
+            tool = new { name = "TriffView", version = ToolVersion },
+            exportedUtc = DateTime.UtcNow.ToString("O"),
             window = new
             {
                 startUtc = startUtc.ToString("O"),
                 endUtc = endUtc.ToString("O"),
                 source = SourceToken(source),
             },
-```
+            // "operator" is a C# keyword; the @ is stripped when serialized.
+            @operator = new { characters },
+            unattributedFiles = selected
+                .Where(log => string.IsNullOrWhiteSpace(log.CharacterName))
+                .Select(log => log.EntryName)
+                .OrderBy(name => name, StringComparer.Ordinal)
+                .ToArray(),
+            droppedFileCount = droppedFiles,
+        };
 
-Add the mapping helper below `WriteManifest`. Spelled out rather than using
-`JsonStringEnumConverter`, which would emit `"LastFight"` and put the wire
-format at the mercy of a rename:
+        var entry = archive.CreateEntry(ManifestEntryName, CompressionLevel.Optimal);
+        using var stream = entry.Open();
+        // No BOM: a leading byte-order mark breaks strict JSON parsers.
+        using var writer = new StreamWriter(stream, new UTF8Encoding(false));
+        writer.Write(JsonSerializer.Serialize(manifest, ManifestJsonOptions));
+    }
 
-```csharp
+    /// <summary>
+    /// Reported so a reader can tell which build produced an archive. Read from
+    /// this type's own assembly, which is the test assembly under test -- hence
+    /// asserted for shape rather than value.
+    /// </summary>
+    private static string ToolVersion =>
+        typeof(CombatLogExport).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? "unknown";
+
+    /// <summary>
+    /// Spelled out rather than using JsonStringEnumConverter, which would emit
+    /// "LastFight" and put the wire format at the mercy of a rename.
+    /// </summary>
     private static string SourceToken(CombatLogWindowSource source) => source switch
     {
         CombatLogWindowSource.LastFight => "last-fight",
@@ -619,14 +602,50 @@ format at the mercy of a rename:
     };
 ```
 
-Finally, wire up the caller in `native/TriffView/TriffViewSubsystem.cs`. At line 1155:
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `dotnet test tests/TriffView.Tests/TriffView.Tests.csproj -p:EnableSourceControlManagerQueries=false`
+
+Expected: PASS, 88 total (76 + 12 new), 0 failed. If `TheManifestGroupsEverySessionFileUnderItsCharacter` fails on ordering, check that `characters` is sorted by name and `files` by ordinal — both orderings are asserted.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add native/TriffAlerts/CombatLogExport.cs tests/TriffView.Tests/CombatLogExportTests.cs
+git commit -m "Write an export manifest into the combat log archive"
+```
+
+---
+
+### Task 3: Wire the real window source at the call site
+
+**Files:**
+- Modify: `native/TriffView/TriffViewSubsystem.cs:1156` (the `Export` call) and `:1195` (the manual-range return)
+
+**Interfaces:**
+- Consumes: `CombatLogWindowSource`, `CombatLogFightWindow.Source`, and the optional `source` parameter on `Export` — all from Task 2.
+- Produces: nothing new. This task only replaces the `Unspecified` default with the truth.
+
+> **No unit test in this task, deliberately.** `TriffViewSubsystem.cs` is a
+> `net8.0-windows` WPF file and is **not** among the sources linked into the test
+> project (`tests/TriffView.Tests/TriffView.Tests.csproj:14-27`), so no xUnit test
+> can reach this code. The compiler and a manual check are the available
+> verification, and pretending otherwise with a test that exercises something
+> else would be worse than saying so. Task 2 already covers every value this
+> task can produce.
+
+- [ ] **Step 1: Pass the window's source into the export**
+
+In `native/TriffView/TriffViewSubsystem.cs`, at line 1156:
 
 ```csharp
             var result = await Task.Run(() => CombatLogExport.Export(
                 gamelogsPath, window.StartUtc, window.EndUtc, destination, window.Source));
 ```
 
-And in `BuildCombatLogWindow`, the manual branch's return (line 1185):
+- [ ] **Step 2: Mark the hand-typed branch**
+
+In `BuildCombatLogWindow`, the manual-range return at line 1195 — **not** line 1185, which is the `DetectLastFight` branch and already carries `LastFight` from Task 2:
 
 ```csharp
         return new CombatLogFightWindow
@@ -637,25 +656,25 @@ And in `BuildCombatLogWindow`, the manual branch's return (line 1185):
         };
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 3: Verify the WPF project compiles**
 
-Run: `dotnet test tests/TriffView.Tests/TriffView.Tests.csproj -p:EnableSourceControlManagerQueries=false`
-
-Expected: PASS, 87 total (83 + 4 new), 0 failed.
-
-- [ ] **Step 5: Verify the WPF project still compiles**
-
-The test project does **not** compile `TriffViewSubsystem.cs`, so the call-site edit is unverified until this runs.
+The test project does not compile `TriffViewSubsystem.cs`, so both edits are unverified until this runs.
 
 Run: `dotnet build native/TriffView.csproj -c Release -p:EnableSourceControlManagerQueries=false -p:EnableWindowsTargeting=true`
 
 Expected: `Build succeeded.` with 0 warnings, 0 errors.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Confirm the test suite is still green**
+
+Run: `dotnet test tests/TriffView.Tests/TriffView.Tests.csproj -p:EnableSourceControlManagerQueries=false`
+
+Expected: PASS, 88 total, 0 failed — unchanged from Task 2. This task adds no tests; the run is here to catch an accidental edit to shared code.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add native/TriffAlerts/CombatLogExport.cs native/TriffView/TriffViewSubsystem.cs tests/TriffView.Tests/CombatLogExportTests.cs
-git commit -m "Record whether an export window was detected or typed"
+git add native/TriffView/TriffViewSubsystem.cs
+git commit -m "Tell the export where its window came from"
 ```
 
 ---
@@ -698,7 +717,15 @@ Run: `grep -rn "logs only\|Logs are copied exactly\|copied as-is" README.md app/
 
 Expected: both hits now mention the manifest. Nothing else in either file claims the archive contains only logs.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Verify the frontend still builds**
+
+The JSX edit is inside a JSX expression block and is not covered by any test or by the `dotnet` builds. Release CI runs this at `.github/workflows/release.yml:31`, so a broken edit would not surface until release.
+
+Run: `cd app && npm ci && npm run build`
+
+Expected: `vite build` completes with no errors. Return to the repository root afterwards.
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git add README.md app/src/tools/TriffViewSettings.jsx
@@ -709,10 +736,11 @@ git commit -m "Say that the export archive carries a manifest"
 
 ## Final verification
 
-- [ ] Full suite green: `dotnet test tests/TriffView.Tests/TriffView.Tests.csproj -c Release -p:EnableSourceControlManagerQueries=false` — expect 87 passed, 0 failed.
+- [ ] Full suite green: `dotnet test tests/TriffView.Tests/TriffView.Tests.csproj -c Release -p:EnableSourceControlManagerQueries=false` — expect 88 passed, 0 failed.
 - [ ] WPF build clean: `dotnet build native/TriffView.csproj -c Release -p:EnableSourceControlManagerQueries=false -p:EnableWindowsTargeting=true` — expect 0 warnings, 0 errors.
+- [ ] Frontend build clean: `cd app && npm ci && npm run build` — expect no errors.
 - [ ] Inspect a real archive by hand — the one thing the tests cannot judge is whether the JSON reads well to a human opening it in Discord.
-- [ ] Confirm no `EnableSourceControlManagerQueries` or `EnableWindowsTargeting` flag leaked into a committed file: `git diff origin/claude/combat-log-eve-intel-upload-kjgxir --stat`.
+- [ ] Confirm no local-only build flag leaked into a committed file: `git grep -n "EnableWindowsTargeting\|EnableSourceControlManagerQueries"`. Expect **no matches outside this plan**. (`git diff --stat` cannot answer this — it reports changed-line counts, not contents.)
 
 ## Out of scope
 
