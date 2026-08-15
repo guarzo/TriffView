@@ -19,6 +19,7 @@ TriffView is a standalone preview system paired with configurable log alerts, a 
 - Custom preview labels, label placement, label size, opacity, and colors.
 - Lockable previews so carefully placed layouts stay put.
 - TriffAlerts for attack, warp scramble, decloak, fleet invite, convo request, and system-change awareness.
+- One-click combat log export, packaging a fight's game logs into a zip for eve-intel after-action reports.
 - Per-alert preview flashes, colors, notifications, and more.
 - Client layout save, restore, and optional launch restore.
 - Optional inactive-client minimization tuned for rapid switching, no more droppng to desktop or lagging when cycling.
@@ -61,6 +62,14 @@ TriffAlerts turns EVE's own live game logs into fast, visible preview alerts. Wh
 Each alert type has its own color, flash thickness, sound, and notification option. Attack alerts can ignore likely NPC damage so the focus stays on PvP threats. Sounds are packaged with the app, alerts are off by default, and the default mode is quiet and visual: turn it on, tune it once, and let the previews tell you which client needs attention.
 
 TriffAlerts uses EVE log files only. It does not read memory, hook the EVE client, inject input, OCR the screen, or control the game.
+
+### Combat log export
+
+The alerts panel can package the game logs covering a fight into a single zip, ready to upload to Discord for [eve-intel](https://github.com/guarzo/eve-intel) to build an after-action report from.
+
+Because TriffAlerts is already watching for incoming damage and warp scrambles, it knows when your last fight was: hit **Export last fight** and it collects every character's log covering that window, up to 64 files — if more match, the newest are kept and the panel reports how many were left out. Fights from before TriffView was started are not in the alert history, so a UTC time range is there for those.
+
+Logs are copied exactly as EVE wrote them, one file per character session, and only from the Gamelogs folder. The zip also carries a small manifest naming the characters it covers and the time range it spans. Chat logs are never included.
 
 ## Low Resource By Design
 

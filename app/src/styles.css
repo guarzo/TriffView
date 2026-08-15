@@ -3062,6 +3062,50 @@ button:disabled {
   border-left-color: var(--tv-accent);
 }
 
+.triff-combat-export-window {
+  margin: 0;
+  color: var(--tv-text);
+  font-size: 11px;
+}
+
+.triff-combat-export-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.triff-combat-export-range {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+@media (max-width: 620px) {
+  .triff-combat-export-range {
+    grid-template-columns: 1fr;
+  }
+}
+
+.triff-combat-export-result,
+.triff-combat-export-error {
+  margin: 0;
+  border-left: 2px solid var(--tv-accent);
+  background: rgba(var(--tv-bg-rgb), 0.78);
+  padding: 7px 9px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.triff-combat-export-result {
+  color: var(--tv-text);
+}
+
+.triff-combat-export-error {
+  border-left-color: var(--tv-danger);
+  color: var(--tv-danger);
+}
+
 .triff-alert-history-row strong,
 .triff-alert-history-row em,
 .triff-alert-history-row p {
