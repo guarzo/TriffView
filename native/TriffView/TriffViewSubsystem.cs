@@ -13,12 +13,6 @@ using Forms = System.Windows.Forms;
 
 namespace TriffView.Preview;
 
-internal static class TriffViewPreviewDimensions
-{
-    public const int Minimum = 16;
-    public const int Maximum = 32767;
-}
-
 internal sealed class TriffViewController : IDisposable
 {
     private const int SwitchSettleBeforeMinimizeMs = 10;
@@ -100,7 +94,52 @@ internal sealed class TriffViewController : IDisposable
         }
 
         StartForegroundTracking();
+        StartDisplayTracking();
+        LogLayoutSnapshot("startup");
         PostState();
+    }
+
+    /// <summary>
+    /// Observes display changes without acting on them. A monitor that drops out on sleep and
+    /// returns at a different origin is invisible in any after-the-fact snapshot, so the event
+    /// is logged as it happens. Nothing else in the app's behaviour changes.
+    /// </summary>
+    private void StartDisplayTracking()
+    {
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+    }
+
+    private void StopDisplayTracking()
+    {
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        // Raised on an arbitrary thread; settings access is dispatcher-affine.
+        _dispatcher.BeginInvoke(() =>
+        {
+            if (_disposed) return;
+            LogLayoutSnapshot("display-changed");
+        });
+    }
+
+    /// <summary>
+    /// Records the monitor set alongside every saved preview position. Comparing snapshots
+    /// across a sleep/wake cycle shows whether a display returned at a different origin, and
+    /// which previews that left pointing somewhere invisible.
+    /// </summary>
+    private void LogLayoutSnapshot(string category)
+    {
+        var profile = Settings.ActiveProfileFast();
+        var layouts = profile.PreviewLayouts
+            .Select(entry => $"{entry.Key}@{entry.Value.X},{entry.Value.Y}")
+            .ToArray();
+
+        TriffViewDiagnostics.Log(
+            category,
+            $"monitors={TriffViewDiagnostics.Monitors()} layouts=" +
+            (layouts.Length == 0 ? "<none>" : string.Join(" ", layouts)));
     }
 
     public bool HandleWebMessage(string type, JsonObject? message)
@@ -155,6 +194,11 @@ internal sealed class TriffViewController : IDisposable
                 return true;
             case "triffview:export-settings-backup":
                 ExportSettingsBackup();
+                return true;
+            case "triffview:export-combat-logs":
+                ExportCombatLogs(
+                    message?["fromUtc"]?.GetValue<string>(),
+                    message?["toUtc"]?.GetValue<string>());
                 return true;
             case "triffview:restore-settings-backup":
                 RestoreSettingsBackup();
@@ -280,6 +324,7 @@ internal sealed class TriffViewController : IDisposable
         _timer.Stop();
         _switchStateTimer.Stop();
         StopForegroundTracking();
+        StopDisplayTracking();
         _alerts.Dispose();
         _overlay.Dispose();
     }
@@ -536,6 +581,7 @@ internal sealed class TriffViewController : IDisposable
     private void SavePreviewLayout(string key, TriffViewRect rect)
     {
         var profile = Settings.ActiveProfile();
+        TriffViewDiagnostics.RecordLayoutWrite("drag-or-resize", key, rect.ToRectangle());
         profile.PreviewLayouts[key] = rect;
         Settings.Save();
         PostState();
@@ -547,6 +593,7 @@ internal sealed class TriffViewController : IDisposable
         var profile = Settings.ActiveProfile();
         foreach (var layout in layouts)
         {
+            TriffViewDiagnostics.RecordLayoutWrite("save-all-layouts", layout.Key, layout.Value.ToRectangle());
             profile.PreviewLayouts[layout.Key] = layout.Value;
         }
 
@@ -1113,6 +1160,113 @@ internal sealed class TriffViewController : IDisposable
         {
             PostError("export-settings-backup", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Packages the Gamelogs covering a fight into a zip for manual upload to
+    /// Discord, where eve-intel's fight-aar skill reads it with
+    /// <c>parse_fights.py --zip</c>.
+    ///
+    /// With no window supplied, the last run of combat alerts is used. That
+    /// history lives in memory and is capped, so it only reaches back through
+    /// the current app session -- the explicit window is what covers everything
+    /// older, and both timestamps are UTC (EVE time).
+    /// </summary>
+    private async void ExportCombatLogs(string? fromUtc, string? toUtc)
+    {
+        try
+        {
+            var window = BuildCombatLogWindow(fromUtc, toUtc);
+            if (window == null)
+            {
+                PostError(
+                    "export-combat-logs",
+                    "No recent fight found in the alert history. Alerts must be enabled and a fight " +
+                    "must have happened while TriffView was running, or you can enter a UTC time range.");
+                return;
+            }
+
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                Title = "Export combat logs for eve-intel",
+                Filter = "Zip archive (*.zip)|*.zip|All files (*.*)|*.*",
+                FileName = CombatLogExport.SuggestFileName(window),
+                DefaultExt = ".zip",
+                AddExtension = true,
+                OverwritePrompt = true,
+            };
+
+            if (dialog.ShowDialog() != true)
+            {
+                // Same disposal race as the completion path below: the dialog is
+                // modal and blocking, so a shutdown can finish while it is open.
+                if (_disposed) return;
+                // Still a terminal message: the UI disables its export buttons
+                // while a run is in flight, so a silent return on cancel would
+                // leave them disabled until the next state post.
+                _postToHud(new { type = "triffview:combat-log-export", cancelled = true });
+                return;
+            }
+
+            var destination = dialog.FileName;
+            var gamelogsPath = _alerts.GamelogsPath;
+            // Off the dispatcher: a long session's logs can run to hundreds of
+            // megabytes, and compressing them on the UI thread would stall
+            // every preview for the duration.
+            var result = await Task.Run(() => CombatLogExport.Export(
+                gamelogsPath, window.StartUtc, window.EndUtc, destination, window.Source));
+
+            // Compressing a long session's logs can outlive a shutdown. Posting
+            // to a controller that has already disposed risks throwing into the
+            // catch below, and a throw from the catch of an async void method
+            // reaches the thread pool and takes the process with it.
+            if (_disposed) return;
+
+            _postToHud(new
+            {
+                type = "triffview:combat-log-export",
+                result = result.ToState(),
+            });
+        }
+        catch (Exception ex)
+        {
+            if (_disposed) return;
+            PostError("export-combat-logs", ex.Message);
+        }
+    }
+
+    private CombatLogFightWindow? BuildCombatLogWindow(string? fromUtc, string? toUtc)
+    {
+        // Only an entirely empty range means "use the last fight". A range that
+        // was typed but does not parse is an error, not a cue to quietly export
+        // some other window than the one that was asked for.
+        if (string.IsNullOrWhiteSpace(fromUtc) && string.IsNullOrWhiteSpace(toUtc))
+        {
+            return CombatLogExport.DetectLastFight(_alerts.History);
+        }
+
+        if (!TryParseUtc(fromUtc, out var start) || !TryParseUtc(toUtc, out var end))
+        {
+            throw new InvalidOperationException(
+                "Enter both a start and an end time in UTC, for example 2026-08-14 20:10.");
+        }
+
+        if (end < start) (start, end) = (end, start);
+        return new CombatLogFightWindow { StartUtc = start, EndUtc = end, Source = CombatLogWindowSource.ManualRange };
+    }
+
+    private static bool TryParseUtc(string? value, out DateTime utc)
+    {
+        utc = default;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        // AssumeUniversal so a bare "2026-08-14T20:15" from the window inputs is
+        // read as EVE time rather than being shifted by the local offset.
+        return DateTime.TryParse(
+            value,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal
+                | System.Globalization.DateTimeStyles.AssumeUniversal,
+            out utc);
     }
 
     private void RestoreSettingsBackup()
@@ -1828,6 +1982,10 @@ internal sealed class TriffViewController : IDisposable
     private void PostState(bool force = false)
     {
         var profile = Settings.ActiveProfile();
+        // One snapshot for both the history list and the fight detection below:
+        // the property clones every event under a lock, and this runs on each
+        // state post.
+        var alertHistory = _alerts.History;
         var payload = new
         {
             type = "triffview:state",
@@ -1855,7 +2013,11 @@ internal sealed class TriffViewController : IDisposable
                 key = client.StableKey,
             }).ToArray(),
             alerts = Settings.Alerts.ToState(),
-            alertHistory = _alerts.History.Select(alert => alert.ToState()).ToArray(),
+            alertHistory = alertHistory.Select(alert => alert.ToState()).ToArray(),
+            // Derived from the in-memory alert history only -- no directory scan,
+            // so it stays cheap enough to recompute on every state post. The logs
+            // themselves are not touched until an export is actually requested.
+            lastFight = CombatLogExport.DetectLastFight(alertHistory)?.ToState(),
             hotkeyFailures = _overlay.HotkeyFailures,
             dwmAvailable = _overlay.DwmAvailable,
         };
@@ -1886,6 +2048,23 @@ internal sealed class TriffViewController : IDisposable
     }
 
     private bool ActivateWindow(EveClientWindow client, TriffViewProfile profile)
+    {
+        var activated = TryActivateWindow(client, profile);
+        if (!activated)
+        {
+            // Windows refuses SetForegroundWindow from a background process under several
+            // conditions. Recording the refusal turns "sometimes clicking a preview does
+            // nothing" into something diagnosable from a log.
+            TriffViewDiagnostics.RecordActivationFailure(
+                client.CharacterName,
+                client.Handle,
+                TriffViewNativeMethods.GetForegroundWindow() == client.Handle);
+        }
+
+        return activated;
+    }
+
+    private static bool TryActivateWindow(EveClientWindow client, TriffViewProfile profile)
     {
         var activated = TriffViewNativeMethods.SetForegroundWindow(client.Handle);
         TriffViewNativeMethods.SetFocus(client.Handle);
@@ -2062,7 +2241,6 @@ internal sealed class ActivePreviewAlert
 internal sealed class TriffViewOverlayForm : Forms.Form
 {
     private const int ResizeHitSize = 16;
-    private const int DragThreshold = 4;
     private readonly Dictionary<nint, PreviewState> _previews = new();
     private readonly TriffViewPreviewPositionMemory _positionMemory = new();
     private readonly Dictionary<int, TriffViewHotkeyCommand> _hotkeys = new();
@@ -2240,11 +2418,15 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 
     public IReadOnlyDictionary<string, TriffViewRect> CurrentPreviewLayouts()
     {
-        return _previews.Values.ToDictionary(
-            state => state.Client.StableKey,
-            state => TriffViewRect.FromRectangle(state.FrameRect),
-            StringComparer.OrdinalIgnoreCase
-        );
+        // Nameless clients (character select) key on their window handle in hex, which would be an
+        // orphan the moment the window closes. Save only layouts that can be matched again.
+        return _previews.Values
+            .Where(state => !string.IsNullOrWhiteSpace(state.Client.CharacterName))
+            .ToDictionary(
+                state => state.Client.StableKey,
+                state => TriffViewRect.FromRectangle(state.FrameRect),
+                StringComparer.OrdinalIgnoreCase
+            );
     }
 
     public void MarkActiveClient(nint activeHandle)
@@ -2349,9 +2531,9 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             }
 
             state.Client = client;
-            _positionMemory.Remember(identity, state.FrameRect);
             state.Active = false;
             state.Visible = DwmAvailable;
+            _positionMemory.Remember(identity, state.FrameRect);
             UpdateThumbnail(state);
             visibleIndex++;
         }
@@ -2519,7 +2701,8 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 
         var deltaX = e.Location.X - _mouseDownPoint.X;
         var deltaY = e.Location.Y - _mouseDownPoint.Y;
-        if (_mouseMode == MouseMode.PendingClick && Math.Abs(deltaX) + Math.Abs(deltaY) > DragThreshold)
+        if (_mouseMode == MouseMode.PendingClick
+            && !PreviewPointerGesture.IsClick(_mouseDownPoint, e.Location, Forms.SystemInformation.DragSize))
         {
             _mouseMode = _profile.LockPreviews ? MouseMode.None : MouseMode.Move;
         }
@@ -2565,6 +2748,31 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 
         if (mode is MouseMode.Move or MouseMode.Resize)
         {
+            // A left press that drifted past the drag metric enters Move mode and never leaves
+            // it, even if the cursor comes back. Judging the gesture on where the press actually
+            // ended means an imprecise click still switches clients instead of being swallowed
+            // and silently nudging the preview a few pixels.
+            if (mode == MouseMode.Move
+                && e.Button == Forms.MouseButtons.Left
+                && PreviewPointerGesture.IsClick(_mouseDownPoint, e.Location, Forms.SystemInformation.DragSize))
+            {
+                preview.FrameRect = _mouseStartRect;
+                _positionMemory.Remember(PreviewClientIdentity.From(preview.Client), preview.FrameRect);
+                UpdateThumbnail(preview);
+                UpdateWindowRegion();
+                RefreshLabelOverlay();
+                Invalidate();
+                ActivateRequested?.Invoke(preview.Client);
+                return;
+            }
+
+            _positionMemory.Remember(PreviewClientIdentity.From(preview.Client), preview.FrameRect);
+
+            // A client at character select has no name, so its StableKey is the window handle in hex.
+            // Persisting under that key would write an orphan into settings that can never match again
+            // and is never pruned. The remembered frame above still honours the drag on screen.
+            if (string.IsNullOrWhiteSpace(preview.Client.CharacterName)) return;
+
             PreviewLayoutChanged?.Invoke(preview.Client.StableKey, TriffViewRect.FromRectangle(preview.FrameRect));
             return;
         }
@@ -2624,7 +2832,8 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             savedForCurrentKey,
             rememberedForClient,
             titleFallback,
-            DefaultStackRect(index));
+            DefaultStackRect(_positionMemory.FindFreeSlot(
+                index, PreviewClientIdentity.From(client), DefaultStackRect)));
     }
 
     private Rectangle DefaultStackRect(int index)
@@ -3123,6 +3332,7 @@ internal sealed class TriffViewLabelOverlayForm : Forms.Form
 
     public void SetItems(IReadOnlyList<TriffViewLabelOverlayItem> items)
     {
+        var previousItems = _items;
         _items = items;
         if (_items.Count == 0)
         {
@@ -3130,7 +3340,8 @@ internal sealed class TriffViewLabelOverlayForm : Forms.Form
             return;
         }
 
-        if (!Visible)
+        var wasHidden = !Visible;
+        if (wasHidden)
         {
             Show();
             ApplyTopmostPolicy(force: true);
@@ -3140,7 +3351,31 @@ internal sealed class TriffViewLabelOverlayForm : Forms.Form
             ApplyTopmostPolicy();
         }
 
-        Invalidate();
+        // Repainting is all-or-nothing here: this form is layered (WS_EX_LAYERED plus a
+        // TransparencyKey), and a partial Invalidate(rect) does not reach the composited
+        // surface, so stale label text survives at the old location. Bounding the
+        // invalidation was measured at ~30x cheaper per paint but left visible ghosts
+        // behind whenever a preview moved or a client closed. So the repaint stays
+        // full-surface, and instead we skip it entirely when nothing actually changed -
+        // which was the common case, roughly 90% of calls.
+        if (wasHidden || !ItemsEqual(previousItems, _items))
+        {
+            Invalidate();
+        }
+    }
+
+    private static bool ItemsEqual(
+        IReadOnlyList<TriffViewLabelOverlayItem> previousItems,
+        IReadOnlyList<TriffViewLabelOverlayItem> currentItems)
+    {
+        if (previousItems.Count != currentItems.Count) return false;
+
+        for (var i = 0; i < currentItems.Count; i++)
+        {
+            if (!Equals(previousItems[i], currentItems[i])) return false;
+        }
+
+        return true;
     }
 
     protected override void OnPaint(Forms.PaintEventArgs e)
@@ -3669,30 +3904,6 @@ internal sealed class TriffViewProfile
         }
 
         return result;
-    }
-}
-
-internal sealed class TriffViewRect
-{
-    public int X { get; set; }
-    public int Y { get; set; }
-    public int Width { get; set; }
-    public int Height { get; set; }
-
-    public bool IsUsable => Width >= TriffViewPreviewDimensions.Minimum
-        && Height >= TriffViewPreviewDimensions.Minimum;
-
-    public Rectangle ToRectangle() => new(X, Y, Width, Height);
-
-    public static TriffViewRect FromRectangle(Rectangle rect)
-    {
-        return new TriffViewRect
-        {
-            X = rect.X,
-            Y = rect.Y,
-            Width = rect.Width,
-            Height = rect.Height,
-        };
     }
 }
 
