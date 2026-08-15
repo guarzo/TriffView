@@ -1154,7 +1154,7 @@ internal sealed class TriffViewController : IDisposable
             // megabytes, and compressing them on the UI thread would stall
             // every preview for the duration.
             var result = await Task.Run(() => CombatLogExport.Export(
-                gamelogsPath, window.StartUtc, window.EndUtc, destination));
+                gamelogsPath, window.StartUtc, window.EndUtc, destination, window.Source));
 
             // Compressing a long session's logs can outlive a shutdown. Posting
             // to a controller that has already disposed risks throwing into the
@@ -1192,7 +1192,7 @@ internal sealed class TriffViewController : IDisposable
         }
 
         if (end < start) (start, end) = (end, start);
-        return new CombatLogFightWindow { StartUtc = start, EndUtc = end };
+        return new CombatLogFightWindow { StartUtc = start, EndUtc = end, Source = CombatLogWindowSource.ManualRange };
     }
 
     private static bool TryParseUtc(string? value, out DateTime utc)
