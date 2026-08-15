@@ -176,7 +176,12 @@ public class CombatLogExportTests
 
         public void Dispose()
         {
-            try { Directory.Delete(Path, recursive: true); } catch (IOException) { }
+            // Cleanup must never fail a test that already passed: Directory.Delete
+            // throws UnauthorizedAccessException for a read-only or still-mapped
+            // file, which is not an IOException.
+            try { Directory.Delete(Path, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
 
@@ -305,6 +310,60 @@ public class CombatLogExportTests
         Assert.Equal(1, result.FileCount);
         Assert.Equal(Noon, result.StartUtc);
         Assert.Equal(Noon.AddMinutes(5), result.EndUtc);
+    }
+
+    [Fact]
+    public void ExportingTwiceToTheSameFileReplacesIt()
+    {
+        // The save dialog prompts before overwriting but does not delete the old
+        // archive, and the suggested name is derived from the fight's start
+        // minute -- so re-exporting the same fight lands on the same path. The
+        // second run must replace it rather than fail on a file that is already
+        // there.
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+        var result = CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        Assert.Equal(1, result.FileCount);
+        Assert.Equal(new[] { "during.txt" }, ReadArchive(zip).Keys.ToArray());
+    }
+
+    [Fact]
+    public void ASuccessfulExportLeavesNoStagingFileBehind()
+    {
+        // The archive is built beside its destination and moved into place, so a
+        // leftover staging file would sit in whichever folder the pilot exported
+        // to -- and, when that is the Gamelogs folder, next to the logs.
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var zip = System.IO.Path.Combine(dir.Path, "out.zip");
+        CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), zip);
+
+        Assert.Empty(Directory.GetFiles(dir.Path, "*.tmp"));
+    }
+
+    [Fact]
+    public void AFailedExportLeavesNoStagingFileBehind()
+    {
+        // The staging file must not survive a failed run. A directory sitting at
+        // the destination path fails the move into place after the archive has
+        // been written, which is the one failure mode reachable without a seam
+        // in the production code -- and it exercises the same cleanup path a
+        // full disk or a vanishing log would.
+        using var dir = new TempDir();
+        dir.WriteLog("during.txt", "Alpha", Noon.AddMinutes(-10), Noon.AddMinutes(10));
+
+        var occupied = System.IO.Path.Combine(dir.Path, "out.zip");
+        Directory.CreateDirectory(occupied);
+
+        Assert.ThrowsAny<IOException>(
+            () => CombatLogExport.Export(dir.Path, Noon, Noon.AddMinutes(5), occupied));
+
+        Assert.Empty(Directory.GetFiles(dir.Path, "*.tmp"));
     }
 
     [Fact]

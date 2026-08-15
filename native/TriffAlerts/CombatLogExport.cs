@@ -174,10 +174,29 @@ public static class CombatLogExport
         var destinationDirectory = Path.GetDirectoryName(destinationZipPath);
         if (!string.IsNullOrEmpty(destinationDirectory)) Directory.CreateDirectory(destinationDirectory);
 
+        // Built beside the destination and moved into place, for two reasons.
+        // ZipFile.Open(Create) opens with FileMode.CreateNew and throws when the
+        // file already exists, and the save dialog's overwrite prompt does not
+        // delete the old archive -- so re-exporting a fight, whose suggested
+        // name is fixed by its start minute, would always fail. Staging also
+        // keeps a run that dies partway through from leaving a truncated zip
+        // that reads as a complete export.
+        var stagingPath = destinationZipPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+
         long rawBytes;
-        using (var archive = ZipFile.Open(destinationZipPath, ZipArchiveMode.Create))
+        try
         {
-            rawBytes = selected.Sum(log => CopyIntoArchive(archive, log));
+            using (var archive = ZipFile.Open(stagingPath, ZipArchiveMode.Create))
+            {
+                rawBytes = selected.Sum(log => CopyIntoArchive(archive, log));
+            }
+
+            File.Move(stagingPath, destinationZipPath, overwrite: true);
+        }
+        catch
+        {
+            TryDelete(stagingPath);
+            throw;
         }
 
         return new CombatLogExportResult
@@ -282,6 +301,17 @@ public static class CombatLogExport
         // Bytes actually read, not FileInfo.Length: a live client may extend the
         // log while it is being copied.
         return source.Position;
+    }
+
+    /// <summary>
+    /// Best-effort staging cleanup. A failure here must not replace the original
+    /// export error with a less useful one about a temporary file.
+    /// </summary>
+    private static void TryDelete(string path)
+    {
+        try { File.Delete(path); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     private static void ReadHeader(string path, out string listener, out DateTime? sessionStartUtc)

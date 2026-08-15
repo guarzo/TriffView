@@ -1138,6 +1138,9 @@ internal sealed class TriffViewController : IDisposable
 
             if (dialog.ShowDialog() != true)
             {
+                // Same disposal race as the completion path below: the dialog is
+                // modal and blocking, so a shutdown can finish while it is open.
+                if (_disposed) return;
                 // Still a terminal message: the UI disables its export buttons
                 // while a run is in flight, so a silent return on cancel would
                 // leave them disabled until the next state post.
@@ -1153,6 +1156,12 @@ internal sealed class TriffViewController : IDisposable
             var result = await Task.Run(() => CombatLogExport.Export(
                 gamelogsPath, window.StartUtc, window.EndUtc, destination));
 
+            // Compressing a long session's logs can outlive a shutdown. Posting
+            // to a controller that has already disposed risks throwing into the
+            // catch below, and a throw from the catch of an async void method
+            // reaches the thread pool and takes the process with it.
+            if (_disposed) return;
+
             _postToHud(new
             {
                 type = "triffview:combat-log-export",
@@ -1161,6 +1170,7 @@ internal sealed class TriffViewController : IDisposable
         }
         catch (Exception ex)
         {
+            if (_disposed) return;
             PostError("export-combat-logs", ex.Message);
         }
     }
