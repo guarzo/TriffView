@@ -389,6 +389,8 @@ public sealed class TriffAlertsService : IDisposable
 
     public event EventHandler<TriffAlertEvent>? AlertTriggered;
 
+    public string GamelogsPath => _gamelogsPath;
+
     public IReadOnlyList<TriffAlertEvent> History
     {
         get

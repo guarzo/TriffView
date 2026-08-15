@@ -17,6 +17,14 @@
     <Compile Include="..\..\native\TriffView\PreviewFrameResolver.cs" Link="PreviewFrameResolver.cs" />
   </ItemGroup>
 
+  <!-- Same arrangement for the combat log export. CombatLogExport needs TriffAlertEvent, which
+       lives in TriffAlertsService.cs; both files are plain BCL (IO, compression, regex, JSON)
+       with no WPF or Forms dependency, so they build on net8.0 like the files above. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAlerts\TriffAlertsService.cs" Link="TriffAlertsService.cs" />
+    <Compile Include="..\..\native\TriffAlerts\CombatLogExport.cs" Link="CombatLogExport.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
