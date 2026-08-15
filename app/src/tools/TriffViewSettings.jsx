@@ -1825,7 +1825,8 @@ function TriffViewSettings({ open = true }) {
             </div>
             <p className="triffview-muted">
               Packages the EVE game logs covering a fight into a zip you can upload to Discord for
-              eve-intel. Game logs only, copied as-is. Chat logs are never included.
+              eve-intel. Game logs only, copied as-is, plus a small manifest listing your characters.
+              Chat logs are never included.
             </p>
             {lastFight ? (
               <p className="triff-combat-export-window">

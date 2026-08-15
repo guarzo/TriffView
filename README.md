@@ -56,7 +56,7 @@ The alerts panel can package the game logs covering a fight into a single zip, r
 
 Because TriffAlerts is already watching for incoming damage and warp scrambles, it knows when your last fight was: hit **Export last fight** and it collects every character's log covering that window, up to 64 files — if more match, the newest are kept and the panel reports how many were left out. Fights from before TriffView was started are not in the alert history, so a UTC time range is there for those.
 
-Logs are copied exactly as EVE wrote them, one file per character session, and only from the Gamelogs folder. Chat logs are never included.
+Logs are copied exactly as EVE wrote them, one file per character session, and only from the Gamelogs folder. The zip also carries a small manifest naming the characters it covers, so the report can tell they are all yours. Chat logs are never included.
 
 ## Low Resource By Design
 
