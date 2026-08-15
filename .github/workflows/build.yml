@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # TriffView.csproj targets net8.0-windows with WPF and WinForms, so this cannot
+    # cross-compile on a Linux runner.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      # The overlay bundle is embedded only when it exists (see the EmbeddedResource
+      # Condition in TriffView.csproj), so the native build does not need the web UI.
+      # Releases still build it; this job only has to prove the code compiles and the
+      # tests pass.
+      - name: Build native
+        run: dotnet build native/TriffView.csproj -c Release
+
+      - name: Test
+        run: dotnet test tests/TriffView.Tests/TriffView.Tests.csproj -c Release

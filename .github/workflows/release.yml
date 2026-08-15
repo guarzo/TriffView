@@ -1,0 +1,57 @@
+name: release
+
+# Triggered by pushing a tag, which runs the workflow from the tag's own ref. A
+# workflow_dispatch trigger would require this file to live on the fork's default branch,
+# and that branch is kept as a clean mirror of upstream.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Build web UI
+        working-directory: app
+        run: npm ci && npm run build
+
+      # The repo's own release script: bundles the overlay UI, publishes a
+      # self-contained single-file exe, and writes the SHA256 sidecar.
+      # Unsigned, because this fork has no code-signing certificate.
+      - name: Publish release executable
+        shell: pwsh
+        run: ./scripts/publish-release.ps1 -PackageMode SingleFile -SkipSign -SkipDefenderScan
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            release/TriffView.exe
+            release/TriffView.exe.sha256.txt
+          body: |
+            Unofficial build of TriffView with fixes not yet upstream.
+
+            **This executable is unsigned**, so Windows SmartScreen will warn on
+            first run ("More info" -> "Run anyway"). Verify the download against
+            `TriffView.exe.sha256.txt` if you want to be sure of what you have.
+
+            This build writes a diagnostics log. See
+            [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) for what it records, what it
+            does not, and how to send it in.
