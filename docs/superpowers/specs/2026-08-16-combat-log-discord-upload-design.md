@@ -127,6 +127,25 @@ assumed.
 Anything else is rejected at the point of entry with a message naming what was
 wrong, and nothing is written to the credential store.
 
+**The allowlist is also enforced on read, not only on write.** Validating once at
+the front door and trusting the stored value thereafter would mean any path that
+puts a string into that credential target — a corrupted entry, a value written by
+a future build with different rules, anything that edits Credential Manager
+directly — becomes a way to point this feature at an arbitrary host. The store
+holds opaque bytes and makes no promise about what wrote them
+(`native/Eve/EveCredentialStore.cs:56`). Re-running `TryParse` on read costs a
+string parse and closes that hole, so a stored value that no longer validates is
+treated exactly like no webhook at all.
+
+This deliberately means the loopback stub server cannot be reached through the
+credential path — a `127.0.0.1` URL can never satisfy the allowlist. That is the
+correct outcome, not an obstacle to work around: tests that exercise the
+credential path seed a valid-looking `discord.com` URL and use a fake
+`HttpMessageHandler`, and the loopback stub is used only for direct
+`CombatLogUpload.UploadAsync` tests, which never touch the credential store.
+Weakening production validation to make a test easier would trade the feature's
+main security property for convenience.
+
 A field that accepted any URL would not be a Discord webhook setting. It would
 be a general "upload my game logs to a stranger's server" primitive, presented
 in the UI as something narrower and safer than it is, and reachable by anyone
@@ -188,14 +207,23 @@ returns leaves the tab permanently dead with no way out. A bounded timeout that
 always terminates in a reportable error is what prevents that.
 
 **Orphaned temporaries.** If the process dies between step 3 and step 6, a zip
-of game logs is left in `%TEMP%`. Two shapes have to be swept, not one:
+of game logs is left behind. Two shapes have to be swept, not one:
 `Export` compresses into `<destination>.<guid>.tmp` and only then moves it into
 place (`CombatLogExport.cs:208-233`), so a death *during* compression leaves the
-staging file rather than the finished archive. On startup, both
-`triffview-fight-*.zip` and `triffview-fight-*.zip.*.tmp` in the temp directory,
-older than a day, are deleted — best-effort and non-fatal. Sweeping only the
-first glob would leave the privacy-sensitive artifact behind indefinitely in
-exactly the case where the app crashed.
+staging file rather than the finished archive.
+
+**The sweep must not be able to reach a user's own export.** `SuggestFileName` is
+deterministic (`CombatLogExport.cs:255`) and the save dialog lets the user pick
+any directory, `%TEMP%` included — so a sweep of `triffview-fight-*.zip` across
+the whole temp directory would delete an archive someone deliberately saved
+there. Uploads therefore stage into their own subdirectory,
+`%TEMP%\TriffView-upload\`, created on demand, and the startup sweep only ever
+looks inside it. Everything in that directory was put there by this feature and
+has no other owner, which is what makes deleting it safe.
+
+Within that directory, both `triffview-fight-*.zip` and
+`triffview-fight-*.zip.*.tmp` older than a day are deleted, best-effort and
+non-fatal.
 
 ## Message contract
 
@@ -364,31 +392,36 @@ against a build that has the zip copied in.
 
 ## Known testability gaps
 
-Two limits on the automated coverage above, both discovered while planning and
-neither worth widening this change's scope to fix.
-
-**There is no seam for `TriffAlertsService.GamelogsPath`.** TriffSkills and
-TriffFleets both expose an override for their state root; the alerts service does
-not, so a `TriffViewController` under test cannot be pointed at a fixture
-Gamelogs directory. A genuine controller-level success path — real archive, real
-upload, real cleanup — is therefore not writable without either adding that seam
-(which belongs to whoever owns `TriffAlertsService`, not to this feature) or
-depending on whatever EVE logs happen to exist on the machine running CI, which
-is not hermetic.
-
-The compromise: the composed success path is covered by driving
-`CombatLogExport.Export` and `CombatLogUpload.UploadAsync` directly against a
-loopback stub, and controller-level tests cover only the dispatch and error paths
-that need no real logs. That leaves one seam untested — the controller's own
-wiring of export output into upload input — and it is the obvious first thing to
-check by hand.
+One limit on the automated coverage above. An earlier draft of this section
+claimed a second one and was wrong — see below.
 
 **Constructing a `TriffViewController` in a test has side effects.** It reads the
 developer's real `%APPDATA%\TriffHud\triffview-settings.json` and installs a real
-`SetWinEventHook`, because `TriffViewSettings` has no injectable override either.
-The existing `TriffFleetsController` tests already accept this, so the pattern is
+`SetWinEventHook`, because `TriffViewSettings` has no injectable override. The
+existing `TriffFleetsController` tests already accept this, so the pattern is
 precedented rather than new, but it means these tests are not fully isolated from
 the machine they run on.
+
+**Correction: the Gamelogs seam exists.** This section previously recorded that
+`TriffAlertsService` had no way to point a controller under test at a fixture
+Gamelogs directory, and treated real controller-level coverage as unreachable.
+That is false. `TriffAlertsService(string? gamelogsPath = null)`
+(`native/TriffAlerts/TriffAlertsService.cs:383`) takes the path as a constructor
+argument and falls back to the default only when it is blank.
+
+What is missing is not the seam but its exposure: `TriffViewController` builds
+its service with a bare `new TriffAlertsService()` field initializer, so nothing
+can reach the parameter. Surfacing it through the controller's constructor — the
+same shape the `ICredentialStore` injection already uses — is a small change, and
+it buys a genuine end-to-end test of the orchestration this feature adds: real
+logs in, real archive built, real upload attempted, temp file gone afterwards.
+That is exactly the seam most worth covering, since it is where export output
+meets upload input.
+
+The claim was accepted from a planning pass without being checked against the
+file. It is recorded here rather than quietly deleted because the wrong version
+was committed first, and a reader of that commit should be able to see it
+corrected.
 
 ## Excluded
 
