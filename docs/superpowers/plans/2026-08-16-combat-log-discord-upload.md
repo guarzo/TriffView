@@ -3377,7 +3377,18 @@ Three commits. The first two are part of this feature; the third is a pre-existi
   git commit -m "Rescope the diagnostics log's no-network-activity claim to the log itself"
   ```
 
-- [ ] **Step 3: CLAUDE.md — correct the Testing section. NOT part of this feature; separate commit.**
+- [ ] **Step 3: CLAUDE.md — correct the Testing section. NOT part of this feature, and NOT a commit.**
+
+  **Read this before touching the file.** `CLAUDE.md` is **globally gitignored** (`~/.gitignore:8`)
+  and is not tracked by this repository. It does not exist inside the worktree at all — it lives
+  only in the main checkout at `/mnt/c/dev/TriffView/CLAUDE.md`. So:
+
+  - Edit it at that absolute path, not a worktree-relative one.
+  - There is **no `git add`, and no commit.** `git add CLAUDE.md` fails on an ignored, untracked
+    file, and forcing it with `-f` would commit a personal instruction file into a public fork.
+  - Because it is outside the worktree, this edit is not isolated from other sessions. Re-read the
+    current contents immediately before editing — another session may have changed it since this
+    plan was written, and this file is edited far more often than the repo's tracked docs.
 
   This corrects a pre-existing inaccuracy: `CLAUDE.md`'s `## Testing` section describes only
   `tests/TriffView.Tests` and states "Anything inside `TriffViewSubsystem.cs` is effectively
@@ -3434,13 +3445,24 @@ Three commits. The first two are part of this feature; the third is a pre-existi
   ```
   ```
 
-  Commit separately from Steps 1–2, with a message that makes clear this is a correction, not part of
-  the feature:
+  No commit. The file is ignored and untracked, so there is nothing to stage — the edit simply
+  stands in the working copy of the main checkout.
 
-  ```bash
-  git add CLAUDE.md
-  git commit -m "Correct CLAUDE.md: native/TriffView.Tests can test internals, and scripts need -ExecutionPolicy Bypass from WSL
+  **One more correction to make while you are in there.** The "Building and testing from a worktree"
+  section states that these scripts never work from a worktree, nested or sibling. That is true of
+  `scripts/build-native.ps1` — line 4 is `$root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path`,
+  a single level with no upward walk — but it is **false of `tests/TriffView.Tests/run-tests.ps1`**,
+  which does walk upward, six levels, at lines 9-18:
 
-  Not part of the combat log Discord upload feature; a pre-existing documentation gap found while
-  writing this feature's test and doc tasks."
+  ```powershell
+  $probe = $shared
+  for ($i = 0; $i -lt 6 -and $probe; $i++) {
+      $candidate = Join-Path $probe ".dotnet\dotnet.exe"
+      if (Test-Path $candidate) { $dotnet = $candidate; $shared = $probe; break }
+      $probe = Split-Path $probe -Parent
+  }
   ```
+
+  Verified 2026-08-16 by running it from `.claude/worktrees/combat-log-discord-upload`: 54 passing.
+  Every step in Tasks 1-2 of this plan depends on that working, so the over-general claim needs
+  narrowing to name `build-native.ps1` specifically rather than "these scripts".
