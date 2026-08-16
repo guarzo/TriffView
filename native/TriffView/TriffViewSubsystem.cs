@@ -269,6 +269,9 @@ internal sealed class TriffViewController : IDisposable
             case "triffview:clear-combat-log-webhook":
                 ClearCombatLogWebhook();
                 return true;
+            case "triffview:test-combat-log-webhook":
+                TestCombatLogWebhook();
+                return true;
             case "triffview:restore-settings-backup":
                 RestoreSettingsBackup();
                 return true;
@@ -1273,6 +1276,42 @@ internal sealed class TriffViewController : IDisposable
 
         RefreshCombatLogWebhookState();
         PostCombatLogWebhookState();
+    }
+
+    private async void TestCombatLogWebhook()
+    {
+        var webhook = ReadCombatLogWebhook();
+        if (webhook == null)
+        {
+            PostError("test-combat-log-webhook", "Configure a Discord webhook first.");
+            return;
+        }
+
+        CombatLogUploadResult result;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(CombatLogUpload.UploadTimeoutSeconds));
+            result = await CombatLogUpload.SendTestAsync(_combatLogUploadHttp, webhook, cts.Token);
+        }
+        catch (Exception ex)
+        {
+            // SendTestAsync is documented to return a failed result rather than
+            // throw for any classifiable HTTP or transport outcome
+            // (CombatLogUpload.cs). Reaching this catch means the test genuinely
+            // ran and hit something unclassifiable -- that is still an outcome of
+            // the attempt, not a pre-flight refusal, so it is reported through
+            // testResult like every other outcome, never through PostError.
+            if (_disposed) return;
+            PostCombatLogWebhookState(new { ok = false, message = DiscordWebhook.Redact(ex.Message, webhook) });
+            return;
+        }
+
+        if (_disposed) return;
+        // Only "no webhook configured" above is a pre-flight refusal (PostError).
+        // Everything past that point is an outcome of a test that actually ran,
+        // successful or not, and is reported through testResult -- mirrors the
+        // same split UploadCombatLogs uses for PostError vs. result.succeeded.
+        PostCombatLogWebhookState(new { ok = result.Succeeded, message = result.Message });
     }
 
     private void PostCombatLogWebhookState(object? testResult = null)

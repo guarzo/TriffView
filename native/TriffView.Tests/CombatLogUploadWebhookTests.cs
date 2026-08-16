@@ -120,6 +120,21 @@ public class CombatLogUploadWebhookTests
         Assert.Null(credentials.Stored(TriffViewController.CombatLogWebhookCredentialTarget));
     }
 
+    [Fact]
+    public void TestCombatLogWebhookReportsWhenNoneIsConfigured()
+    {
+        var messages = new ConcurrentQueue<string>();
+        using var controller = Controller(new MemoryCredentials(), messages);
+
+        controller.HandleWebMessage("triffview:test-combat-log-webhook", null);
+
+        Assert.True(SpinWait.SpinUntil(
+            () => messages.Any(json => json.Contains("\"type\":\"triffview:error\"", StringComparison.Ordinal)
+                && json.Contains("\"action\":\"test-combat-log-webhook\"", StringComparison.Ordinal)
+                && json.Contains("Configure a Discord webhook first.", StringComparison.Ordinal)),
+            TimeSpan.FromSeconds(5)));
+    }
+
     private static TriffViewController Controller(MemoryCredentials credentials, ConcurrentQueue<string> messages)
     {
         return new TriffViewController(
