@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Field from "./Field.jsx";
 
 // EVE writes its logs in EVE time, which is UTC, and the export window is
@@ -53,7 +53,43 @@ function formatBytes(value) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function CombatLogExport({ lastFight, exportState, range, onRangeChange, onExport }) {
+function CombatLogExport({
+  lastFight,
+  exportState,
+  range,
+  onRangeChange,
+  onExport,
+  webhookState,
+  onSaveWebhook,
+  onClearWebhook,
+  onTestWebhook,
+  uploadState,
+  onUpload,
+}) {
+  const [webhookInput, setWebhookInput] = useState("");
+  // Once a webhook is configured, the URL field and its explanation are just
+  // clutter - collapse down to the configured summary and only bring the
+  // field back if the user asks to replace it.
+  const [replacing, setReplacing] = useState(false);
+  // Only a successful *save* should clear the typed URL - if this fired on
+  // any action finishing, a successful "Send test" or "Clear" would wipe out
+  // an edit the user had not saved yet.
+  const prevActionRef = useRef(null);
+  useEffect(() => {
+    if (prevActionRef.current === "save" && webhookState.action === null && !webhookState.error) {
+      setWebhookInput("");
+      setReplacing(false);
+    }
+    prevActionRef.current = webhookState.action;
+  }, [webhookState.action, webhookState.error]);
+
+  const webhookBusy = webhookState.action !== null;
+  const showWebhookForm = !webhookState.configured || replacing;
+  // Export and upload both compress the archive on the native side, so
+  // either one running blocks the other rather than racing two builds.
+  const runBusy = exportState.busy || uploadState.busy;
+  const uploadDisabled = runBusy || !webhookState.configured;
+
   return (
     <div className="triff-combat-export">
       <p className="triffview-muted">
@@ -61,6 +97,72 @@ function CombatLogExport({ lastFight, exportState, range, onRangeChange, onExpor
         eve-intel. Game logs only, copied as-is, plus a small manifest listing your characters.
         Chat logs are never included.
       </p>
+
+      <div className="triff-combat-export-webhook">
+        <h3>Discord destination</h3>
+        {showWebhookForm ? (
+          <>
+            <p className="triffview-muted">
+              Paste a webhook URL to enable one-click uploads. It is stored in Windows Credential
+              Manager, never written to triffview-settings.json, and never sent back to this screen
+              once saved.
+            </p>
+            <div className="triff-combat-export-webhook-row">
+              <Field label="Webhook URL">
+                <input
+                  type="password"
+                  placeholder="https://discord.com/api/webhooks/…"
+                  value={webhookInput}
+                  disabled={webhookBusy}
+                  onChange={(event) => setWebhookInput(event.target.value)}
+                />
+              </Field>
+              <button
+                type="button"
+                disabled={webhookBusy || !webhookInput.trim()}
+                onClick={() => onSaveWebhook(webhookInput.trim())}
+              >
+                Save
+              </button>
+              {replacing && webhookState.configured ? (
+                <button
+                  type="button"
+                  disabled={webhookBusy}
+                  onClick={() => {
+                    setReplacing(false);
+                    setWebhookInput("");
+                  }}
+                >
+                  Cancel
+                </button>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <div className="triff-combat-export-webhook-row">
+            <p className="triffview-muted">Configured: {webhookState.description}</p>
+            <button type="button" disabled={webhookBusy} onClick={onTestWebhook}>
+              Send test
+            </button>
+            <button type="button" disabled={webhookBusy} onClick={() => setReplacing(true)}>
+              Replace
+            </button>
+            <button type="button" disabled={webhookBusy} onClick={onClearWebhook}>
+              Clear
+            </button>
+          </div>
+        )}
+        {webhookState.testResult ? (
+          <p
+            className={
+              webhookState.testResult.ok ? "triff-combat-export-result" : "triff-combat-export-error"
+            }
+          >
+            {webhookState.testResult.message}
+          </p>
+        ) : null}
+        {webhookState.error ? <p className="triff-combat-export-error">{webhookState.error}</p> : null}
+      </div>
 
       <div className="triff-alert-summary">
         <div>
@@ -82,13 +184,18 @@ function CombatLogExport({ lastFight, exportState, range, onRangeChange, onExpor
         <div className="triff-combat-export-path">
           <h3>Last fight</h3>
           <p className="triffview-muted">Export the fight TriffAlerts most recently detected.</p>
-          <button
-            type="button"
-            disabled={!lastFight || exportState.busy}
-            onClick={() => onExport(null)}
-          >
-            Export last fight
-          </button>
+          <div className="triff-combat-export-path-actions">
+            <button type="button" disabled={!lastFight || runBusy} onClick={() => onExport(null)}>
+              Export last fight
+            </button>
+            <button
+              type="button"
+              disabled={!lastFight || uploadDisabled}
+              onClick={() => onUpload(null)}
+            >
+              Upload to Discord
+            </button>
+          </div>
         </div>
 
         <div className="triff-combat-export-path">
@@ -96,18 +203,10 @@ function CombatLogExport({ lastFight, exportState, range, onRangeChange, onExpor
           <p className="triffview-muted">For a fight from before TriffView was started.</p>
           <div className="triff-combat-export-quick">
             <span>Quick range:</span>
-            <button
-              type="button"
-              disabled={exportState.busy}
-              onClick={() => onRangeChange(quickRange(1))}
-            >
+            <button type="button" disabled={runBusy} onClick={() => onRangeChange(quickRange(1))}>
               Last 1 hour
             </button>
-            <button
-              type="button"
-              disabled={exportState.busy}
-              onClick={() => onRangeChange(quickRange(2))}
-            >
+            <button type="button" disabled={runBusy} onClick={() => onRangeChange(quickRange(2))}>
               Last 2 hours
             </button>
           </div>
@@ -129,13 +228,22 @@ function CombatLogExport({ lastFight, exportState, range, onRangeChange, onExpor
               />
             </Field>
           </div>
-          <button
-            type="button"
-            disabled={!range.from || !range.to || exportState.busy}
-            onClick={() => onExport(range)}
-          >
-            Export range
-          </button>
+          <div className="triff-combat-export-path-actions">
+            <button
+              type="button"
+              disabled={!range.from || !range.to || runBusy}
+              onClick={() => onExport(range)}
+            >
+              Export range
+            </button>
+            <button
+              type="button"
+              disabled={!range.from || !range.to || uploadDisabled}
+              onClick={() => onUpload(range)}
+            >
+              Upload to Discord
+            </button>
+          </div>
         </div>
       </div>
 
@@ -161,6 +269,26 @@ function CombatLogExport({ lastFight, exportState, range, onRangeChange, onExpor
         {exportState.error ? (
           <p className="triff-combat-export-error">{exportState.error}</p>
         ) : null}
+        {uploadState.result ? (
+          uploadState.result.succeeded ? (
+            <p className="triff-combat-export-result">
+              Uploaded {uploadState.result.fileCount} log
+              {uploadState.result.fileCount === 1 ? "" : "s"}
+              {uploadState.result.characters?.length
+                ? ` (${uploadState.result.characters.join(", ")})`
+                : ""}{" "}
+              to Discord - {formatBytes(uploadState.result.zipBytes)} sent.
+              {uploadState.result.droppedFileCount
+                ? ` ${uploadState.result.droppedFileCount} further matching log${
+                    uploadState.result.droppedFileCount === 1 ? " was" : "s were"
+                  } left out at the file limit - narrow the time range to cover them.`
+                : ""}
+            </p>
+          ) : (
+            <p className="triff-combat-export-error">{uploadState.result.message}</p>
+          )
+        ) : null}
+        {uploadState.error ? <p className="triff-combat-export-error">{uploadState.error}</p> : null}
       </div>
     </div>
   );

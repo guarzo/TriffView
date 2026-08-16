@@ -19,7 +19,7 @@ TriffView is a standalone preview system paired with configurable log alerts, a 
 - Custom preview labels, label placement, label size, opacity, and colors.
 - Lockable previews so carefully placed layouts stay put.
 - TriffAlerts for attack, warp scramble, decloak, fleet invite, convo request, and system-change awareness.
-- One-click combat log export, packaging a fight's game logs into a zip for eve-intel after-action reports.
+- One-click combat log export, packaging a fight's game logs into a zip for eve-intel after-action reports, with an optional direct upload to a Discord webhook.
 - Per-alert preview flashes, colors, notifications, and more.
 - Client layout save, restore, and optional launch restore.
 - Optional inactive-client minimization tuned for rapid switching, no more droppng to desktop or lagging when cycling.
@@ -70,6 +70,8 @@ The **Combat log export** panel can package the game logs covering a fight into 
 Because TriffAlerts is already watching for incoming damage and warp scrambles, it knows when your last fight was: hit **Export last fight** and it collects every character's log covering that window, up to 64 files — if more match, the newest are kept and the panel reports how many were left out. Fights from before TriffView was started are not in the alert history, so a UTC time range is there for those.
 
 Logs are copied exactly as EVE wrote them, one file per character session, and only from the Gamelogs folder. The zip also carries a small manifest naming the characters it covers and the time range it spans. Chat logs are never included.
+
+The panel can also send that zip straight to Discord instead of saving it to disk: paste a webhook URL once, under Discord destination, and an **Upload to Discord** button appears next to each export option. The zip itself doesn't change — it's the same game logs and manifest described above — it just leaves the machine over that webhook instead of landing in a folder, arriving in the Discord channel the webhook points at. The webhook URL is stored in Windows Credential Manager, the same store TriffSkills and TriffFleets already use for EVE tokens, not in the settings file, so it never ends up in a settings backup or a diagnostics log.
 
 ## Low Resource By Design
 

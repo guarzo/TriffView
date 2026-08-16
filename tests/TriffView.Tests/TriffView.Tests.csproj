@@ -23,6 +23,12 @@
     <Compile Include="..\..\native\TriffAlerts\CombatLogExport.cs" Link="CombatLogExport.cs" />
   </ItemGroup>
 
+  <!-- Same arrangement again. CombatLogUpload is plain BCL (Net.Http, Text.Json,
+       Uri parsing) with no WPF or Forms dependency, so it builds on net8.0 too. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAlerts\CombatLogUpload.cs" Link="CombatLogUpload.cs" />
+  </ItemGroup>
+
   <!-- TriffViewUpdateChecker.cs lives directly under native/, not native/TriffView/. It has no
        Windows-only dependencies (HttpClient, System.Text.Json, reflection), so it links the same way. -->
   <ItemGroup>

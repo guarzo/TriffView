@@ -3143,6 +3143,38 @@ button:disabled {
   color: var(--tv-danger);
 }
 
+.triff-combat-export-webhook {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--tv-border-soft);
+  padding: 12px;
+}
+
+.triff-combat-export-webhook h3 {
+  margin: 0;
+  color: var(--tv-text-strong);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.triff-combat-export-webhook-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+
+.triff-combat-export-webhook-row .triffview-field {
+  flex: 1 1 260px;
+}
+
+.triff-combat-export-path-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .triff-alert-history-row strong,
 .triff-alert-history-row em,
 .triff-alert-history-row p {
