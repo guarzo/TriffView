@@ -14,7 +14,7 @@
 
 - **Windows-only build.** `native/TriffView.csproj` is `net8.0-windows` with `UseWPF`. Never invoke a bare `dotnet` — it resolves to the user profile instead of the repo-local SDK. From WSL, always call the Windows toolchain through `powershell.exe`.
 - **`.ps1` scripts need `-ExecutionPolicy Bypass`.** A bare `powershell.exe -NoProfile -File <script>.ps1` fails on this machine with `UnauthorizedAccess`.
-- **Two test projects, both in CI.** `tests/TriffView.Tests` (`net8.0`, links pure-logic files via `<Compile Include>`, run by `.github/workflows/build.yml`) and `native/TriffView.Tests` (`net8.0-windows`, `ProjectReference` + `InternalsVisibleTo`, run by `.github/workflows/ci.yml` **with `--warnaserror`**). CLAUDE.md's Testing section predates the second and is wrong; Task 7 corrects it.
+- **Two test projects, both in CI.** `tests/TriffView.Tests` (`net8.0`, links pure-logic files via `<Compile Include>`, run by `.github/workflows/build.yml`) and `native/TriffView.Tests` (`net8.0-windows`, `ProjectReference` + `InternalsVisibleTo`, run by `.github/workflows/ci.yml` **with `--warnaserror`**). CLAUDE.md's Testing section predates the second and describes only the first — treat this constraint as authoritative over it. Correcting that file is deliberately **not** a task in this plan: it is gitignored, untracked, and lives outside this worktree, so it cannot be committed here.
 - **Baselines before any change:** `tests/TriffView.Tests` 54 passing, `native/TriffView.Tests` 155 passing. Tasks state the **delta** they expect, not an absolute total — Tasks 1-2 and Tasks 3-4 and Task 6 all add to these projects in sequence, so any absolute number written into a later task is wrong the moment an earlier one changes. **The runner's own summary line is authoritative**; if it disagrees with a count written here, trust the runner and correct the plan.
 - **Credential target:** `TriffView.CombatLogExport.DiscordWebhook` — exact string, and it must neither match nor nest inside `TriffView.TriffSkills.RefreshToken.` or `TriffView.TriffFleets.RefreshToken.`
 - **Host allowlist, exact and closed:** `discord.com`, `discordapp.com`, `ptb.discord.com`, `canary.discord.com`. HTTPS only. Path `/api/webhooks/{id}/{token}`, both segments non-empty. No override toggle.
@@ -1134,11 +1134,12 @@ they cared about fails to upload."
   - `private void TriffViewController.RefreshCombatLogWebhookState()`
   - `private Uri? TriffViewController.ReadCombatLogWebhook()` — Task 4's `UploadCombatLogs` calls this directly.
   - `private void TriffViewController.PostCombatLogWebhookState(object? testResult = null)`
-  - `private static readonly HttpClient TriffViewController.CombatLogUploadHttp` — shared with Task 4's `UploadCombatLogs`, so the 120s-bounded, infinite-`Timeout` client is defined exactly once.
+  - `private readonly HttpClient TriffViewController._combatLogUploadHttp` — constructor-injectable (defaults to production behavior), shared with Task 4's `UploadCombatLogs`, so the 120s-bounded, infinite-`Timeout` client is defined exactly once.
+  - Widened `TriffViewController` constructor: `string? gamelogsPath = null` and `HttpClient? combatLogUploadHttp = null`, alongside the existing `credentials` parameter — surfaces a seam `TriffAlertsService` already had (`native/TriffAlerts/TriffAlertsService.cs:383`) but that this constructor's bare `new()` made unreachable, plus the same shape for the upload client. Task 4 depends on both to write a genuine controller-level test.
   - Outbound message `triffview:combat-log-webhook { configured, description, testResult? }`
   - `internal sealed class StubWebhookServer` in the test project, reused unmodified by Task 4.
 
-**Design note carried into the implementation:** `ReadCombatLogWebhook` does **not** re-run `DiscordWebhook.TryParse`'s Discord-host allowlist against the stored value — it only does `Uri.TryCreate(raw, UriKind.Absolute, ...)`. The allowlist is the front door that `SetCombatLogWebhook` enforces once, on the string the user typed; re-enforcing it on every read would be redundant against a value this app itself wrote, and it is also what makes the stub-server tests below possible without a second, test-only code path — a test seeds the credential store directly with a `http://127.0.0.1:{port}/...` URL, bypassing the front door the same way a value written in an earlier app version (before a host was added to or removed from the allowlist) would.
+**Design note: the allowlist is re-checked on every read, not only on write.** `ReadCombatLogWebhook` re-runs `DiscordWebhook.TryParse` against the stored value on every call, not just `Uri.TryCreate`. Validating once at the front door (`SetCombatLogWebhook`) and trusting the stored value thereafter would mean any other path that can put a string into that credential target — a corrupted entry, a value written by a future build with different rules, a Credential Manager edit made outside this app — becomes a way to point this feature at an arbitrary host. The credential store holds opaque bytes and makes no promise about what wrote them (`native/Eve/EveCredentialStore.cs:56`); re-running `TryParse` on read costs one string parse and closes that hole, so a stored value that no longer validates is treated exactly like no webhook at all (per `docs/superpowers/specs/2026-08-16-combat-log-discord-upload-design.md`, "The allowlist is also enforced on read, not only on write"). This deliberately means a loopback stub server can never be reached through the credential path — that is the correct outcome, not an obstacle to route around. Tests below that exercise the credential path seed a valid-looking `discord.com` URL; `StubWebhookServer` is used only where a test drives `CombatLogUpload.SendTestAsync` / `UploadAsync` directly and never touches the credential store.
 
 ---
 
@@ -1344,20 +1345,34 @@ they cared about fails to upload."
 
   Expect a **build failure**: `TriffViewController` has no constructor overload accepting an `ICredentialStore`. Baseline stays 155 (nothing ran).
 
-- [ ] **Step 3: Add the credential field and the fifth constructor parameter**
+- [ ] **Step 3: Add the credential field, the Gamelogs and upload-client seams, and the widened constructor**
 
-  In `native/TriffView/TriffViewSubsystem.cs`, add the using and field, then widen the constructor.
+  In `native/TriffView/TriffViewSubsystem.cs`, add the usings and fields, then widen the constructor.
 
   ```csharp
+  using System.Net.Http;
+  using System.Threading;
   using TriffView.Eve;
   ```
-  (added alongside the existing usings at the top of the file, before `using Forms = System.Windows.Forms;`)
+  (added alongside the existing usings at the top of the file, before `using Forms = System.Windows.Forms;`; `System.Net.Http.HttpClient` and `System.Threading.Timeout` need the explicit usings since this file has neither yet)
 
   ```csharp
-  private readonly TriffAlertsService _alerts = new();
+  private readonly TriffAlertsService _alerts;
   private readonly ICredentialStore _credentials;
+
+  /// <summary>
+  /// Its own client, deliberately separate from any ESI HttpClient elsewhere in
+  /// the repo (those are tuned to 8s/20s for small JSON calls). Timeout is left
+  /// infinite and bounded per-request instead, via the CancellationTokenSource
+  /// in UploadCombatLogs and TestCombatLogWebhook (both below) -- see
+  /// CombatLogUpload.cs's header comment for why one client is shared between
+  /// test and upload. Constructor-injectable for the same reason `_credentials`
+  /// is: standing up a real socket per test case is slower and noisier than
+  /// substituting a fake `HttpMessageHandler`.
+  /// </summary>
+  private readonly HttpClient _combatLogUploadHttp;
   ```
-  (the new field follows `_alerts`, matching its position among the other readonly dependencies)
+  (this replaces the existing `private readonly TriffAlertsService _alerts = new();` field initializer -- `_alerts` becomes constructor-assigned below rather than defaulted here; `_credentials` and `_combatLogUploadHttp` are new fields following it, matching its position among the other readonly dependencies)
 
   ```csharp
   public TriffViewController(
@@ -1365,20 +1380,37 @@ they cared about fails to upload."
       Action<object> postToHud,
       Action reassertHudTopmost,
       Action<bool> applySettingsAlwaysOnTop,
-      ICredentialStore? credentials = null)
+      ICredentialStore? credentials = null,
+      string? gamelogsPath = null,
+      HttpClient? combatLogUploadHttp = null)
   {
       _dispatcher = dispatcher;
       _postToHud = postToHud;
       _reassertHudTopmost = reassertHudTopmost;
       _applySettingsAlwaysOnTop = applySettingsAlwaysOnTop;
       _credentials = credentials ?? new WindowsCredentialStore();
+      _alerts = new TriffAlertsService(gamelogsPath);
+      _combatLogUploadHttp = combatLogUploadHttp ?? new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
       _foregroundWinEventProc = OnForegroundWinEvent;
       Settings = TriffViewSettings.Load();
       _overlay = new TriffViewOverlayForm();
   ```
-  (only the signature and the new `_credentials` assignment change; everything from `_foregroundWinEventProc = OnForegroundWinEvent;` onward is unchanged)
+  (only the signature and the three new assignments change; everything from `_foregroundWinEventProc = OnForegroundWinEvent;` onward is unchanged)
 
-  A single defaulted parameter, rather than the internal-plus-public overload pair `TriffSkillsController`/`TriffFleetsController` use — this controller already has exactly one public constructor with no test-only twin, and one new dependency does not justify introducing that split here.
+  `gamelogsPath` surfaces a seam `TriffAlertsService` already has
+  (`TriffAlertsService(string? gamelogsPath = null)`,
+  `native/TriffAlerts/TriffAlertsService.cs:383`) but that this constructor's bare
+  `new()` made unreachable -- nothing outside this file could point a controller
+  under test at a fixture Gamelogs directory. `combatLogUploadHttp` is the same
+  shape for a dependency Task 4 puts its own real use on (`UploadCombatLogs`).
+  Both default to current production behavior exactly like `credentials` does, so
+  no existing caller changes.
+
+  Three defaulted parameters, rather than the internal-plus-public overload pair
+  `TriffSkillsController`/`TriffFleetsController` use — this controller already
+  has exactly one public constructor with no test-only twin, and dependencies
+  that all default to current behavior do not justify introducing that split
+  here.
 
   This alone does not yet satisfy the test (no `combatLogWebhook` state is posted), but it must compile before the next step can fail meaningfully. Run the filtered test again and confirm it now builds and **fails** on the assertion (no message contains `"combatLogWebhook"`) rather than failing to build.
 
@@ -1405,11 +1437,6 @@ they cared about fails to upload."
   /// but "not found" (EveCredentialStore.cs), and Start() calls PostState()
   /// unprotected -- an unavailable credential store must not take down startup
   /// on a code path that has nothing to do with combat logs.
-  ///
-  /// Deliberately does not re-run DiscordWebhook.TryParse's host allowlist:
-  /// that check is the front door SetCombatLogWebhook enforces on the string a
-  /// user typed, not something worth re-enforcing on a value this app already
-  /// wrote itself.
   /// </summary>
   private Uri? ReadCombatLogWebhook()
   {
@@ -1425,7 +1452,11 @@ they cared about fails to upload."
           return null;
       }
   }
+  ```
 
+  **This version is provisional.** It reconstructs the `Uri` without re-checking the host allowlist. Step 14 adds the tests that drive that out, and Step 15 replaces the body with one that runs `DiscordWebhook.TryParse` on the stored value. Do not treat the bare `Uri.TryCreate` as settled design, and do not write a comment justifying it — the spec requires the allowlist on read as well as on write, because the credential store holds opaque bytes and promises nothing about what wrote them.
+
+  ```csharp
   /// <summary>
   /// Recomputes the cached { configured, description } pair. Called once from
   /// Start() and again only when a set or clear succeeds -- PostState runs from
@@ -1760,18 +1791,9 @@ has one message type to handle for all three."
 
   Run. Expect a **test failure** (no such dispatch case, nothing posted).
 
-- [ ] **Step 13: Add the shared upload `HttpClient`, `TestCombatLogWebhook`, and its dispatch case**
+- [ ] **Step 13: Add `TestCombatLogWebhook` and its dispatch case**
 
-  The static client is introduced here because `TestCombatLogWebhook` is the first consumer; Task 4's `UploadCombatLogs` reuses the same field. Add near the other `private static readonly` members at the top of the class (there are none yet in this file, so add directly above the constructor):
-
-  ```csharp
-  // Its own client, deliberately separate from any ESI HttpClient elsewhere in
-  // the repo (those are tuned to 8s/20s for small JSON calls). Timeout is left
-  // infinite and bounded per-request instead, via the CancellationTokenSource
-  // in UploadCombatLogs and TestCombatLogWebhook -- see CombatLogUpload.cs's
-  // header comment for why a single client is shared between test and upload.
-  private static readonly HttpClient CombatLogUploadHttp = new() { Timeout = Timeout.InfiniteTimeSpan };
-  ```
+  `_combatLogUploadHttp` was added in Step 3; `TestCombatLogWebhook` is its first consumer, and Task 4's `UploadCombatLogs` reuses the same field.
 
   ```csharp
   private async void TestCombatLogWebhook()
@@ -1787,7 +1809,7 @@ has one message type to handle for all three."
       try
       {
           using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(CombatLogUpload.UploadTimeoutSeconds));
-          result = await CombatLogUpload.SendTestAsync(CombatLogUploadHttp, webhook, cts.Token);
+          result = await CombatLogUpload.SendTestAsync(_combatLogUploadHttp, webhook, cts.Token);
       }
       catch (Exception ex)
       {
@@ -1817,8 +1839,6 @@ has one message type to handle for all three."
       return true;
   ```
 
-  Add `using System.Net.Http;` and `using System.Threading;` (for `Timeout.InfiniteTimeSpan`) to `TriffViewSubsystem.cs`'s usings if not already present via a transitive `using` -- check first; `System.Threading.Tasks` types already resolve through implicit usings enabled on the project, but `System.Threading.Timeout` and `System.Net.Http.HttpClient` need explicit usings here since this file has none yet.
-
   Run. Expect 162 passing.
 
   ```bash
@@ -1831,42 +1851,108 @@ pre-flight-vs-outcome split the upload path uses: only \"no webhook
 configured\" is a refusal, everything past that is a result."
   ```
 
-- [ ] **Step 14: Failing test — a working webhook round-trips through a stub server**
+- [ ] **Step 14: Failing tests — a stored webhook that fails the Discord allowlist is treated as absent, and never dialed**
 
-  Add:
+  A value written outside `SetCombatLogWebhook`'s front door (a corrupted entry, an older or newer build with different rules, a direct Credential Manager edit) must not be trusted just because it parses as a URL. Add two facts to `CombatLogUploadWebhookTests`:
 
   ```csharp
   [Fact]
-  public async Task TestCombatLogWebhookSucceedsAgainstAReachableEndpoint()
+  public void StartReportsUnconfiguredWhenTheStoredWebhookFailsTheDiscordAllowlist()
   {
-      using var stub = new StubWebhookServer { StatusCode = 204 };
       var messages = new ConcurrentQueue<string>();
-      // Seeded directly, bypassing SetCombatLogWebhook's host allowlist -- see
-      // this task's header note on why ReadCombatLogWebhook does not re-check it.
+      // A syntactically valid absolute URL, but not a Discord host -- exactly
+      // the case ReadCombatLogWebhook's read-time re-validation exists to catch.
+      var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://example.com/api/webhooks/1/tok"));
+      using var controller = Controller(credentials, messages);
+
+      controller.Start();
+
+      Assert.True(SpinWait.SpinUntil(
+          () => messages.Any(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal)),
+          TimeSpan.FromSeconds(5)));
+      var state = messages.First(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal));
+      Assert.Contains("\"configured\":false", state, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public void TestCombatLogWebhookNeverDialsAStoredUrlThatFailsTheDiscordAllowlist()
+  {
+      using var stub = new StubWebhookServer();
+      var messages = new ConcurrentQueue<string>();
+      // Seeded directly, bypassing SetCombatLogWebhook's front-door validation --
+      // a loopback host can never satisfy the Discord allowlist, which is the
+      // point: this must resolve to "not configured", not an actual HTTP call.
       var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, stub.Uri.ToString()));
       using var controller = Controller(credentials, messages);
 
       controller.HandleWebMessage("triffview:test-combat-log-webhook", null);
 
-      Assert.True(await Task.Run(() => SpinWait.SpinUntil(() => stub.RequestCount >= 1, TimeSpan.FromSeconds(10))));
       Assert.True(SpinWait.SpinUntil(
-          () => messages.Any(json => json.Contains("\"testResult\"", StringComparison.Ordinal) && json.Contains("\"ok\":true", StringComparison.Ordinal)),
+          () => messages.Any(json => json.Contains("\"type\":\"triffview:error\"", StringComparison.Ordinal)
+              && json.Contains("\"action\":\"test-combat-log-webhook\"", StringComparison.Ordinal)
+              && json.Contains("Configure a Discord webhook first.", StringComparison.Ordinal)),
           TimeSpan.FromSeconds(5)));
+      Assert.Equal(0, stub.RequestCount);
   }
   ```
 
-  Run. This exercises Step 13's implementation against a real (loopback) HTTP round trip through `CombatLogUpload.SendTestAsync`, and should already **pass** if Tasks 1-2's `SendTestAsync` treats 204 as success. If it fails, the failure is in `SendTestAsync`'s status handling, not in this controller's wiring -- note that for the reviewer rather than silently reworking the subsystem side. Expected: 163 passing.
+  Run. Expect a **test failure** on both: `ReadCombatLogWebhook` currently only does `Uri.TryCreate`, so both stored values parse as valid URIs and are treated as configured -- the first posts `"configured":true`, and the second actually reaches the stub server instead of posting `triffview:error`. Expect +2 over Step 13's count, both failing.
 
-  ```bash
-  git add native/TriffView.Tests/CombatLogUploadWebhookTests.cs native/TriffView.Tests/StubWebhookServer.cs
-  git commit -m "Add end-to-end regression test for triffview:test-combat-log-webhook
+- [ ] **Step 15: Re-validate the stored webhook against the Discord allowlist on every read**
 
-Exercises SendTestAsync over a real loopback HTTP round trip rather
-than a fake, so a status-handling regression in Tasks 1-2 shows up
-here instead of only being caught by unit tests on that file alone."
+  Replace `ReadCombatLogWebhook` in `TriffViewSubsystem.cs`:
+
+  ```csharp
+  /// <summary>
+  /// Reads the stored webhook, if any, resolving every failure -- including a
+  /// stored value that no longer satisfies the Discord host allowlist -- to
+  /// "absent" rather than throwing or trusting it. The credential store holds
+  /// opaque bytes and makes no promise about what wrote them
+  /// (native/Eve/EveCredentialStore.cs:56): a corrupted entry, a value written
+  /// by a future build with different rules, or a Credential Manager edit made
+  /// outside this app could all put an arbitrary host into this target.
+  /// Re-running TryParse on every read costs one string parse and closes that
+  /// hole (design doc, "The allowlist is also enforced on read, not only on
+  /// write"). ICredentialStore.Read also throws for every Win32 error but "not
+  /// found" (EveCredentialStore.cs), and Start() calls PostState() unprotected
+  /// -- an unavailable credential store must not take down startup on a code
+  /// path that has nothing to do with combat logs.
+  /// </summary>
+  private Uri? ReadCombatLogWebhook()
+  {
+      try
+      {
+          var raw = _credentials.Read(CombatLogWebhookCredentialTarget);
+          if (string.IsNullOrWhiteSpace(raw)) return null;
+          if (!DiscordWebhook.TryParse(raw, out var webhook, out var error))
+          {
+              TriffViewDiagnostics.Log("combat-log-webhook", $"Stored webhook no longer validates: {error}");
+              return null;
+          }
+          return webhook;
+      }
+      catch (Exception ex)
+      {
+          TriffViewDiagnostics.Log("combat-log-webhook", $"Credential read failed: {ex.Message}");
+          return null;
+      }
+  }
   ```
 
-- [ ] **Step 15: Extend the credential-prefix collision assertion**
+  Run. Expect both of Step 14's tests to pass, and every earlier test in this file to remain green -- every value seeded through `SetCombatLogWebhook`'s front door already satisfies `DiscordWebhook.TryParse` by construction, so re-checking it on read changes nothing for those. Expect +2 over Step 13's count, 0 failed.
+
+  ```bash
+  git add native/TriffView/TriffViewSubsystem.cs native/TriffView.Tests/CombatLogUploadWebhookTests.cs native/TriffView.Tests/StubWebhookServer.cs
+  git commit -m "Re-validate the stored combat log webhook against the Discord allowlist on every read
+
+The credential store holds opaque bytes and makes no promise about
+what wrote them. Trusting a stored value after validating it once at
+the front door would let a corrupted entry, an older build's write,
+or a direct Credential Manager edit point this feature at an
+arbitrary host."
+  ```
+
+- [ ] **Step 16: Extend the credential-prefix collision assertion**
 
   In `native/TriffView.Tests/OAuthLoopbackTests.cs`, widen `CredentialNamespacesCannotCollide`:
 
@@ -1911,8 +1997,8 @@ one subsystem's cleanup sweep delete another subsystem's secret."
 - Test: `native/TriffView.Tests/CombatLogUploadFlowTests.cs`
 
 **Interfaces:**
-- Consumes: `TriffView.Alerts.CombatLogUpload.UploadAsync` / `UploadTimeoutSeconds` (Tasks 1-2); `TriffView.Alerts.CombatLogExport.Export` / `SuggestFileName` / `CombatLogExportResult` (existing); Task 3's `ReadCombatLogWebhook()`, `BuildCombatLogWindow` (existing, unchanged), `CombatLogUploadHttp` (Task 3's static field), `PostError`.
-- Produces: `private async void TriffViewController.UploadCombatLogs(string?, string?)`; `private static void TriffViewController.SweepStaleCombatLogTemps()`; outbound `triffview:combat-log-upload { result }`.
+- Consumes: `TriffView.Alerts.CombatLogUpload.UploadAsync` / `UploadTimeoutSeconds` (Tasks 1-2); `TriffView.Alerts.CombatLogExport.Export` / `SuggestFileName` / `CombatLogExportResult` (existing); Task 3's `ReadCombatLogWebhook()`, `BuildCombatLogWindow` (existing, unchanged), `_combatLogUploadHttp` (Task 3's constructor-injectable instance field), `PostError`, and the widened constructor's `gamelogsPath` / `combatLogUploadHttp` parameters (Task 3, Step 3) -- both are what let this task's controller-level test point at a fixture Gamelogs directory and a fake `HttpMessageHandler` instead of the real filesystem and a real socket.
+- Produces: `private async void TriffViewController.UploadCombatLogs(string?, string?)`; `private static void TriffViewController.SweepStaleCombatLogTemps()`; `internal static string TriffViewController.CombatLogUploadTempDir` (the `%TEMP%\TriffView-upload\` subdirectory uploads stage into and the sweep is scoped to -- `internal` so this task's own tests can assert a staged file is actually gone); outbound `triffview:combat-log-upload { result }`.
 
 **Note on the message contract's shape:** `triffview:combat-log-upload` carries `{ result }` only -- there is no `{ cancelled }` branch. Upload has no save dialog and therefore no user action that corresponds to "cancel," unlike `triffview:combat-log-export`'s save-dialog-cancel case; the only thing that can end a run early is the 120s timeout, which surfaces as a *failed* `result` (per the spec's own status table: "timeout / socket error -> redacted transport message"), not a cancellation. The spec has been updated to reflect this: its message table now lists `{ result }` only for upload, with a paragraph explaining why no cancellation shape applies. This plan's `UploadCombatLogs` implementation below matches that settled position.
 
@@ -1990,11 +2076,24 @@ one subsystem's cleanup sweep delete another subsystem's secret."
 
   Expect a **test failure**: `HandleWebMessage` has no `"triffview:upload-combat-logs"` case yet, so nothing is posted and the wait times out.
 
-- [ ] **Step 2: Add `UploadCombatLogs`, its content formatter, and the dispatch case**
+- [ ] **Step 2: Add `UploadCombatLogs`, its content formatter, the staging directory, and the dispatch case**
 
   In `TriffViewSubsystem.cs`, add near `ExportCombatLogs`:
 
   ```csharp
+  /// <summary>
+  /// Everything under here was put there by UploadCombatLogs below and has no
+  /// other owner, which is what lets SweepStaleCombatLogTemps enumerate it
+  /// without risk. SuggestFileName is deterministic, and %TEMP% itself is a
+  /// valid destination for the Export save dialog -- sweeping a
+  /// triffview-fight-*.zip glob across the whole temp directory could delete
+  /// an archive a user deliberately saved there by hand, since the generated
+  /// name could collide with one this feature also generates. Created on
+  /// demand; never assumed to already exist. Internal rather than private so
+  /// Task 4's own tests can assert the staging file is actually gone.
+  /// </summary>
+  internal static string CombatLogUploadTempDir => Path.Combine(Path.GetTempPath(), "TriffView-upload");
+
   /// <summary>
   /// Mirrors ExportCombatLogs' disposal discipline (see its own header comment),
   /// widened for a slower and less certain step: a stalled upload socket can
@@ -2026,7 +2125,11 @@ one subsystem's cleanup sweep delete another subsystem's secret."
               return;
           }
 
-          tempPath = Path.Combine(Path.GetTempPath(), CombatLogExport.SuggestFileName(window));
+          // Staged in a subdirectory this feature owns exclusively -- see
+          // CombatLogUploadTempDir's header comment for why the sweep and the
+          // export save dialog would otherwise be able to collide.
+          Directory.CreateDirectory(CombatLogUploadTempDir);
+          tempPath = Path.Combine(CombatLogUploadTempDir, CombatLogExport.SuggestFileName(window));
           var gamelogsPath = _alerts.GamelogsPath;
           // Off the dispatcher for the same reason ExportCombatLogs is: compressing
           // a long session's logs on the UI thread would stall every preview.
@@ -2044,12 +2147,31 @@ one subsystem's cleanup sweep delete another subsystem's secret."
 
           var content = FormatCombatLogUploadContent(result);
           using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(CombatLogUpload.UploadTimeoutSeconds));
-          var upload = await CombatLogUpload.UploadAsync(CombatLogUploadHttp, webhook, tempPath, content, cts.Token);
+          var upload = await CombatLogUpload.UploadAsync(_combatLogUploadHttp, webhook, tempPath, content, cts.Token);
 
           // Same race ExportCombatLogs guards against: an upload can outlive a
           // shutdown, and posting to a disposed controller from the catch below
           // would throw into the thread pool and take the process with it.
           if (_disposed) return;
+
+          // UploadAsync is handed only a path and a string -- it knows nothing of the export
+          // window, the pilots, or the file counts, which is what lets it be tested with a fake
+          // handler and no export at all (CombatLogUpload.cs). So FileCount, StartUtc, EndUtc,
+          // Characters and DroppedFileCount all come back at their defaults, and the merge has
+          // to happen here, from the CombatLogExportResult already sitting in `result`, before
+          // anything is posted. ToState() stays the one place the wire shape is defined; this
+          // just fills in what UploadAsync could not have known.
+          var merged = new CombatLogUploadResult
+          {
+              Succeeded = upload.Succeeded,
+              Message = upload.Message,
+              ZipBytes = upload.ZipBytes,
+              FileCount = result.FileCount,
+              StartUtc = result.StartUtc,
+              EndUtc = result.EndUtc,
+              Characters = result.Characters,
+              DroppedFileCount = result.DroppedFileCount,
+          };
 
           // Everything above this point (no fight window, no webhook, oversize
           // archive) is a pre-flight refusal reported through PostError: nothing
@@ -2060,7 +2182,7 @@ one subsystem's cleanup sweep delete another subsystem's secret."
           _postToHud(new
           {
               type = "triffview:combat-log-upload",
-              result = upload.ToState(),
+              result = merged.ToState(),
           });
       }
       catch (Exception ex)
@@ -2127,55 +2249,110 @@ one subsystem's cleanup sweep delete another subsystem's secret."
       return true;
   ```
 
-  Run. Expect this test to pass. Baseline going into Task 4 is whatever Task 3 left it at (stated there as 164, to be confirmed from the actual `dotnet test` summary); expect +1.
+  Run. Expect this test to pass. Baseline going into Task 4 is whatever Task 3 left it at; expect +1.
 
   ```bash
   git add native/TriffView/TriffViewSubsystem.cs native/TriffView.Tests/CombatLogUploadFlowTests.cs
   git commit -m "Add triffview:upload-combat-logs
 
 Reuses BuildCombatLogWindow and CombatLogExport.Export unchanged
-against a %TEMP% path, then POSTs the archive through Tasks 1-2's
-CombatLogUpload -- the save-to-disk export path stays untouched."
+against a staging path under %TEMP%\\TriffView-upload\\, then POSTs
+the archive through Tasks 1-2's CombatLogUpload -- the save-to-disk
+export path stays untouched."
   ```
 
-- [ ] **Step 3: Failing test — an oversize archive is refused and its temp file is deleted, without ever reaching the network**
+- [ ] **Step 3: Widen the test controller factory to accept a fixture Gamelogs directory and a fake HTTP handler**
 
-  This drives no new production code by itself (the size check already exists from Step 2), but it is the first test to actually produce Gamelogs on disk, so it introduces the shared fixture the remaining tests build on. Add to `CombatLogUploadFlowTests`:
+  Task 3's Step 3 added `gamelogsPath` and `combatLogUploadHttp` parameters to `TriffViewController`'s constructor. Widen this file's `Controller` helper (from Step 1) to pass them through, and add a small `HttpMessageHandler` test double plus two fixture helpers, so the steps below can prove a real export-and-upload composition without touching the real EVE Gamelogs folder or a real socket:
+
+  ```csharp
+  private static TriffViewController Controller(
+      MemoryCredentials credentials,
+      ConcurrentQueue<string> messages,
+      string? gamelogsPath = null,
+      HttpMessageHandler? handler = null)
+  {
+      return new TriffViewController(
+          Dispatcher.CurrentDispatcher,
+          value => messages.Enqueue(JsonSerializer.Serialize(value)),
+          reassertHudTopmost: () => { },
+          applySettingsAlwaysOnTop: _ => { },
+          credentials,
+          gamelogsPath,
+          handler == null ? null : new HttpClient(handler));
+  }
+
+  /// <summary>
+  /// Stands in for Discord's endpoint the same way Task 3's StubWebhookServer
+  /// does, but as an in-process HttpMessageHandler rather than a real socket --
+  /// this is what lets a genuine TriffViewController (built with a fixture
+  /// Gamelogs path from Task 3's constructor seam) be exercised end to end
+  /// without touching the network or the credential store's Discord-host
+  /// allowlist twice.
+  /// </summary>
+  private sealed class FakeHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+  {
+      public int RequestCount { get; private set; }
+      public byte[]? LastRequestBytes { get; private set; }
+
+      protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+      {
+          RequestCount++;
+          LastRequestBytes = request.Content == null
+              ? null
+              : await request.Content.ReadAsByteArrayAsync(cancellationToken);
+          return respond(request);
+      }
+  }
+
+  private static string CreateFixtureGamelogsDir() =>
+      Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "triffview-upload-fixture", Guid.NewGuid().ToString("N"))).FullName;
+
+  /// <summary>
+  /// Matches the real Gamelog header format CombatLogExport.cs parses:
+  /// "Listener:" is the pilot identity, "Session Started:" is read as a
+  /// fallback window anchor, but SelectLogs actually windows against the
+  /// file's real filesystem LastWriteTimeUtc (i.e. "now", when this writes
+  /// it) -- which is why every fixture window below starts in the past and
+  /// leaves its end open-ended, the same shape already proven out by the
+  /// no-overlap test further down.
+  /// </summary>
+  private static void WriteFixtureGamelog(string dir, string fileName, string listener, DateTime sessionStartUtc, string body)
+  {
+      File.WriteAllText(
+          Path.Combine(dir, fileName),
+          "Gamelog\r\n\r\n" +
+          $"            Listener: {listener}\r\n" +
+          $"  Session Started: {sessionStartUtc:yyyy.MM.dd HH:mm:ss}\r\n\r\n" +
+          body);
+  }
+  ```
+
+  Add `using System.Net;`, `using System.Threading;` and `using TriffView.Alerts;` to `CombatLogUploadFlowTests.cs`'s usings -- `System.Net.Http` is already global via `GlobalUsings.cs`, so it is not repeated here (an explicit duplicate would trip `CS0105` under `--warnaserror`).
+
+  This adds no `[Fact]`, so there is nothing to run yet -- every parameter added to `Controller` is optional, so every existing call site in this file keeps compiling unchanged. Proceed to the next failing test.
+
+- [ ] **Step 4: Failing test — a non-overlapping window still fails loudly, now hermetic against a fixture Gamelogs directory**
 
   ```csharp
   [Fact]
-  public void UploadCombatLogsRefusesAnOversizeArchiveAndDeletesTheTemp()
+  public void UploadCombatLogsReportsANoOverlapWindowAsAnErrorNotASilentSkip()
   {
-      var gamelogsDir = CreateGamelogsDir();
+      var gamelogsDir = CreateFixtureGamelogsDir();
       try
       {
-          // One log padded past 10 MB compressed is impractical to build from
-          // realistic log text, so this test asserts the refusal path instead
-          // via a manual range that matches zero logs -- covered by the
-          // "no logs in range" failing-fast test below -- and the oversize
-          // path itself is exercised in CombatLogExport's own test suite
-          // against CombatLogExportResult.ExceedsDiscordLimit directly. This
-          // controller-level test instead confirms no temp file survives an
-          // error return.
-          var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-          var end = start.AddMinutes(1);
-          WriteGamelog(gamelogsDir, "20260101000000_Pilot_One.txt", start, "Pilot One");
-
           var messages = new ConcurrentQueue<string>();
           var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
-          using var controller = Controller(credentials, messages);
-          controller.SetGamelogsPathForTests(gamelogsDir);
+          using var controller = Controller(credentials, messages, gamelogsPath: gamelogsDir);
 
           controller.HandleWebMessage(
               "triffview:upload-combat-logs",
-              JsonNode.Parse($$"""{"fromUtc":"{{start:O}}","toUtc":"{{end:O}}"}""")!.AsObject());
+              JsonNode.Parse("""{"fromUtc":"2000-01-01T00:00:00Z","toUtc":"2000-01-01T00:01:00Z"}""")!.AsObject());
 
           Assert.True(SpinWait.SpinUntil(
-              () => messages.Any(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal)
-                  || json.Contains("\"action\":\"upload-combat-logs\"", StringComparison.Ordinal)),
+              () => messages.Any(json => json.Contains("\"type\":\"triffview:error\"", StringComparison.Ordinal)
+                  && json.Contains("\"action\":\"upload-combat-logs\"", StringComparison.Ordinal)),
               TimeSpan.FromSeconds(10)));
-          Assert.Empty(Directory.EnumerateFiles(Path.GetTempPath(), "triffview-fight-*.zip")
-              .Where(path => File.GetCreationTimeUtc(path) > DateTime.UtcNow.AddMinutes(-1)));
       }
       finally
       {
@@ -2184,30 +2361,7 @@ CombatLogUpload -- the save-to-disk export path stays untouched."
   }
   ```
 
-  This step as drafted depends on a `SetGamelogsPathForTests` seam that does not exist and is not in this task's canonical interface list -- **do not add it**. Replace the approach before running: `_alerts.GamelogsPath` is read from `TriffAlertsService`, which resolves the real EVE Gamelogs folder and has no override hook either. Re-scope this step to what Task 4's actual interfaces support:
-
-  Delete the draft above and replace it with a test of the piece that *is* independently testable -- `FormatCombatLogUploadContent`'s dropped-file wording -- deferring full end-to-end coverage (real gamelogs, real webhook, real temp lifecycle) to Step 5, which drives the fixture problem into the open instead of routing around it silently.
-
-  ```csharp
-  [Fact]
-  public void UploadCombatLogsReportsANoOverlapWindowAsAnErrorNotASilentSkip()
-  {
-      var messages = new ConcurrentQueue<string>();
-      var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
-      using var controller = Controller(credentials, messages);
-
-      controller.HandleWebMessage(
-          "triffview:upload-combat-logs",
-          JsonNode.Parse("""{"fromUtc":"2000-01-01T00:00:00Z","toUtc":"2000-01-01T00:01:00Z"}""")!.AsObject());
-
-      Assert.True(SpinWait.SpinUntil(
-          () => messages.Any(json => json.Contains("\"type\":\"triffview:error\"", StringComparison.Ordinal)
-              && json.Contains("\"action\":\"upload-combat-logs\"", StringComparison.Ordinal)),
-          TimeSpan.FromSeconds(10)));
-  }
-  ```
-
-  Run. This exercises the real `_alerts.GamelogsPath` (the actual EVE log folder, or its absence on a CI box), a window with no possible overlap in the year 2000, and should already **pass**: `CombatLogExport.Export` throws `InvalidOperationException("No EVE logs overlap...")` when nothing matches, which the `catch` block in Step 2 turns into a `PostError`. If the machine's `%USERPROFILE%\...\EVE\logs\Gamelogs` folder does not exist at all, `Export` throws its "Gamelogs folder not found" `InvalidOperationException` instead, which is caught identically -- either way, the test's assertion (an error naming `upload-combat-logs`) holds.
+  Run. This exercises the real `CombatLogExport.Export` against an empty fixture directory, so `Export` throws `InvalidOperationException("No EVE logs overlap...")` regardless of the machine running the suite, which the `catch` block in Step 2 turns into a `PostError`. Should already **pass**. Unlike a version of this test written before Task 3's `gamelogsPath` seam existed, it no longer depends on whatever `%USERPROFILE%\...\EVE\logs\Gamelogs` happens to resolve to (or not exist at all) on the box running it -- that dependency is worth closing now that the seam is available, rather than leaving one test hermetic and its neighbor not. Expect +1.
 
   ```bash
   git add native/TriffView.Tests/CombatLogUploadFlowTests.cs
@@ -2215,90 +2369,160 @@ CombatLogUpload -- the save-to-disk export path stays untouched."
 
 An empty result must not be mistaken for silent success -- Export's
 'no logs overlap' failure has to surface as an error the user can act
-on, not a quiet no-op."
+on, not a quiet no-op. Hermetic against a fixture Gamelogs directory
+rather than the machine's real EVE folder."
   ```
 
-  **Flag for the team lead:** this exposes a real gap the spec does not address -- `TriffAlertsService.GamelogsPath` has no test-injection seam, unlike `TriffSkillsPaths.OverrideRoot` / `TriffFleetsLocalState`'s constructor-injected state. A genuine end-to-end test of the success path (real archive built, real upload to `StubWebhookServer`, real temp-file cleanup verified) cannot be written against this controller without either adding such a seam to `TriffAlertsService` (out of scope for these two tasks -- it belongs to whichever task owns that class) or writing directly-to-disk fixtures under whatever `_alerts.GamelogsPath` happens to resolve to on the CI machine, which is not hermetic. Steps 4-5 take the second, narrower option: they drive `CombatLogExport.Export` and `CombatLogUpload.UploadAsync` together directly (bypassing the controller) to prove the pieces compose, and rely on Step 1's controller-level test plus Task 3's coverage to prove the wiring.
+- [ ] **Step 5: Failing test — the full export-then-upload composition succeeds through the controller and cleans up its temp file**
 
-- [ ] **Step 4: Failing test — the full export-then-upload composition succeeds against a stub server and cleans up its temp file**
-
-  This test drives `CombatLogExport.Export` and `CombatLogUpload.UploadAsync` directly, at the same layer `UploadCombatLogs` composes them, since the controller itself cannot be pointed at a fixture Gamelogs folder (Step 3's finding). It is real coverage of the composition Step 2 wrote, short of going through `HandleWebMessage`.
-
-  Add:
+  Task 3's `gamelogsPath` and `combatLogUploadHttp` constructor parameters mean this can now drive `UploadCombatLogs` itself -- real archive built from a fixture Gamelogs directory, real upload attempted against a fake handler, real temp-file cleanup verified -- rather than calling `CombatLogExport.Export` and `CombatLogUpload.UploadAsync` directly and bypassing the controller.
 
   ```csharp
   [Fact]
-  public async Task ExportThenUploadComposeAgainstAStubServerAndLeaveNoTempFileBehind()
+  public async Task UploadCombatLogsComposesExportAndUploadAgainstAFakeHandlerAndCleansUpItsTempFile()
   {
-      var gamelogsDir = Path.Combine(Path.GetTempPath(), "triffview-upload-fixture", Guid.NewGuid().ToString("N"));
-      Directory.CreateDirectory(gamelogsDir);
-      var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-      File.WriteAllText(
-          Path.Combine(gamelogsDir, "20260101000000_1_Pilot_One.txt"),
-          "Gamelog\r\n\r\n            Listener: Pilot One\r\n" +
-          "  Session Started: 2026.01.01 00:00:00\r\n\r\n" +
-          "[ 2026.01.01 00:00:05 ] (combat) hits you for 10 damage\r\n");
-
-      var tempZip = Path.Combine(Path.GetTempPath(), $"triffview-fight-upload-test-{Guid.NewGuid():N}.zip");
-      using var stub = new StubWebhookServer { StatusCode = 200, ResponseBody = "{}" };
+      var gamelogsDir = CreateFixtureGamelogsDir();
       try
       {
-          var window = new CombatLogFightWindow { StartUtc = start, EndUtc = start.AddMinutes(1), Source = CombatLogWindowSource.ManualRange };
-          var result = CombatLogExport.Export(gamelogsDir, window.StartUtc, window.EndUtc, tempZip, window.Source);
-          Assert.False(result.ExceedsDiscordLimit);
+          var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+          WriteFixtureGamelog(
+              gamelogsDir, "20260101000000_1_Pilot_One.txt", "Pilot One", start,
+              "[ 2026.01.01 00:00:05 ] (combat) hits you for 10 damage\r\n");
 
-          using var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-          using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-          var upload = await CombatLogUpload.UploadAsync(http, stub.Uri, tempZip, "TriffView combat log test", cts.Token);
+          var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NoContent));
+          var messages = new ConcurrentQueue<string>();
+          var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
+          using var controller = Controller(credentials, messages, gamelogsPath: gamelogsDir, handler: handler);
 
-          Assert.True(upload.Succeeded, upload.Message);
-          Assert.Equal(1, stub.RequestCount);
+          controller.HandleWebMessage(
+              "triffview:upload-combat-logs",
+              JsonNode.Parse($$"""{"fromUtc":"{{start:O}}","toUtc":"{{start.AddMinutes(1):O}}"}""")!.AsObject());
+
+          Assert.True(SpinWait.SpinUntil(
+              () => messages.Any(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal)),
+              TimeSpan.FromSeconds(10)));
+          var reply = messages.First(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal));
+
+          // These fields (fileCount, characters) are exactly what FIX 1's merge
+          // pulls from the CombatLogExportResult rather than from upload.ToState()
+          // alone -- UploadAsync never sees the export, so a regression in that
+          // merge would show up here as fileCount:0 / characters:[].
+          Assert.Contains("\"succeeded\":true", reply, StringComparison.Ordinal);
+          Assert.Contains("\"fileCount\":1", reply, StringComparison.Ordinal);
+          Assert.Contains("\"characters\":[\"Pilot One\"]", reply, StringComparison.Ordinal);
+          Assert.Equal(1, handler.RequestCount);
+          Assert.True(SpinWait.SpinUntil(
+              () => !Directory.EnumerateFiles(TriffViewController.CombatLogUploadTempDir).Any(),
+              TimeSpan.FromSeconds(5)));
       }
       finally
       {
-          if (File.Exists(tempZip)) File.Delete(tempZip);
           Directory.Delete(gamelogsDir, recursive: true);
       }
   }
   ```
 
-  Add `using System.Net.Http;` and `using System.Threading;` to `CombatLogUploadFlowTests.cs`.
-
-  Run. This should already **pass** using Tasks 1-2's `CombatLogUpload.UploadAsync` and the existing `CombatLogExport.Export` -- it is integration coverage of the composition, not new production code. If it fails, narrow down whether the fault is in `CombatLogExport.Export` (unlikely; unchanged) or `CombatLogUpload.UploadAsync`'s handling of a 200 response, and report that rather than adjusting this controller's code to compensate.
+  Run. Expect a **test failure** the first time only if `_combatLogUploadHttp` was not wired the way Step 2 specifies -- otherwise this exercises Step 2's `UploadCombatLogs` exactly as written and should already **pass**, proving the composition rather than driving new production code. Expect +1.
 
   ```bash
   git add native/TriffView.Tests/CombatLogUploadFlowTests.cs
-  git commit -m "Add composed export-and-upload regression test against a stub server
+  git commit -m "Add genuine controller-level export-and-upload regression test
 
-The controller can't be pointed at a fixture Gamelogs folder
-(no injection seam on TriffAlertsService.GamelogsPath), so this
-drives Export and UploadAsync together at the layer UploadCombatLogs
-composes them, over a real loopback HTTP round trip."
+Task 3's gamelogsPath and combatLogUploadHttp constructor seams mean
+UploadCombatLogs itself can now be driven end to end -- real archive,
+real merge of export metadata into the posted result, real temp file
+cleanup -- instead of calling Export and UploadAsync directly and
+bypassing the controller."
   ```
 
-- [ ] **Step 5: Failing test — the startup sweep deletes both stale shapes and leaves fresh files alone**
+- [ ] **Step 6: Failing test — a dropped-file count survives into a *successful* upload's result and its posted Discord message**
+
+  `CombatLogExportResult.DroppedFileCount` is reported on success as well as failure (`FormatCombatLogUploadContent`'s own header comment, Step 2), and FIX 1's merge is what carries it from the export result into the posted `triffview:combat-log-upload` message -- `CombatLogUpload.UploadAsync` never sees it. This proves both halves at once: the merged field, and the wording reaching the actual POST body.
+
+  ```csharp
+  [Fact]
+  public async Task UploadCombatLogsReportsDroppedFilesOnASuccessfulUpload()
+  {
+      var gamelogsDir = CreateFixtureGamelogsDir();
+      try
+      {
+          var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+          // One more than CombatLogExport's 64-file cap (MaxFiles), so this
+          // export is forced to drop exactly one.
+          for (var i = 0; i < 65; i++)
+          {
+              WriteFixtureGamelog(
+                  gamelogsDir, $"20260101000000_{i}_Pilot_{i}.txt", $"Pilot {i}", start,
+                  "[ 2026.01.01 00:00:05 ] (combat) hits you for 10 damage\r\n");
+          }
+
+          var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NoContent));
+          var messages = new ConcurrentQueue<string>();
+          var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
+          using var controller = Controller(credentials, messages, gamelogsPath: gamelogsDir, handler: handler);
+
+          controller.HandleWebMessage(
+              "triffview:upload-combat-logs",
+              JsonNode.Parse($$"""{"fromUtc":"{{start:O}}","toUtc":"{{start.AddMinutes(1):O}}"}""")!.AsObject());
+
+          Assert.True(SpinWait.SpinUntil(
+              () => messages.Any(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal)),
+              TimeSpan.FromSeconds(10)));
+          var reply = messages.First(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal));
+
+          Assert.Contains("\"succeeded\":true", reply, StringComparison.Ordinal);
+          Assert.Contains("\"droppedFileCount\":1", reply, StringComparison.Ordinal);
+
+          var bodyText = Encoding.UTF8.GetString(handler.LastRequestBytes ?? Array.Empty<byte>());
+          Assert.Contains("1 additional matching log file(s) were not included", bodyText, StringComparison.Ordinal);
+      }
+      finally
+      {
+          Directory.Delete(gamelogsDir, recursive: true);
+      }
+  }
+  ```
+
+  Run. Expect a **test failure** only if Step 2's merge or `FormatCombatLogUploadContent` regresses -- otherwise this should already **pass**. Expect +1.
+
+  ```bash
+  git add native/TriffView.Tests/CombatLogUploadFlowTests.cs
+  git commit -m "Prove a dropped-file count survives into a successful upload's result and its posted message
+
+UploadAsync never sees CombatLogExportResult, so this is the merge
+FIX 1 depends on: an upload that quietly dropped files must still
+report it, both in the field the web UI reads and in the line that
+actually reaches the Discord channel."
+  ```
+
+- [ ] **Step 7: Failing test — the startup sweep deletes both stale shapes and leaves fresh files alone, and never touches anything outside its own subdirectory**
 
   `SweepStaleCombatLogTemps` is private and its only call site is `Start()`, so the test drives it through `Start()`, accepting the side effects that come with constructing and starting a full `TriffViewController` (documented in this task's file-level note below).
-
-  Add:
 
   ```csharp
   [Fact]
   public void StartSweepsStaleFightArchivesAndStagingFilesButKeepsFreshOnes()
   {
-      var tempDir = Path.GetTempPath();
+      var tempDir = TriffViewController.CombatLogUploadTempDir;
+      Directory.CreateDirectory(tempDir);
       var staleZip = Path.Combine(tempDir, $"triffview-fight-{Guid.NewGuid():N}.zip");
       var staleStaging = Path.Combine(tempDir, $"triffview-fight-{Guid.NewGuid():N}.zip.{Guid.NewGuid():N}.tmp");
       var freshZip = Path.Combine(tempDir, $"triffview-fight-{Guid.NewGuid():N}.zip");
       var unrelatedOld = Path.Combine(tempDir, $"unrelated-{Guid.NewGuid():N}.zip");
+      // Deliberately outside CombatLogUploadTempDir, same generated name shape
+      // and same age as the stale zip above -- proves the sweep cannot reach a
+      // user's own deliberately-saved export sharing SuggestFileName's output.
+      var outsideStaleZip = Path.Combine(Path.GetTempPath(), $"triffview-fight-{Guid.NewGuid():N}.zip");
       File.WriteAllText(staleZip, "stale");
       File.WriteAllText(staleStaging, "stale-staging");
       File.WriteAllText(freshZip, "fresh");
       File.WriteAllText(unrelatedOld, "unrelated");
+      File.WriteAllText(outsideStaleZip, "outside");
       var twoDaysAgo = DateTime.UtcNow.AddDays(-2);
       File.SetLastWriteTimeUtc(staleZip, twoDaysAgo);
       File.SetLastWriteTimeUtc(staleStaging, twoDaysAgo);
       File.SetLastWriteTimeUtc(unrelatedOld, twoDaysAgo);
+      File.SetLastWriteTimeUtc(outsideStaleZip, twoDaysAgo);
 
       try
       {
@@ -2311,10 +2535,11 @@ composes them, over a real loopback HTTP round trip."
               TimeSpan.FromSeconds(5)));
           Assert.True(File.Exists(freshZip));
           Assert.True(File.Exists(unrelatedOld));
+          Assert.True(File.Exists(outsideStaleZip));
       }
       finally
       {
-          foreach (var path in new[] { staleZip, staleStaging, freshZip, unrelatedOld })
+          foreach (var path in new[] { staleZip, staleStaging, freshZip, unrelatedOld, outsideStaleZip })
           {
               if (File.Exists(path)) File.Delete(path);
           }
@@ -2322,9 +2547,9 @@ composes them, over a real loopback HTTP round trip."
   }
   ```
 
-  Run. Expect a **test failure**: no sweep exists yet, so all four files remain.
+  Run. Expect a **test failure**: no sweep exists yet, so all five files remain.
 
-- [ ] **Step 6: Add `SweepStaleCombatLogTemps` and call it from `Start()`**
+- [ ] **Step 8: Add `SweepStaleCombatLogTemps` and call it from `Start()`**
 
   ```csharp
   /// <summary>
@@ -2333,13 +2558,17 @@ composes them, over a real loopback HTTP round trip."
   /// "&lt;destination&gt;.&lt;guid&gt;.tmp" and only then moves it into place
   /// (CombatLogExport.cs), so a death during compression leaves the staging
   /// file rather than the finished archive -- sweeping only the finished-archive
-  /// glob would leave that behind indefinitely. Non-fatal: a locked or
-  /// already-gone file must never block startup.
+  /// glob would leave that behind indefinitely. Scoped to CombatLogUploadTempDir
+  /// rather than the whole temp directory -- see that property's header comment
+  /// for why sweeping raw %TEMP% could delete a user's own export. Non-fatal: a
+  /// locked or already-gone file, or the directory not existing at all yet, must
+  /// never block startup.
   /// </summary>
   private static void SweepStaleCombatLogTemps()
   {
       var cutoffUtc = DateTime.UtcNow - TimeSpan.FromDays(1);
-      var tempDir = Path.GetTempPath();
+      var tempDir = CombatLogUploadTempDir;
+      if (!Directory.Exists(tempDir)) return;
 
       foreach (var pattern in new[] { "triffview-fight-*.zip", "triffview-fight-*.zip.*.tmp" })
       {
@@ -2385,16 +2614,18 @@ composes them, over a real loopback HTTP round trip."
 
   ```bash
   git add native/TriffView/TriffViewSubsystem.cs native/TriffView.Tests/CombatLogUploadFlowTests.cs
-  git commit -m "Sweep stale combat log temp files on startup
+  git commit -m "Sweep stale combat log temp files on startup, scoped to their own subdirectory
 
 Covers both shapes an interrupted upload can leave behind: the
 finished archive and Export's own staging file, in case the process
-died mid-compression before the move-into-place happened."
+died mid-compression before the move-into-place happened. Scoped to
+%TEMP%\\TriffView-upload\\ rather than raw %TEMP% so the sweep can
+never reach a user's own deliberately-saved export."
   ```
 
   **File-level note on this step's test cost:** `StartSweepsStaleFightArchivesAndStagingFilesButKeepsFreshOnes` calls the real `Start()`, which (beyond the sweep) reads the developer's actual `%APPDATA%\TriffHud\triffview-settings.json` via `TriffViewSettings.Load()` and installs a real `SetWinEventHook` for foreground-window tracking, neither of which `TriffViewController` currently exposes a test seam for (unlike `TriffSkillsPaths.OverrideRoot` / `TriffFleetsLocalState`'s injectable state). Both are read-only or self-unhooked by `Dispose()` and are exercised the same way by every other test in this file and in Task 3's file that calls `Start()`, so this is not a new risk introduced here -- flagging it once, at the step that most depends on it, rather than re-raising it per test.
 
-- [ ] **Step 7: Full local run and final count**
+- [ ] **Step 9: Full local run and final count**
 
   Run the full filtered suite once more and report the actual pass count from the summary line (do not extrapolate it further from this plan's step-by-step arithmetic):
 
@@ -2423,6 +2654,7 @@ died mid-compression before the move-into-place happened."
   ```
 
   Report both summary lines verbatim rather than restating the expected counts from this plan.
+
 ### Task 5: Discord destination and upload buttons in the combat log export tab
 
 **Files:**
@@ -3293,12 +3525,11 @@ press would start a competing export against the same log directory."
 
 ### Task 7: Documentation
 
-Three commits. The first two are part of this feature; the third is a pre-existing documentation gap this feature happened to expose, and is committed separately so it doesn't get attributed to the upload feature in history.
+Two commits, both part of this feature.
 
 **Files:**
 - Modify: `README.md:22`, `README.md:66-72`
 - Modify: `docs/DIAGNOSTICS.md:26-30`
-- Modify: `CLAUDE.md` (the `## Testing` section, and the `## Commands` section)
 - Test: none — documentation
 
 **Interfaces:**
@@ -3376,93 +3607,3 @@ Three commits. The first two are part of this feature; the third is a pre-existi
   git add docs/DIAGNOSTICS.md
   git commit -m "Rescope the diagnostics log's no-network-activity claim to the log itself"
   ```
-
-- [ ] **Step 3: CLAUDE.md — correct the Testing section. NOT part of this feature, and NOT a commit.**
-
-  **Read this before touching the file.** `CLAUDE.md` is **globally gitignored** (`~/.gitignore:8`)
-  and is not tracked by this repository. It does not exist inside the worktree at all — it lives
-  only in the main checkout at `/mnt/c/dev/TriffView/CLAUDE.md`. So:
-
-  - Edit it at that absolute path, not a worktree-relative one.
-  - There is **no `git add`, and no commit.** `git add CLAUDE.md` fails on an ignored, untracked
-    file, and forcing it with `-f` would commit a personal instruction file into a public fork.
-  - Because it is outside the worktree, this edit is not isolated from other sessions. Re-read the
-    current contents immediately before editing — another session may have changed it since this
-    plan was written, and this file is edited far more often than the repo's tracked docs.
-
-  This corrects a pre-existing inaccuracy: `CLAUDE.md`'s `## Testing` section describes only
-  `tests/TriffView.Tests` and states "Anything inside `TriffViewSubsystem.cs` is effectively
-  untestable as-is." That has been wrong since `native/TriffView.Tests` was added — verified directly
-  for this plan: `native/TriffView.Tests/TriffView.Tests.csproj` targets `net8.0-windows` with
-  `UseWPF`/`UseWindowsForms` and a real `<ProjectReference Include="..\TriffView.csproj" />`, and
-  `native/TriffView.csproj` declares `<InternalsVisibleTo Include="TriffView.Tests" />`, so it reaches
-  internal types directly rather than by linking files. Both projects run in CI:
-  `tests/TriffView.Tests/TriffView.Tests.csproj` via `.github/workflows/build.yml`'s `dotnet test`
-  step, and `native/TriffView.Tests/TriffView.Tests.csproj` via `.github/workflows/ci.yml`, which
-  restores, builds, and tests it with `--warnaserror` (and `-p:NuGetAudit=true`).
-
-  Replace the current `## Testing` section in `CLAUDE.md` with:
-
-  ```markdown
-  ## Testing
-
-  There are two xunit test projects, with different reach.
-
-  `tests/TriffView.Tests` is a plain `net8.0` project that **links pure-logic source files** via
-  `<Compile Include="..\..\native\TriffView\Foo.cs" />` rather than a `ProjectReference` — the main
-  project is `net8.0-windows` with WPF and its types are `internal`. Consequences:
-
-  - Logic tested here must live in its own file with no Windows-only dependencies.
-    `System.Drawing.Primitives` (`Rectangle`, `Point`, `Size`) is cross-platform and fine;
-    `System.Windows.Forms` is not.
-  - Adding a new testable file means adding a `Compile Include` line to this project's csproj.
-  - It runs in CI via `.github/workflows/build.yml`.
-
-  `native/TriffView.Tests` is `net8.0-windows` with WPF and WinForms enabled, and takes a real
-  `<ProjectReference Include="..\TriffView.csproj" />` plus `InternalsVisibleTo`. It can exercise the
-  app's internals directly — including code that never leaves a single file such as
-  `TriffViewSubsystem.cs` — with no extraction required to make it reachable. It runs in CI via
-  `.github/workflows/ci.yml`, which builds and tests it with `--warnaserror`.
-
-  Prefer `tests/TriffView.Tests` for logic that is naturally cross-platform (geometry, parsing,
-  framing) so it stays buildable from Linux/WSL; reach for `native/TriffView.Tests` when the thing
-  under test needs WPF/WinForms types, a real controller, or subsystem/credential-store wiring that
-  only exists in the Windows build.
-  ```
-
-  Then add the missing `-ExecutionPolicy Bypass` guidance to the `## Commands` section. Immediately
-  after the closing ` ``` ` of the existing Commands code block, add:
-
-  ```markdown
-
-  When invoking these scripts from WSL via `powershell.exe -File` rather than from an interactive
-  `pwsh` session, add `-ExecutionPolicy Bypass` — a bare `powershell.exe -File scripts/build-native.ps1`
-  fails with `UnauthorizedAccess` on a machine whose script execution policy hasn't been relaxed for
-  this repo:
-
-  ```powershell
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-native.ps1
-  ```
-  ```
-
-  No commit. The file is ignored and untracked, so there is nothing to stage — the edit simply
-  stands in the working copy of the main checkout.
-
-  **One more correction to make while you are in there.** The "Building and testing from a worktree"
-  section states that these scripts never work from a worktree, nested or sibling. That is true of
-  `scripts/build-native.ps1` — line 4 is `$root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path`,
-  a single level with no upward walk — but it is **false of `tests/TriffView.Tests/run-tests.ps1`**,
-  which does walk upward, six levels, at lines 9-18:
-
-  ```powershell
-  $probe = $shared
-  for ($i = 0; $i -lt 6 -and $probe; $i++) {
-      $candidate = Join-Path $probe ".dotnet\dotnet.exe"
-      if (Test-Path $candidate) { $dotnet = $candidate; $shared = $probe; break }
-      $probe = Split-Path $probe -Parent
-  }
-  ```
-
-  Verified 2026-08-16 by running it from `.claude/worktrees/combat-log-discord-upload`: 54 passing.
-  Every step in Tasks 1-2 of this plan depends on that working, so the over-general claim needs
-  narrowing to name `build-native.ps1` specifically rather than "these scripts".
