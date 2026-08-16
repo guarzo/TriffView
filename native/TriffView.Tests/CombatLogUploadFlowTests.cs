@@ -141,6 +141,60 @@ public class CombatLogUploadFlowTests
         }
     }
 
+    /// <summary>
+    /// Drives the sweep through <c>Start()</c>, which is its only call site.
+    /// That also reads the developer's real
+    /// <c>%APPDATA%\TriffHud\triffview-settings.json</c> and installs a
+    /// SetWinEventHook, neither of which TriffViewController exposes a seam for
+    /// -- both read-only or unhooked by Dispose(), and already exercised the
+    /// same way by every other Start() test in this suite.
+    /// </summary>
+    [Fact]
+    public void StartSweepsStaleFightArchivesAndStagingFilesButKeepsFreshOnes()
+    {
+        var tempDir = TriffViewController.CombatLogUploadTempDir;
+        Directory.CreateDirectory(tempDir);
+        var staleZip = Path.Combine(tempDir, $"triffview-fight-{Guid.NewGuid():N}.zip");
+        var staleStaging = Path.Combine(tempDir, $"triffview-fight-{Guid.NewGuid():N}.zip.{Guid.NewGuid():N}.tmp");
+        var freshZip = Path.Combine(tempDir, $"triffview-fight-{Guid.NewGuid():N}.zip");
+        var unrelatedOld = Path.Combine(tempDir, $"unrelated-{Guid.NewGuid():N}.zip");
+        // Deliberately outside CombatLogUploadTempDir, same generated name shape
+        // and same age as the stale zip above -- proves the sweep cannot reach a
+        // user's own deliberately-saved export sharing SuggestFileName's output.
+        var outsideStaleZip = Path.Combine(Path.GetTempPath(), $"triffview-fight-{Guid.NewGuid():N}.zip");
+        File.WriteAllText(staleZip, "stale");
+        File.WriteAllText(staleStaging, "stale-staging");
+        File.WriteAllText(freshZip, "fresh");
+        File.WriteAllText(unrelatedOld, "unrelated");
+        File.WriteAllText(outsideStaleZip, "outside");
+        var twoDaysAgo = DateTime.UtcNow.AddDays(-2);
+        File.SetLastWriteTimeUtc(staleZip, twoDaysAgo);
+        File.SetLastWriteTimeUtc(staleStaging, twoDaysAgo);
+        File.SetLastWriteTimeUtc(unrelatedOld, twoDaysAgo);
+        File.SetLastWriteTimeUtc(outsideStaleZip, twoDaysAgo);
+
+        try
+        {
+            var messages = new ConcurrentQueue<string>();
+            using var controller = Controller(new MemoryCredentials(), messages);
+            controller.Start();
+
+            Assert.True(SpinWait.SpinUntil(
+                () => !File.Exists(staleZip) && !File.Exists(staleStaging),
+                TimeSpan.FromSeconds(5)));
+            Assert.True(File.Exists(freshZip));
+            Assert.True(File.Exists(unrelatedOld));
+            Assert.True(File.Exists(outsideStaleZip));
+        }
+        finally
+        {
+            foreach (var path in new[] { staleZip, staleStaging, freshZip, unrelatedOld, outsideStaleZip })
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+        }
+    }
+
     private static TriffViewController Controller(
         MemoryCredentials credentials,
         ConcurrentQueue<string> messages,

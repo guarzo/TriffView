@@ -123,6 +123,7 @@ internal sealed class TriffViewController : IDisposable
         StartForegroundTracking();
         StartDisplayTracking();
         LogLayoutSnapshot("startup");
+        SweepStaleCombatLogTemps();
         RefreshCombatLogWebhookState();
         PostState();
     }
@@ -1355,6 +1356,52 @@ internal sealed class TriffViewController : IDisposable
     /// the upload tests can assert the staging file is actually gone.
     /// </summary>
     internal static string CombatLogUploadTempDir => Path.Combine(Path.GetTempPath(), "TriffView-upload");
+
+    /// <summary>
+    /// Best-effort cleanup of anything UploadCombatLogs could have left behind if
+    /// the process died mid-run. Two shapes, not one: Export builds its archive at
+    /// "&lt;destination&gt;.&lt;guid&gt;.tmp" and only then moves it into place
+    /// (CombatLogExport.cs), so a death during compression leaves the staging
+    /// file rather than the finished archive -- sweeping only the finished-archive
+    /// glob would leave that behind indefinitely. Scoped to CombatLogUploadTempDir
+    /// rather than the whole temp directory -- see that property's header comment
+    /// for why sweeping raw %TEMP% could delete a user's own export. Non-fatal: a
+    /// locked or already-gone file, or the directory not existing at all yet, must
+    /// never block startup.
+    /// </summary>
+    private static void SweepStaleCombatLogTemps()
+    {
+        var cutoffUtc = DateTime.UtcNow - TimeSpan.FromDays(1);
+        var tempDir = CombatLogUploadTempDir;
+        if (!Directory.Exists(tempDir)) return;
+
+        foreach (var pattern in new[] { "triffview-fight-*.zip", "triffview-fight-*.zip.*.tmp" })
+        {
+            IEnumerable<string> matches;
+            try
+            {
+                matches = Directory.EnumerateFiles(tempDir, pattern);
+            }
+            catch (Exception ex)
+            {
+                TriffViewDiagnostics.Log("combat-log-upload", $"Temp sweep failed to enumerate '{pattern}': {ex.Message}");
+                continue;
+            }
+
+            foreach (var path in matches)
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(path) >= cutoffUtc) continue;
+                    File.Delete(path);
+                }
+                catch (Exception ex)
+                {
+                    TriffViewDiagnostics.Log("combat-log-upload", $"Temp sweep failed to delete '{path}': {ex.Message}");
+                }
+            }
+        }
+    }
 
     /// <summary>
     /// Mirrors ExportCombatLogs' disposal discipline (see its own header comment),
