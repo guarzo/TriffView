@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Windows.Threading;
 using TriffView.Eve;
 using TriffView.Preview;
@@ -57,6 +58,24 @@ public class CombatLogUploadWebhookTests
         controller.HandleWebMessage("triffview:get-state", null);
 
         Assert.Equal(readsAfterStart, credentials.ReadCalls);
+    }
+
+    [Fact]
+    public void SetCombatLogWebhookRejectsUrlsOutsideTheDiscordAllowlist()
+    {
+        var messages = new ConcurrentQueue<string>();
+        var credentials = new MemoryCredentials();
+        using var controller = Controller(credentials, messages);
+
+        controller.HandleWebMessage(
+            "triffview:set-combat-log-webhook",
+            JsonNode.Parse("""{"url":"https://example.com/api/webhooks/1/tok"}""")!.AsObject());
+
+        Assert.True(SpinWait.SpinUntil(
+            () => messages.Any(json => json.Contains("\"type\":\"triffview:error\"", StringComparison.Ordinal)
+                && json.Contains("\"action\":\"set-combat-log-webhook\"", StringComparison.Ordinal)),
+            TimeSpan.FromSeconds(5)));
+        Assert.Null(credentials.Stored(TriffViewController.CombatLogWebhookCredentialTarget));
     }
 
     private static TriffViewController Controller(MemoryCredentials credentials, ConcurrentQueue<string> messages)

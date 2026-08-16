@@ -263,6 +263,9 @@ internal sealed class TriffViewController : IDisposable
                     message?["fromUtc"]?.GetValue<string>(),
                     message?["toUtc"]?.GetValue<string>());
                 return true;
+            case "triffview:set-combat-log-webhook":
+                SetCombatLogWebhook(message?["url"]?.GetValue<string>());
+                return true;
             case "triffview:restore-settings-backup":
                 RestoreSettingsBackup();
                 return true;
@@ -1223,6 +1226,45 @@ internal sealed class TriffViewController : IDisposable
         {
             PostError("export-settings-backup", ex.Message);
         }
+    }
+
+    private void SetCombatLogWebhook(string? url)
+    {
+        if (!DiscordWebhook.TryParse(url, out var webhook, out var error))
+        {
+            // A rejected URL never reached the credential store, let alone Discord --
+            // there is no attempt to report an outcome of, so this is PostError, not
+            // a combat-log-webhook state post.
+            PostError("set-combat-log-webhook", error);
+            return;
+        }
+
+        try
+        {
+            _credentials.Write(CombatLogWebhookCredentialTarget, webhook.ToString());
+        }
+        catch (Exception ex)
+        {
+            // Same reasoning: a failed credential write means nothing was saved and
+            // nothing was tested, so this is still a refusal to report, not an
+            // outcome of testing the webhook.
+            PostError("set-combat-log-webhook", DiscordWebhook.Redact(ex.Message, webhook));
+            return;
+        }
+
+        RefreshCombatLogWebhookState();
+        PostCombatLogWebhookState();
+    }
+
+    private void PostCombatLogWebhookState(object? testResult = null)
+    {
+        _postToHud(new
+        {
+            type = "triffview:combat-log-webhook",
+            configured = _combatLogWebhook.Configured,
+            description = _combatLogWebhook.Description,
+            testResult,
+        });
     }
 
     /// <summary>
