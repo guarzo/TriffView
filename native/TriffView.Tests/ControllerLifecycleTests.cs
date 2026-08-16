@@ -15,6 +15,18 @@ public class ControllerLifecycleTests : IDisposable
         "esi-skills.read_skills.v1",
         "esi-skills.read_skillqueue.v1",
     };
+
+    // How long to let background work settle before declaring a test failed.
+    //
+    // These are all SpinUntil deadlines, and SpinUntil returns the moment its
+    // predicate holds — so a generous value costs nothing when the code is
+    // correct. It only lengthens how long a genuine failure takes to report.
+    // The whole class runs in well under a second locally; the 2-3s deadlines
+    // this replaces were tight enough that a loaded CI runner tripped
+    // ForgetDuringRefreshCannotRecreateCharacterOrCredential, which passes
+    // consistently on developer machines.
+    private static readonly TimeSpan SettleTimeout = TimeSpan.FromSeconds(15);
+
     private readonly string _root = Path.Combine(Path.GetTempPath(), "triffskills-controller-tests", Guid.NewGuid().ToString("N"));
 
     public ControllerLifecycleTests() => TriffSkillsPaths.OverrideRoot(_root);
@@ -39,7 +51,7 @@ public class ControllerLifecycleTests : IDisposable
         controller.HandleWebMessage("triffskills:refresh-characters", null);
         controller.HandleWebMessage("triffskills:refresh-characters", null);
 
-        Assert.True(SpinWait.SpinUntil(() => handler.Calls >= 4, TimeSpan.FromSeconds(3)));
+        Assert.True(SpinWait.SpinUntil(() => handler.Calls >= 4, SettleTimeout));
         Assert.Equal(1, sso.RefreshCalls);
         Assert.Equal("rotated-refresh", credentials.Read(Target()));
         var character = Assert.Single(TriffSkillsState.Load().State.Characters);
@@ -58,7 +70,7 @@ public class ControllerLifecycleTests : IDisposable
 
         controller.HandleWebMessage("triffskills:refresh-characters", null);
 
-        Assert.True(SpinWait.SpinUntil(() => TriffSkillsState.Load().State.Characters.Single().FetchedUtc is not null, TimeSpan.FromSeconds(3)));
+        Assert.True(SpinWait.SpinUntil(() => TriffSkillsState.Load().State.Characters.Single().FetchedUtc is not null, SettleTimeout));
         Assert.Equal(2, sso.RefreshCalls);
         Assert.Equal(3, handler.Calls);
     }
@@ -82,7 +94,7 @@ public class ControllerLifecycleTests : IDisposable
 
         controller.HandleWebMessage("triffskills:refresh-characters", null);
 
-        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref saves) == 1, TimeSpan.FromSeconds(3)));
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref saves) == 1, SettleTimeout));
         Assert.Equal(1, saves);
     }
 
@@ -96,7 +108,7 @@ public class ControllerLifecycleTests : IDisposable
 
         controller.HandleWebMessage("triffskills:refresh-characters", null);
 
-        Assert.True(SpinWait.SpinUntil(() => TriffSkillsState.Load().State.Characters.Single().FetchedUtc is not null, TimeSpan.FromSeconds(3)));
+        Assert.True(SpinWait.SpinUntil(() => TriffSkillsState.Load().State.Characters.Single().FetchedUtc is not null, SettleTimeout));
         Assert.Equal("owner-123456", TriffSkillsState.Load().State.Characters.Single().OwnerHash);
     }
 
@@ -110,7 +122,7 @@ public class ControllerLifecycleTests : IDisposable
 
         controller.HandleWebMessage("triffskills:refresh-characters", null);
 
-        Assert.True(SpinWait.SpinUntil(() => TriffSkillsState.Load().State.Characters.Single().NeedsReauth, TimeSpan.FromSeconds(3)));
+        Assert.True(SpinWait.SpinUntil(() => TriffSkillsState.Load().State.Characters.Single().NeedsReauth, SettleTimeout));
         Assert.Equal("old-refresh", credentials.Read(Target()));
         Assert.Equal("owner-123456", TriffSkillsState.Load().State.Characters.Single().OwnerHash);
     }
@@ -126,13 +138,13 @@ public class ControllerLifecycleTests : IDisposable
         using var controller = Controller(credentials, sso, handler, new());
 
         controller.HandleWebMessage("triffskills:refresh-characters", null);
-        Assert.True(SpinWait.SpinUntil(() => sso.RefreshCalls == 1, TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => sso.RefreshCalls == 1, SettleTimeout));
         controller.HandleWebMessage("triffskills:forget-character", JsonNode.Parse("""{"characterId":42}""")!.AsObject());
         refresh.SetResult(ValidToken("rotated"));
 
         Assert.True(SpinWait.SpinUntil(
             () => credentials.Read(Target()) is null && TriffSkillsState.Load().State.Characters.Count == 0,
-            TimeSpan.FromSeconds(3)));
+            SettleTimeout));
     }
 
     [Fact]
@@ -146,12 +158,12 @@ public class ControllerLifecycleTests : IDisposable
         using var controller = Controller(credentials, sso, new SkillHandler(), messages);
 
         controller.HandleWebMessage("triffskills:auth", null);
-        Assert.True(SpinWait.SpinUntil(() => sso.AuthorizeCalls == 1, TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => sso.AuthorizeCalls == 1, SettleTimeout));
         controller.HandleWebMessage("triffskills:forget-character", JsonNode.Parse("""{"characterId":42}""")!.AsObject());
-        Assert.True(SpinWait.SpinUntil(() => credentials.Read(Target()) is null, TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => credentials.Read(Target()) is null, SettleTimeout));
         authorization.SetResult(ValidToken("reauthorized"));
 
-        Assert.True(SpinWait.SpinUntil(() => messages.Any(json => json.Contains("authentication was cancelled", StringComparison.Ordinal)), TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => messages.Any(json => json.Contains("authentication was cancelled", StringComparison.Ordinal)), SettleTimeout));
         Assert.Empty(TriffSkillsState.Load().State.Characters);
         Assert.Null(credentials.Read(Target()));
     }
@@ -167,12 +179,12 @@ public class ControllerLifecycleTests : IDisposable
 
         controller.HandleWebMessage("triffskills:auth", null);
         controller.HandleWebMessage("triffskills:auth", null);
-        Assert.True(SpinWait.SpinUntil(() => sso.AuthorizeCalls == 1, TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => sso.AuthorizeCalls == 1, SettleTimeout));
         Assert.Contains(messages, json => json.Contains("already in progress", StringComparison.Ordinal));
 
         controller.HandleWebMessage("triffskills:cancel-auth", null);
         authorize.TrySetCanceled();
-        Assert.True(SpinWait.SpinUntil(() => messages.Any(json => json.Contains("authentication was cancelled", StringComparison.Ordinal)), TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => messages.Any(json => json.Contains("authentication was cancelled", StringComparison.Ordinal)), SettleTimeout));
     }
 
     [Fact]
@@ -185,7 +197,7 @@ public class ControllerLifecycleTests : IDisposable
 
         controller.HandleWebMessage("triffskills:forget-character", JsonNode.Parse("""{"characterId":42}""")!.AsObject());
 
-        Assert.True(SpinWait.SpinUntil(() => messages.Any(json => json.Contains("Credential deletion failed", StringComparison.Ordinal)), TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => messages.Any(json => json.Contains("Credential deletion failed", StringComparison.Ordinal)), SettleTimeout));
         Assert.Single(TriffSkillsState.Load().State.Characters);
         Assert.Equal("old-refresh", credentials.Read(Target()));
     }
@@ -200,7 +212,7 @@ public class ControllerLifecycleTests : IDisposable
 
         controller.HandleWebMessage("triffskills:forget-character", JsonNode.Parse("""{"characterId":42}""")!.AsObject());
 
-        Assert.True(SpinWait.SpinUntil(() => messages.Any(json => json.Contains("Credential lookup failed", StringComparison.Ordinal)), TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => messages.Any(json => json.Contains("Credential lookup failed", StringComparison.Ordinal)), SettleTimeout));
         Assert.Single(TriffSkillsState.Load().State.Characters);
     }
 
@@ -213,7 +225,7 @@ public class ControllerLifecycleTests : IDisposable
 
         controller.HandleWebMessage("triffskills:auth", null);
 
-        Assert.True(SpinWait.SpinUntil(() => messages.Any(json => json.Contains("credential write failed", StringComparison.Ordinal)), TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => messages.Any(json => json.Contains("credential write failed", StringComparison.Ordinal)), SettleTimeout));
         Assert.Empty(TriffSkillsState.Load().State.Characters);
     }
 
@@ -234,7 +246,7 @@ public class ControllerLifecycleTests : IDisposable
         controller.HandleWebMessage("triffskills:preview-plan", message);
 
         Assert.True(
-            SpinWait.SpinUntil(() => messages.Any(json => json.Contains(requestId, StringComparison.Ordinal) && json.Contains("not in EVE", StringComparison.Ordinal) && json.Contains("skill category", StringComparison.Ordinal)), TimeSpan.FromSeconds(2)),
+            SpinWait.SpinUntil(() => messages.Any(json => json.Contains(requestId, StringComparison.Ordinal) && json.Contains("not in EVE", StringComparison.Ordinal) && json.Contains("skill category", StringComparison.Ordinal)), SettleTimeout),
             string.Join(Environment.NewLine, messages));
         Assert.Empty(Directory.EnumerateFiles(TriffSkillsPaths.PlansDir, "Bad plan.txt"));
     }
