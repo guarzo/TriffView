@@ -23,4 +23,18 @@ internal static class PreviewPointerGesture
         return Math.Abs(end.X - start.X) <= Math.Max(0, dragSize.Width)
             && Math.Abs(end.Y - start.Y) <= Math.Max(0, dragSize.Height);
     }
+
+    /// <summary>
+    /// With previews locked there is nothing to drag, so distance travelled during the press is
+    /// meaningless — a cursor moving at ordinary speed covers tens of pixels in the time a real
+    /// click takes, far past any drag-size tolerance, and net-displacement tests like
+    /// <see cref="IsClick"/> would swallow the click just as the old peak-displacement latch did.
+    /// The only question that matters when locked is where the button came back up: releasing
+    /// over the same preview that was pressed activates it, releasing elsewhere is a cancelled
+    /// click (the user pressed, changed their mind, and dragged off before letting go).
+    /// </summary>
+    public static bool IsLockedReleaseActivation(Rectangle pressedFrame, Point releasePointAbsolute)
+    {
+        return pressedFrame.Contains(releasePointAbsolute);
+    }
 }
