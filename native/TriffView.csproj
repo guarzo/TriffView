@@ -40,4 +40,11 @@
                       Condition="Exists('Assets\overlay-dist.zip')"
                       LogicalName="TriffView.Assets.overlay-dist.zip" />
   </ItemGroup>
+
+  <ItemGroup Condition="'$(UpdateRepository)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>UpdateRepository</_Parameter1>
+      <_Parameter2>$(UpdateRepository)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
 </Project>

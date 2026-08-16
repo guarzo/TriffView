@@ -88,8 +88,14 @@ function UpdateNotice({ update, onDismiss, onIgnore }) {
 
   const versionLabel = update.latestTag || `v${update.latestVersion}`;
   const openUpdate = () => {
-    if (!postNative({ type: "update:open" })) {
-      openExternalUrl(update.releaseUrl || "https://github.com/NarcisussX/TriffView/releases");
+    if (postNative({ type: "update:open" })) return;
+    // No hardcoded upstream fallback: a fork build must never link users to the
+    // upstream repo's releases. Prefer the specific release page (already scoped
+    // to whichever repo the exe was built from) and fall back to the generic
+    // releases index; if neither is supplied there's nothing safe to open.
+    const target = update.releaseUrl || update.releasesPageUrl;
+    if (target) {
+      openExternalUrl(target);
     }
   };
 
