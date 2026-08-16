@@ -300,4 +300,32 @@ public static class CombatLogUpload
             ZipBytes = zipBytes,
         };
     }
+
+    /// <summary>
+    /// A text-only message so the user finds out a webhook works before a
+    /// fight they cared about fails to upload. Shares BuildResultAsync's
+    /// status mapping, since a broken webhook fails the same way here as it
+    /// does for a real archive.
+    /// </summary>
+    public static async Task<CombatLogUploadResult> SendTestAsync(HttpClient http, Uri webhook, CancellationToken ct)
+    {
+        try
+        {
+            var payloadJson = JsonSerializer.Serialize(new
+            {
+                content = "TriffView test message -- this webhook is working.",
+            });
+            using var body = new StringContent(payloadJson, Encoding.UTF8, "application/json");
+            using var response = await http.PostAsync(webhook, body, ct);
+            return await BuildResultAsync(response, zipBytes: 0, webhook, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return Failed("The test message timed out.", 0, webhook);
+        }
+        catch (HttpRequestException ex)
+        {
+            return Failed($"Could not reach Discord: {ex.Message}", 0, webhook);
+        }
+    }
 }

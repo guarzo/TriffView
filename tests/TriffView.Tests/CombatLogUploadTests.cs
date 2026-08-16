@@ -355,4 +355,27 @@ public class CombatLogUploadTransportTests : IDisposable
             throw new InvalidOperationException("unreachable");
         }
     }
+
+    [Fact]
+    public async Task SendTestPostsATextOnlyMessageAndReportsSuccess()
+    {
+        using var http = ClientReturning(_ => new HttpResponseMessage(HttpStatusCode.NoContent), out var handler);
+
+        var result = await CombatLogUpload.SendTestAsync(http, SampleWebhook, CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.IsType<StringContent>(handler.LastRequest!.Content);
+        Assert.Equal("application/json", handler.LastRequest.Content!.Headers.ContentType!.MediaType);
+    }
+
+    [Fact]
+    public async Task SendTestFailureIsReportedAndRedactedLikeAnyOtherUpload()
+    {
+        using var http = new HttpClient(new ThrowingHandler());
+
+        var result = await CombatLogUpload.SendTestAsync(http, SampleWebhook, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.DoesNotContain("abcDEF-token_123", result.Message);
+    }
 }
