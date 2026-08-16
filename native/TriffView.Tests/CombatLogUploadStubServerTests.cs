@@ -9,7 +9,7 @@ namespace TriffView.Tests;
 public class CombatLogUploadStubServerTests
 {
     [Fact]
-    public async Task SuccessfulUpload_SendsExpectedMultipartFraming_AndDeletesTempFiles()
+    public async Task SuccessfulUpload_SendsExpectedMultipartFraming()
     {
         var zipBytes = Encoding.UTF8.GetBytes("fake zip contents for framing test");
         var zipPath = Path.Combine(Path.GetTempPath(), $"triffview-fight-{Guid.NewGuid():N}.zip");
@@ -52,6 +52,11 @@ public class CombatLogUploadStubServerTests
 
         Assert.DoesNotContain(token, payloadText, StringComparison.Ordinal);
         Assert.DoesNotContain(token, result.Message, StringComparison.Ordinal);
+        // Not cleanup coverage -- the finally above deletes both files unconditionally,
+        // so these can only ever observe this test's own tidy-up (real coverage is in
+        // CombatLogUploadFlowTests). What they retain is a leaked-handle check only a
+        // live socket can give: if UploadAsync ever failed to close its FileStream, the
+        // File.Delete in the finally would throw IOException and fail the test.
         Assert.False(File.Exists(zipPath));
         Assert.False(File.Exists(stagingPath));
     }
