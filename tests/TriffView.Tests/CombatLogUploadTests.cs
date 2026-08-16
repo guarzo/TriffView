@@ -212,6 +212,7 @@ public class CombatLogUploadTransportTests : IDisposable
             http, SampleWebhook, _zipPath, "content", CancellationToken.None);
 
         Assert.True(result.Succeeded);
+        Assert.Equal("Uploaded to Discord.", result.Message);
         Assert.Equal(5, result.ZipBytes);
     }
 
@@ -364,6 +365,9 @@ public class CombatLogUploadTransportTests : IDisposable
         var result = await CombatLogUpload.SendTestAsync(http, SampleWebhook, CancellationToken.None);
 
         Assert.True(result.Succeeded);
+        // The wording, not just the flag: a test posts no archive, so reporting
+        // an upload here would tell the user logs left their machine when none did.
+        Assert.Equal("Test message sent.", result.Message);
         Assert.IsType<StringContent>(handler.LastRequest!.Content);
         Assert.Equal("application/json", handler.LastRequest.Content!.Headers.ContentType!.MediaType);
     }

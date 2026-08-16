@@ -215,7 +215,7 @@ public static class CombatLogUpload
             form.Add(fileContent, "files[0]", Path.GetFileName(zipPath));
 
             using var response = await http.PostAsync(webhook, form, ct);
-            return await BuildResultAsync(response, zipBytes, webhook, ct);
+            return await BuildResultAsync(response, zipBytes, webhook, "Uploaded to Discord.", ct);
         }
         catch (OperationCanceledException)
         {
@@ -231,15 +231,23 @@ public static class CombatLogUpload
         }
     }
 
+    /// <summary>
+    /// Every failure wording is shared, because a broken webhook fails
+    /// identically whatever was posted to it. Only success is caller-supplied:
+    /// <see cref="SendTestAsync"/> sends no archive at all, and reporting
+    /// "Uploaded to Discord." for a text-only ping would tell the user logs
+    /// left their machine when none did -- the one claim this feature cannot
+    /// afford to get wrong.
+    /// </summary>
     private static async Task<CombatLogUploadResult> BuildResultAsync(
-        HttpResponseMessage response, long zipBytes, Uri webhook, CancellationToken ct)
+        HttpResponseMessage response, long zipBytes, Uri webhook, string successMessage, CancellationToken ct)
     {
         if (response.StatusCode == HttpStatusCode.OK || response.StatusCode == HttpStatusCode.NoContent)
         {
             return new CombatLogUploadResult
             {
                 Succeeded = true,
-                Message = "Uploaded to Discord.",
+                Message = successMessage,
                 ZipBytes = zipBytes,
             };
         }
@@ -306,7 +314,8 @@ public static class CombatLogUpload
     /// A text-only message so the user finds out a webhook works before a
     /// fight they cared about fails to upload. Shares BuildResultAsync's
     /// status mapping, since a broken webhook fails the same way here as it
-    /// does for a real archive.
+    /// does for a real archive -- but not its success wording, because nothing
+    /// was uploaded.
     /// </summary>
     public static async Task<CombatLogUploadResult> SendTestAsync(HttpClient http, Uri webhook, CancellationToken ct)
     {
@@ -318,7 +327,7 @@ public static class CombatLogUpload
             });
             using var body = new StringContent(payloadJson, Encoding.UTF8, "application/json");
             using var response = await http.PostAsync(webhook, body, ct);
-            return await BuildResultAsync(response, zipBytes: 0, webhook, ct);
+            return await BuildResultAsync(response, zipBytes: 0, webhook, "Test message sent.", ct);
         }
         catch (OperationCanceledException)
         {
