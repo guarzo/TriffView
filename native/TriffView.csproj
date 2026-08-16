@@ -9,10 +9,10 @@
     <AssemblyName>TriffView</AssemblyName>
     <RootNamespace>TriffView</RootNamespace>
     <ApplicationIcon>Assets\TriffView.ico</ApplicationIcon>
-    <Version>2.0.0</Version>
-    <AssemblyVersion>2.0.0.0</AssemblyVersion>
-    <FileVersion>2.0.0.0</FileVersion>
-    <InformationalVersion>2.0.0</InformationalVersion>
+    <Version>2.0.1</Version>
+    <AssemblyVersion>2.0.1.0</AssemblyVersion>
+    <FileVersion>2.0.1.0</FileVersion>
+    <InformationalVersion>2.0.1</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
   </PropertyGroup>
@@ -39,5 +39,12 @@
     <EmbeddedResource Include="Assets\overlay-dist.zip"
                       Condition="Exists('Assets\overlay-dist.zip')"
                       LogicalName="TriffView.Assets.overlay-dist.zip" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UpdateRepository)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>UpdateRepository</_Parameter1>
+      <_Parameter2>$(UpdateRepository)</_Parameter2>
+    </AssemblyAttribute>
   </ItemGroup>
 </Project>

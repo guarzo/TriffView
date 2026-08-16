@@ -1118,6 +1118,7 @@ public partial class MainWindow : Window
                 updateAvailable = _updateSnapshot.UpdateAvailable,
                 ignored = _updateSnapshot.Ignored,
                 error = _updateSnapshot.Error,
+                releasesPageUrl = TriffViewUpdateChecker.ReleasesPageUrl,
             },
         });
     }

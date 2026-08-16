@@ -94,4 +94,53 @@ public class PreviewPointerGestureTests
         Assert.True(PreviewPointerGesture.IsClick(new Point(0, 0), new Point(0, 0), new Size(-5, -5)));
         Assert.False(PreviewPointerGesture.IsClick(new Point(0, 0), new Point(1, 0), new Size(-5, -5)));
     }
+
+    // With previews locked, a fast real click travels far more than SM_CXDRAG between press and
+    // release, so net-displacement checks like IsClick reject it and the click does nothing —
+    // users reported this as "clicking a preview to switch characters doesn't work" whenever
+    // their mouse was in motion. Locked mode decides on release position instead.
+
+    [Fact]
+    public void ReleaseInsideThePressedFrameActivatesEvenAfterALongFastTravel()
+    {
+        var pressedFrame = new Rectangle(100, 100, 200, 150);
+
+        // ~80px of net displacement in the time a real click takes at ordinary cursor speed —
+        // far beyond the 4px drag metric, but the release is still over the pressed preview.
+        var release = new Point(180, 180);
+
+        Assert.True(PreviewPointerGesture.IsLockedReleaseActivation(pressedFrame, release));
+    }
+
+    [Fact]
+    public void ReleaseJustOutsideThePressedFrameDoesNotActivate()
+    {
+        var pressedFrame = new Rectangle(100, 100, 200, 150);
+
+        // One pixel past the right edge: the user dragged off the preview before releasing.
+        var release = new Point(301, 150);
+
+        Assert.False(PreviewPointerGesture.IsLockedReleaseActivation(pressedFrame, release));
+    }
+
+    [Fact]
+    public void ReleaseExactlyOnTheFrameEdgeFollowsRectangleContains()
+    {
+        var pressedFrame = new Rectangle(100, 100, 200, 150);
+
+        // Rectangle.Contains treats the right/bottom edge as exclusive (Left <= x < Right), so
+        // the top-left corner is in and the bottom-right corner is out. Asserted here rather
+        // than fought, per the pattern this file already follows for degenerate drag sizes.
+        Assert.True(PreviewPointerGesture.IsLockedReleaseActivation(pressedFrame, new Point(100, 100)));
+        Assert.False(PreviewPointerGesture.IsLockedReleaseActivation(pressedFrame, new Point(300, 250)));
+    }
+
+    [Fact]
+    public void AMotionlessPressStillActivatesWhenLocked()
+    {
+        var pressedFrame = new Rectangle(100, 100, 200, 150);
+        var release = new Point(150, 150);
+
+        Assert.True(PreviewPointerGesture.IsLockedReleaseActivation(pressedFrame, release));
+    }
 }
