@@ -208,7 +208,7 @@ Four new `type` strings. Dispatch is first-handler-wins across four controllers
 | web → native | `triffview:clear-combat-log-webhook` | — |
 | web → native | `triffview:test-combat-log-webhook` | — |
 | web → native | `triffview:upload-combat-logs` | `{ fromUtc, toUtc }` |
-| native → web | `triffview:combat-log-upload` | `{ result }` or `{ cancelled }` |
+| native → web | `triffview:combat-log-upload` | `{ result }` |
 | native → web | `triffview:combat-log-webhook` | `{ configured, description, testResult? }` |
 
 **Every inbound message has a terminal outbound reply.** The UI clears its busy
@@ -219,6 +219,22 @@ leaves a button disabled forever. `set`, `clear` and `test` all answer with
 and `test` carries it plus a `testResult` of `{ ok, message }`. Failures on any
 of the four still go out as `triffview:error` with a matching `action`, which is
 the pattern the export path already uses.
+
+**There is no `cancelled` shape on the upload path.** The save path has one
+because its `SaveFileDialog` can be dismissed, and the UI would otherwise leave
+its buttons disabled forever. An upload has no dialog and no user-facing cancel,
+so nothing maps to it: a timeout is a *failed result*, per the status table
+above, not a cancellation. An earlier draft of this table carried `{ cancelled }`
+over from the export path by analogy; that was wrong, and copying it would have
+produced a branch the native side never sends and the UI would never clear.
+
+**Who composes the result.** `UploadAsync`'s parameters carry no knowledge of the
+window, the pilots, or the file counts — it is handed a path and a string. It
+therefore fills only `Succeeded`, `Message`, and `ZipBytes` (measured from the
+file on disk). The subsystem merges the rest in from the `CombatLogExportResult`
+it already holds — `FileCount`, `Characters`, `StartUtc`, `EndUtc`,
+`DroppedFileCount` — before posting. Keeping the uploader ignorant of export
+metadata is what lets it be tested against a fake handler with no export at all.
 
 `triffview:combat-log-upload` is deliberately **not** a reuse of
 `triffview:combat-log-export`. That message's `result.path` is a save location
@@ -345,6 +361,34 @@ Requiring the maintainer, and unexercised until then:
 Note the worktree carries no `native/Assets/overlay-dist.zip`, so an app
 launched from it serves the "missing overlay" page. Any UI check must run
 against a build that has the zip copied in.
+
+## Known testability gaps
+
+Two limits on the automated coverage above, both discovered while planning and
+neither worth widening this change's scope to fix.
+
+**There is no seam for `TriffAlertsService.GamelogsPath`.** TriffSkills and
+TriffFleets both expose an override for their state root; the alerts service does
+not, so a `TriffViewController` under test cannot be pointed at a fixture
+Gamelogs directory. A genuine controller-level success path — real archive, real
+upload, real cleanup — is therefore not writable without either adding that seam
+(which belongs to whoever owns `TriffAlertsService`, not to this feature) or
+depending on whatever EVE logs happen to exist on the machine running CI, which
+is not hermetic.
+
+The compromise: the composed success path is covered by driving
+`CombatLogExport.Export` and `CombatLogUpload.UploadAsync` directly against a
+loopback stub, and controller-level tests cover only the dispatch and error paths
+that need no real logs. That leaves one seam untested — the controller's own
+wiring of export output into upload input — and it is the obvious first thing to
+check by hand.
+
+**Constructing a `TriffViewController` in a test has side effects.** It reads the
+developer's real `%APPDATA%\TriffHud\triffview-settings.json` and installs a real
+`SetWinEventHook`, because `TriffViewSettings` has no injectable override either.
+The existing `TriffFleetsController` tests already accept this, so the pattern is
+precedented rather than new, but it means these tests are not fully isolated from
+the machine they run on.
 
 ## Excluded
 
