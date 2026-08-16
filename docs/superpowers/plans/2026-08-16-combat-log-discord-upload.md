@@ -2,6 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+Status: **implemented**, shipped as v2.1.0. This is a historical planning document,
+not a description of what shipped — it is not kept in sync with the code, and the
+code is authoritative where the two disagree. Known divergences: the success message
+embedded in Task 4/5's snippets as a hardcoded `"Uploaded to Discord."` shipped as a
+caller-supplied parameter instead, and `SuccessfulUpload_SendsExpectedMultipartFraming_AndDeletesTempFiles`
+(Task 3) was later renamed to `SuccessfulUpload_SendsExpectedMultipartFraming` because its
+`finally` deletes both files unconditionally, so the dropped suffix no longer described
+assertion coverage the test actually provides.
+
 **Goal:** Let the combat log export send its archive straight to a configured Discord webhook, instead of only saving a zip the user uploads by hand.
 
 **Architecture:** A new pure-BCL file, `native/TriffAlerts/CombatLogUpload.cs`, validates Discord webhook URLs and performs the multipart POST; it never throws, so every outbound string can be guaranteed redacted. `TriffViewController` gains an injected `ICredentialStore`, stores the webhook URL in Windows Credential Manager beside the EVE refresh tokens, and adds an upload flow that reuses `CombatLogExport.Export` unchanged against a `%TEMP%` path. The existing save-to-disk path is untouched throughout.
