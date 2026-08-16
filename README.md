@@ -65,7 +65,7 @@ TriffAlerts uses EVE log files only. It does not read memory, hook the EVE clien
 
 ### Combat log export
 
-The alerts panel can package the game logs covering a fight into a single zip, ready to upload to Discord for [eve-intel](https://github.com/guarzo/eve-intel) to build an after-action report from.
+The **Combat log export** panel can package the game logs covering a fight into a single zip, ready to upload to Discord for [eve-intel](https://github.com/guarzo/eve-intel) to build an after-action report from.
 
 Because TriffAlerts is already watching for incoming damage and warp scrambles, it knows when your last fight was: hit **Export last fight** and it collects every character's log covering that window, up to 64 files — if more match, the newest are kept and the panel reports how many were left out. Fights from before TriffView was started are not in the alert history, so a UTC time range is there for those.
 
