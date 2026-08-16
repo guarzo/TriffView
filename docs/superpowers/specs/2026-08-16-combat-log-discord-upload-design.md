@@ -59,15 +59,41 @@ what users are asked to send when reporting a problem, and has a backup
 export/restore path that would carry the secret into a file shared even more
 freely.
 
-**It never reaches the web UI.** The state post carries only:
+**It is never sent back out to the web UI.** The guarantee is one-directional,
+and stating it precisely matters because the obvious stronger phrasing is false.
+
+The user types the URL into a React input, so it necessarily exists in web state
+and travels web → native as a WebView2 message, like every other setting in this
+app (`app/src/nativeBridge.js:8-11`, `MainWindow.xaml.cs:648-650`). That leg is
+unavoidable without a separate native dialog for one field — which was
+considered and rejected: it would be the only non-React setting in the app, and
+the leg it removes is in-process, on the user's own machine, under their own
+session. That is not a boundary this app can defend, and pretending otherwise
+buys inconsistency for no security.
+
+What *is* guaranteed is the return leg. Once stored, the secret is never
+serialized back. The state post carries only:
 
 ```json
 "combatLogWebhook": { "configured": true, "description": "discord.com/api/webhooks/1234…" }
 ```
 
-Both fields are derived from the credential store at post time. The token
-segment is never serialized, so it cannot appear in a WebView2 message, a
-DevTools network pane, or a screenshot of the settings window.
+Both fields are derived from the credential store at post time, with the token
+segment omitted. So the stored secret cannot appear in a state post, a saved
+settings file, a diagnostics entry, an error message, or a screenshot of the
+settings window — which is the set of places it would realistically escape from.
+The web UI clears its input on a successful save, so it does not sit in the DOM
+after it has been handed over.
+
+**Reading it must not be able to break startup.** `Start()` calls `PostState()`
+directly and unprotected (`TriffViewSubsystem.cs:99`), and `ICredentialStore.Read`
+throws for every Win32 failure other than "not found"
+(`native/Eve/EveCredentialStore.cs:22-43`). An unavailable or corrupted
+credential store would therefore take down app startup on a code path that has
+nothing to do with combat logs. The read is wrapped: any failure resolves to
+`configured: false` plus a diagnostics-log warning, never an exception. A user
+whose credential store is broken gets a webhook that appears unconfigured, which
+is recoverable, rather than an app that will not start.
 
 **It never reaches an error message.** `PostError` posts `ex.Message` straight
 through to the UI (`TriffViewSubsystem.cs:2088`), and `HttpRequestException` and
@@ -150,9 +176,14 @@ returns leaves the tab permanently dead with no way out. A bounded timeout that
 always terminates in a reportable error is what prevents that.
 
 **Orphaned temporaries.** If the process dies between step 3 and step 6, a zip
-of game logs is left in `%TEMP%`. On startup, files matching
-`triffview-fight-*.zip` in the temp directory older than a day are deleted,
-best-effort and non-fatal.
+of game logs is left in `%TEMP%`. Two shapes have to be swept, not one:
+`Export` compresses into `<destination>.<guid>.tmp` and only then moves it into
+place (`CombatLogExport.cs:208-233`), so a death *during* compression leaves the
+staging file rather than the finished archive. On startup, both
+`triffview-fight-*.zip` and `triffview-fight-*.zip.*.tmp` in the temp directory,
+older than a day, are deleted — best-effort and non-fatal. Sweeping only the
+first glob would leave the privacy-sensitive artifact behind indefinitely in
+exactly the case where the app crashed.
 
 ## Message contract
 
@@ -166,6 +197,16 @@ Four new `type` strings. Dispatch is first-handler-wins across four controllers
 | web → native | `triffview:test-combat-log-webhook` | — |
 | web → native | `triffview:upload-combat-logs` | `{ fromUtc, toUtc }` |
 | native → web | `triffview:combat-log-upload` | `{ result }` or `{ cancelled }` |
+| native → web | `triffview:combat-log-webhook` | `{ configured, description, testResult? }` |
+
+**Every inbound message has a terminal outbound reply.** The UI clears its busy
+flag on a terminal result or error and nothing else
+(`app/src/tools/TriffViewSettings.jsx:1282-1288`), so a command with no reply
+leaves a button disabled forever. `set`, `clear` and `test` all answer with
+`triffview:combat-log-webhook`: the first two carry the new configured state,
+and `test` carries it plus a `testResult` of `{ ok, message }`. Failures on any
+of the four still go out as `triffview:error` with a matching `action`, which is
+the pattern the export path already uses.
 
 `triffview:combat-log-upload` is deliberately **not** a reuse of
 `triffview:combat-log-export`. That message's `result.path` is a save location
@@ -189,12 +230,24 @@ static class DiscordWebhook
 
 sealed class CombatLogUploadResult
     bool Succeeded; string Message; int FileCount; long ZipBytes;
-    DateTime StartUtc; DateTime EndUtc; IReadOnlyList<string> Characters
+    DateTime StartUtc; DateTime EndUtc; IReadOnlyList<string> Characters;
+    int DroppedFileCount
 
 static class CombatLogUpload
     Task<CombatLogUploadResult> UploadAsync(
         HttpClient http, Uri webhook, string zipPath, string content, CancellationToken ct)
 ```
+
+`DroppedFileCount` carries through from `CombatLogExportResult` and **is
+reported on success**, not only on failure. `CombatLogExport.cs:60-67` gives the
+reason in its own words: an export that quietly covered only part of a window
+would read as complete coverage in the resulting AAR. That reasoning is stronger
+on this path than on the save path. A saved zip passes through a human who saw
+the panel's warning before uploading it; an uploaded one lands directly in a
+channel where someone builds an after-action report from it, having never seen
+this app's UI. So a successful upload that dropped files says so in the same
+message that reports the success, and the `content` line posted to Discord names
+the count too — the warning has to reach the channel, not just the operator.
 
 The POST is `multipart/form-data` with `payload_json` carrying the `content`
 string the caller passed and `files[0]` carrying the archive under its suggested
@@ -224,14 +277,18 @@ code tells the user nothing about what to do:
 
 `app/src/tools/CombatLogExport.jsx` gains a **Discord destination** block above
 the two existing export paths: a masked input, Save / Clear / Send test, and the
-redacted `description` once configured. **Send test** posts a text-only message
-so the user finds out the webhook works before a fight they cared about fails to
+redacted `description` once configured. The input is cleared on a successful
+save, so the secret does not linger in React state or the DOM after it has been
+handed to the credential store. **Send test** posts a text-only message so the
+user finds out the webhook works before a fight they cared about fails to
 upload.
 
 Each existing path gains an **Upload to Discord** button beside its Export
 button, disabled when no webhook is configured or a run is in flight. A separate
 `combatLogUpload` state object holds upload result, error and busy, so the two
-statuses do not overwrite each other.
+statuses do not overwrite each other. A successful upload that dropped files at
+the 64-file cap reports that alongside the success, in the wording the export
+path already uses.
 
 ## Documentation
 
@@ -255,8 +312,17 @@ rather than asserted:
 - `npm run build` in `app/`
 - validator accept/reject table, redaction, multipart framing and status
   mapping, against a fake `HttpMessageHandler`
+- a dropped-file count survives from `CombatLogExportResult` into a **successful**
+  upload result and into the posted `content` line
+- a credential store that throws on read resolves to `configured: false` rather
+  than propagating, using the existing `MemoryCredentials` fake's `FailRead`
+  (`native/TriffView.Tests/ControllerLifecycleTests.cs:303`)
+- the new credential target neither matches nor nests inside the TriffSkills or
+  TriffFleets prefixes, extending the assertion at
+  `native/TriffView.Tests/OAuthLoopbackTests.cs:45`
 - one end-to-end upload against a **local stub HTTP server**, proving multipart
-  framing and that the temporary zip is deleted on both success and failure
+  framing and that both the finished archive and the `.tmp` staging file are
+  deleted on success and on failure
 
 Requiring the maintainer, and unexercised until then:
 
