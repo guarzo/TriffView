@@ -1,7 +1,8 @@
 # Combat log export as its own section tab
 
 Date: 2026-08-15
-Status: **designed, approved — not yet implemented**
+Status: **implemented** on `feat/combat-log-export-tab` — the Windows manual
+checks in *Verification* below remain unexercised.
 
 ## Outcome
 
@@ -12,6 +13,34 @@ extracted into its own component file.
 
 Nothing about what the feature *does* changes. No native code, no message
 contract, no settings schema.
+
+**Follow-on, designed separately after this spec was approved:** the same
+branch also adds *Last 1 hour* / *Last 2 hours* quick-range buttons to the Time
+range card. They prefill the two UTC range fields and start no export — the
+existing Export range button remains the only way to run one. That is a
+behavior addition this document did not design, recorded here so the spec does
+not contradict the branch; the reasoning lives in the section below.
+
+## Quick-range buttons (follow-on)
+
+Added after the tab move was implemented, under its own bounded design rather
+than this one. Recorded here because a reader of the branch would otherwise
+find a spec claiming nothing behavioral changed.
+
+The buttons compute a UTC window ending now and populate the range fields; the
+user then presses Export range. They deliberately do **not** export on click:
+a two-hour window across several characters is exactly the case that hits the
+64-file cap and Discord's 10MB limit, so seeing and trimming the window before
+committing is worth the extra click. Firing an expensive zip from a single
+click while implying the fields are still editable would be the worst of both.
+
+The window end rounds **up** to the next minute. The fields are minute-granular,
+so truncating "now" would exclude anything logged in the current partial minute
+— the tail of a fight that just ended, which is the case these buttons exist
+for. Every accessor is `getUTC*`, so the machine's timezone cannot shift the
+window, and the emitted `YYYY-MM-DD HH:MM` matches both the field placeholder
+and what the native `DateTime.TryParse(InvariantCulture, AssumeUniversal)`
+accepts — so this needed no native change either.
 
 ## Why
 

@@ -6,6 +6,8 @@
 
 **Architecture:** Five independent changes in `app/` only. The panel body is extracted to its own component while staying in place, the shared section nav is made scrollable, the component is then moved to a new section tab, the panel is reflowed with a container query, and the README is corrected. No native code, no WebView2 message contract, no settings schema.
 
+**Scope note:** the branch carries one further commit that this plan did not cover — quick 1h/2h range buttons, designed separately after all five tasks below were complete and reviewed. See *Follow-on* at the end of this document. Tasks 1-5 below are the record of what was actually executed, in order, and are deliberately left as they were written.
+
 **Tech Stack:** React 18, Vite 6, plain CSS. No test runner in `app/`.
 
 **Spec:** `docs/superpowers/specs/2026-08-15-combat-log-export-tab-design.md`
@@ -577,8 +579,10 @@ Expected: `✓ built in …`, no errors.
 
 - [ ] **Step 4: Confirm the dead breakpoint is gone**
 
-Run: `cd app && grep -n "max-width: 620px" src/styles.css`
+Run: `cd app && grep -n "@media (max-width: 620px)" src/styles.css`
 Expected: no output. A hit means the viewport media query survived and the container query was added alongside it rather than replacing it.
+
+The pattern must include `@media`. Grepping for `max-width: 620px` alone also matches the *new* `@container (max-width: 620px)` rule, which is correct and expected to be there — so the bare pattern reports a false failure.
 
 - [ ] **Step 5: Manual check on Windows**
 
@@ -648,3 +652,38 @@ After all five tasks, on Windows:
 
 Run: `git status --short`
 Expected: clean. If `app/package-lock.json` appears, revert it — see Global Constraints.
+
+---
+
+## Follow-on: quick 1h/2h range buttons
+
+Not part of Tasks 1-5. Added afterwards, once all five had landed and been
+reviewed, under its own bounded design. Recorded here so the branch and this
+document agree; Task 4's steps above are left exactly as executed rather than
+back-filled, because a reader replaying Task 4 should get the commit that
+actually exists.
+
+**Delivered** in `ec5869f`, touching `app/src/tools/CombatLogExport.jsx` and
+`app/src/styles.css` only:
+
+- A "Quick range:" row in the Time range card with *Last 1 hour* and *Last 2
+  hours*. Both call `onRangeChange` to populate the two UTC fields and **start
+  no export** — the existing Export range button stays the only way to run one.
+  Both disable while `exportState.busy`.
+- `formatUtcInput(date)` emits `YYYY-MM-DD HH:MM` from `getUTC*` accessors,
+  matching the field placeholder and the native
+  `DateTime.TryParse(InvariantCulture, AssumeUniversal)` parser — so no native
+  change was needed.
+- `quickRange(hours)` rounds the window end up to the next minute, because the
+  fields are minute-granular and truncating "now" would drop the tail of a
+  fight that just ended.
+- The two path headings moved from `<h4>` to `<h3>` (they sit under the section
+  `<h2>`), with `.triff-combat-export-path h4` renamed to match.
+
+**Verification actually performed:** `npm run build` passed, and the window
+arithmetic was exercised directly through node — mid-minute round-up,
+exact-minute boundary, and rollover across midnight, month, and year all
+produced correct UTC windows. The Windows checks above still apply, plus:
+click each quick button and confirm the fields fill with correct UTC values,
+then run one export over a quick range to prove the format parses end to end.
+
