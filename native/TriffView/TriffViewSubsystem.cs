@@ -176,11 +176,13 @@ internal sealed class TriffViewController : IDisposable
     }
 
     /// <summary>
-    /// Recomputes the cached { configured, description } pair. Called once from
-    /// Start() and again only when a set or clear succeeds -- PostState runs from
-    /// the 700ms periodic refresh and the 100ms post-switch timer, and a CredRead
-    /// P/Invoke on that path would run several times a minute forever to answer a
-    /// question whose answer changes only when the user edits it.
+    /// Recomputes the cached { configured, description } pair. Called from Start()
+    /// and otherwise only in response to a user action that changes or discovers
+    /// this state (setting, clearing, or finding the stored credential gone) --
+    /// never from PostState, which runs from the 700ms periodic refresh and the
+    /// 100ms post-switch timer, and a CredRead P/Invoke on that path would run
+    /// several times a minute forever to answer a question whose answer changes
+    /// only when the user edits it.
     /// </summary>
     private void RefreshCombatLogWebhookState()
     {
@@ -1334,6 +1336,11 @@ internal sealed class TriffViewController : IDisposable
                 // Without this the UI keeps offering a webhook it has just been told
                 // does not exist. Cheap here -- unlike PostState, this runs only when
                 // the user presses the button.
+                //
+                // State post must precede the error post: the web handler for
+                // triffview:combat-log-webhook clears the displayed error as a side
+                // effect of applying the state update, so posting PostError first
+                // would have it wiped out the moment the state message lands.
                 RefreshCombatLogWebhookState();
                 PostCombatLogWebhookState();
                 PostError("test-combat-log-webhook", "Configure a Discord webhook first.");
@@ -1489,7 +1496,9 @@ internal sealed class TriffViewController : IDisposable
             {
                 // See TestCombatLogWebhook: the cached pair can outlive the
                 // credential it describes, and the UI would otherwise keep the
-                // upload button enabled against a webhook that is gone.
+                // upload button enabled against a webhook that is gone. Same
+                // ordering requirement applies -- state post before error post,
+                // or the web handler's error-clearing side effect wins.
                 RefreshCombatLogWebhookState();
                 PostCombatLogWebhookState();
                 PostError("upload-combat-logs", "Configure a Discord webhook first.");
