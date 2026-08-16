@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 using System.IO;
 using System.Net.Http;
 using System.Runtime.InteropServices;
@@ -82,7 +83,17 @@ internal sealed class TriffViewController : IDisposable
         _applySettingsAlwaysOnTop = applySettingsAlwaysOnTop;
         _credentials = credentials ?? new WindowsCredentialStore();
         _alerts = new TriffAlertsService(gamelogsPath);
-        _combatLogUploadHttp = combatLogUploadHttp ?? new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        // Infinite Timeout because the 120s bound is applied per-request through a
+        // CancellationToken (CombatLogUpload.UploadTimeoutSeconds) -- HttpClient's own
+        // timeout would cancel the whole request without distinguishing the upload
+        // from anything else. PooledConnectionLifetime because this client lives for
+        // the process: on the default handler a pooled connection is never recycled,
+        // so a discord.com DNS change would not be picked up until the app restarts.
+        _combatLogUploadHttp = combatLogUploadHttp ?? new HttpClient(
+            new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(2) })
+        {
+            Timeout = Timeout.InfiniteTimeSpan,
+        };
         _foregroundWinEventProc = OnForegroundWinEvent;
         Settings = TriffViewSettings.Load();
         _overlay = new TriffViewOverlayForm();
@@ -1290,6 +1301,11 @@ internal sealed class TriffViewController : IDisposable
         }
         catch (Exception ex)
         {
+            // The one outbound string on this feature that is not passed through
+            // DiscordWebhook.Redact, deliberately: no Uri has been read here to
+            // redact against, and a CredDelete failure names the credential target
+            // ("TriffView.CombatLogExport.DiscordWebhook") rather than the value
+            // stored under it, so the message cannot carry the token.
             PostError("clear-combat-log-webhook", ex.Message);
             return;
         }
@@ -1300,38 +1316,61 @@ internal sealed class TriffViewController : IDisposable
 
     private async void TestCombatLogWebhook()
     {
-        var webhook = ReadCombatLogWebhook();
-        if (webhook == null)
-        {
-            PostError("test-combat-log-webhook", "Configure a Discord webhook first.");
-            return;
-        }
-
-        CombatLogUploadResult result;
+        // Hoisted out of the try so the outer catch can redact against it, the same
+        // way UploadCombatLogs does.
+        Uri? webhook = null;
+        // The whole body is wrapped, in the shape QueuePeriodicRefresh uses: every
+        // post below can throw if the WebView is torn down between the _disposed
+        // check and the post itself, and an unhandled throw out of an async void
+        // method reaches the thread pool and takes the process with it. Nothing is
+        // reported to the UI from the outer catch -- posting is what just failed.
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(CombatLogUpload.UploadTimeoutSeconds));
-            result = await CombatLogUpload.SendTestAsync(_combatLogUploadHttp, webhook, cts.Token);
+            webhook = ReadCombatLogWebhook();
+            if (webhook == null)
+            {
+                // The cached pair can outlive the credential it describes (deleted in
+                // Credential Manager, store unreadable, stored value no longer valid).
+                // Without this the UI keeps offering a webhook it has just been told
+                // does not exist. Cheap here -- unlike PostState, this runs only when
+                // the user presses the button.
+                RefreshCombatLogWebhookState();
+                PostCombatLogWebhookState();
+                PostError("test-combat-log-webhook", "Configure a Discord webhook first.");
+                return;
+            }
+
+            CombatLogUploadResult result;
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(CombatLogUpload.UploadTimeoutSeconds));
+                result = await CombatLogUpload.SendTestAsync(_combatLogUploadHttp, webhook, cts.Token);
+            }
+            catch (Exception ex)
+            {
+                // SendTestAsync is documented to return a failed result rather than
+                // throw for any classifiable HTTP or transport outcome
+                // (CombatLogUpload.cs). Reaching this catch means the test genuinely
+                // ran and hit something unclassifiable -- that is still an outcome of
+                // the attempt, not a pre-flight refusal, so it is reported through
+                // testResult like every other outcome, never through PostError.
+                if (_disposed) return;
+                PostCombatLogWebhookState(new { ok = false, message = DiscordWebhook.Redact(ex.Message, webhook) });
+                return;
+            }
+
+            if (_disposed) return;
+            // Only "no webhook configured" above is a pre-flight refusal (PostError).
+            // Everything past that point is an outcome of a test that actually ran,
+            // successful or not, and is reported through testResult -- mirrors the
+            // same split UploadCombatLogs uses for PostError vs. result.succeeded.
+            PostCombatLogWebhookState(new { ok = result.Succeeded, message = result.Message });
         }
         catch (Exception ex)
         {
-            // SendTestAsync is documented to return a failed result rather than
-            // throw for any classifiable HTTP or transport outcome
-            // (CombatLogUpload.cs). Reaching this catch means the test genuinely
-            // ran and hit something unclassifiable -- that is still an outcome of
-            // the attempt, not a pre-flight refusal, so it is reported through
-            // testResult like every other outcome, never through PostError.
-            if (_disposed) return;
-            PostCombatLogWebhookState(new { ok = false, message = DiscordWebhook.Redact(ex.Message, webhook) });
-            return;
+            var message = webhook == null ? ex.Message : DiscordWebhook.Redact(ex.Message, webhook);
+            TriffViewDiagnostics.Log("combat-log-webhook", $"Reporting the webhook test failed: {message}");
         }
-
-        if (_disposed) return;
-        // Only "no webhook configured" above is a pre-flight refusal (PostError).
-        // Everything past that point is an outcome of a test that actually ran,
-        // successful or not, and is reported through testResult -- mirrors the
-        // same split UploadCombatLogs uses for PostError vs. result.succeeded.
-        PostCombatLogWebhookState(new { ok = result.Succeeded, message = result.Message });
     }
 
     private void PostCombatLogWebhookState(object? testResult = null)
@@ -1448,6 +1487,11 @@ internal sealed class TriffViewController : IDisposable
             webhook = ReadCombatLogWebhook();
             if (webhook == null)
             {
+                // See TestCombatLogWebhook: the cached pair can outlive the
+                // credential it describes, and the UI would otherwise keep the
+                // upload button enabled against a webhook that is gone.
+                RefreshCombatLogWebhookState();
+                PostCombatLogWebhookState();
                 PostError("upload-combat-logs", "Configure a Discord webhook first.");
                 return;
             }
@@ -1465,6 +1509,9 @@ internal sealed class TriffViewController : IDisposable
 
             if (result.ExceedsDiscordLimit)
             {
+                // Same post-await disposal check every other branch here makes: the
+                // compression this refusal follows can outlive a shutdown.
+                if (_disposed) return;
                 PostError(
                     "upload-combat-logs",
                     $"That archive is {result.ZipBytes / (1024.0 * 1024.0):F1} MB, over Discord's 10 MB limit. " +
@@ -1549,7 +1596,14 @@ internal sealed class TriffViewController : IDisposable
     {
         var pilots = result.Characters.Count;
         var pilotWord = pilots == 1 ? "pilot" : "pilots";
-        var line = $"TriffView combat log: {result.StartUtc:yyyy-MM-dd HH:mm}Z to {result.EndUtc:yyyy-MM-dd HH:mm}Z, {pilots} {pilotWord}.";
+        // Invariant culture because this string leaves the machine: under a default
+        // non-Gregorian calendar (th-TH, ar-SA) the year would render in that
+        // calendar, and the UTC window is what whoever builds the after-action
+        // report from the channel reads the fight back out of.
+        var line = string.Format(
+            CultureInfo.InvariantCulture,
+            "TriffView combat log: {0:yyyy-MM-dd HH:mm}Z to {1:yyyy-MM-dd HH:mm}Z, {2} {3}.",
+            result.StartUtc, result.EndUtc, pilots, pilotWord);
         if (result.DroppedFileCount > 0)
         {
             line += $" {result.DroppedFileCount} additional matching log file(s) were not included (64-file cap).";
