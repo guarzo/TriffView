@@ -1,5 +1,6 @@
 using System.Text;
 using TriffView.Eve;
+using TriffView.Preview;
 using TriffView.TriffFleets;
 using TriffView.TriffSkills;
 using Xunit;
@@ -45,6 +46,15 @@ public class OAuthLoopbackTests
         Assert.NotEqual(TriffSkillsAuthentication.CredentialPrefix, TriffFleetsController.CredentialPrefix);
         Assert.DoesNotContain(TriffSkillsAuthentication.CredentialPrefix, TriffFleetsController.CredentialPrefix, StringComparison.Ordinal);
         Assert.DoesNotContain(TriffFleetsController.CredentialPrefix, TriffSkillsAuthentication.CredentialPrefix, StringComparison.Ordinal);
+
+        // TriffViewController.CombatLogWebhookCredentialTarget is a single exact
+        // target rather than a per-character prefix, but the same hazard applies:
+        // a prefix collision would let one subsystem's cleanup sweep (or
+        // EnumerateTargets scan) delete another subsystem's secret.
+        Assert.DoesNotContain(TriffSkillsAuthentication.CredentialPrefix, TriffViewController.CombatLogWebhookCredentialTarget, StringComparison.Ordinal);
+        Assert.DoesNotContain(TriffFleetsController.CredentialPrefix, TriffViewController.CombatLogWebhookCredentialTarget, StringComparison.Ordinal);
+        Assert.DoesNotContain(TriffViewController.CombatLogWebhookCredentialTarget, TriffSkillsAuthentication.CredentialPrefix, StringComparison.Ordinal);
+        Assert.DoesNotContain(TriffViewController.CombatLogWebhookCredentialTarget, TriffFleetsController.CredentialPrefix, StringComparison.Ordinal);
     }
 
     [Fact]
