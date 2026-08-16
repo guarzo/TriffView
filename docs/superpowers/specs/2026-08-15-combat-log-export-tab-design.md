@@ -103,16 +103,17 @@ component (`:137`), `formatUtcWindow` (`:557`), and `formatBytes` (`:564`).
 Implementing the prop interface above without addressing them does not compile.
 They are handled as follows:
 
-- `Field` — exported from `TriffViewSettings.jsx` and imported by the new
-  component. It is a generic label/children wrapper used by ten call sites
-  across the file; duplicating it would be worse than exporting it.
+- `Field` — **moved** to its own module, `app/src/tools/Field.jsx`, and imported
+  by both files. Exporting it from `TriffViewSettings.jsx` instead would create
+  an import cycle, since that file imports the new component. It is a seven-line
+  label wrapper with six call sites remaining in the host, so duplicating it is
+  not an option either.
 - `formatUtcWindow` and `formatBytes` — **moved** into `CombatLogExport.jsx`.
-  Both are used only by the block being extracted; verify this before moving,
-  and if another section has picked up a call site, export from the host
-  instead of moving.
-
-Moving a helper that turns out to have a second caller is the one way this step
-breaks the build, so the check is part of the step, not an afterthought.
+  Both are called only from the block being extracted (`:1833`, `:1883`), so the
+  move is safe. `formatUtcTime` (`:548`) moves with them: `formatUtcWindow` is
+  its only caller, and its comment explaining why the display is UTC travels
+  with it. `EveSettings.tsx:98` defines an unrelated `formatBytes` of its own;
+  leave it alone.
 
 This is a deliberate departure from the file's convention — every other section
 is inline. The trade was weighed and the size of the host file won. It is not a
@@ -189,7 +190,7 @@ The two-column grid therefore uses a **container query** on the panel, not a
 viewport media query:
 
 ```css
-.triff-combat-export-paths {
+.triff-combat-export {
   container-type: inline-size;
 }
 
@@ -200,12 +201,15 @@ viewport media query:
 }
 ```
 
-Container queries are supported in the WebView2 runtime this app targets
-(Chromium 105+); confirm against the runtime actually installed before relying
-on it. If that check fails, the fallback is a viewport media query at a
-breakpoint derived from the real panel width — `max-width: 1180px`, i.e. 620px
-of panel plus the 259px of chrome and 301px of margin — which is uglier but
-works. Do not silently keep the 620px viewport figure; it is the bug.
+Note the container and the query target must be **different** elements: an
+element cannot respond to a container query on itself. The container is the
+panel wrapper; the target is the grid inside it.
+
+Container queries are supported in the WebView2 runtime this app targets — the
+SDK is pinned at `1.0.2792.45` (`native/TriffView.csproj:27`), Chromium ~127,
+comfortably past the Chromium 105 floor. No runtime probe is needed.
+
+Do not silently keep the 620px viewport figure; it is the bug.
 
 The existing dead rule on `.triff-combat-export-range` is replaced as part of
 this work rather than left behind.
@@ -249,8 +253,6 @@ automated tests for this change. Verification is:
   the eight tabs plus the four action controls is reachable, and the two export
   paths have collapsed to one column. This is where the two layout findings
   land, and the default 1120x780 window will not show either of them.
-- Container query support in the installed WebView2 runtime, before relying on
-  it.
 
 **The manual half cannot be run from WSL** — this project does not build or run
 there. Any claim about appearance or runtime behavior is unverified until
@@ -269,7 +271,8 @@ Two things could regress beyond this feature's own surface:
   tab, not just this one. It is one property on one selector, and the current
   behavior at minimum height is clipping, but it is the only edit here with
   blast radius outside the new panel.
-- Moving `formatUtcWindow` or `formatBytes` breaks the build if either has a
-  caller outside the extracted block.
+- `Field` moves out of the host file, and it is used by Profile settings and
+  Preview layout as well. A mistake there surfaces in sections this feature
+  does not otherwise touch, so the verification walks every tab.
 
 Both are caught by the verification above.
