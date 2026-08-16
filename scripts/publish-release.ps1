@@ -16,7 +16,9 @@ param(
   [switch]$SkipDefenderScan,
   [switch]$SkipWebBuild,
   [switch]$CompressSingleFile,
-  [switch]$NoCompression
+  [switch]$NoCompression,
+  [string]$Version = "",
+  [string]$UpdateRepository = ""
 )
 
 Set-StrictMode -Version Latest
@@ -39,6 +41,30 @@ if ($CompressSingleFile -and $NoCompression) {
   throw "Use either -CompressSingleFile or -NoCompression, not both."
 }
 $enableCompression = if ($CompressSingleFile -and -not $NoCompression) { "true" } else { "false" }
+
+$extraPublishArgs = @()
+if (-not [string]::IsNullOrWhiteSpace($UpdateRepository)) {
+  $extraPublishArgs += "-p:UpdateRepository=$UpdateRepository"
+}
+if (-not [string]::IsNullOrWhiteSpace($Version)) {
+  $versionTrimmed = $Version.Trim()
+  if ($versionTrimmed.StartsWith("v")) {
+    $versionTrimmed = $versionTrimmed.Substring(1)
+  }
+  if ($versionTrimmed -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Version must be three dot-separated integers (optionally prefixed with 'v'), got: $Version"
+  }
+  $fileVersion = "$versionTrimmed.0"
+  # The csproj pins all four version properties explicitly, so the SDK's "derive from $(Version)"
+  # defaults never apply and a command-line -p:Version= alone reaches none of them. Each must be
+  # passed by name. InformationalVersion is the load-bearing one: it is the only property the
+  # update check reads (TriffViewUpdateChecker.ReadCurrentVersion). The other three are passed so
+  # the exe's file properties don't disagree with the release it came from.
+  $extraPublishArgs += "-p:Version=$versionTrimmed"
+  $extraPublishArgs += "-p:InformationalVersion=$versionTrimmed"
+  $extraPublishArgs += "-p:AssemblyVersion=$fileVersion"
+  $extraPublishArgs += "-p:FileVersion=$fileVersion"
+}
 
 function New-Directory($path) {
   New-Item -ItemType Directory -Force -Path $path | Out-Null
@@ -244,6 +270,7 @@ if (Test-PackageMode "PortableZip") {
     -p:PublishSingleFile=false `
     -p:DebugType=embedded `
     -p:PublishReadyToRun=false `
+    @extraPublishArgs `
     -o $portablePublishDir
   Assert-NativeSuccess "dotnet publish portable"
 
@@ -285,6 +312,7 @@ if (Test-PackageMode "SingleFile") {
     -p:EnableCompressionInSingleFile=$enableCompression `
     -p:DebugType=embedded `
     -p:PublishReadyToRun=false `
+    @extraPublishArgs `
     -o $singleFilePublishDir
   Assert-NativeSuccess "dotnet publish single-file"
 

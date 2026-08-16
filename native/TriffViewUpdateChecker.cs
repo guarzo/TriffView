@@ -10,8 +10,11 @@ namespace TriffView;
 
 internal sealed class TriffViewUpdateChecker
 {
-    public const string ReleasesPageUrl = "https://github.com/NarcisussX/TriffView/releases";
-    private const string LatestReleaseApiUrl = "https://api.github.com/repos/NarcisussX/TriffView/releases/latest";
+    public const string DefaultUpdateRepository = "NarcisussX/TriffView";
+
+    public static readonly string UpdateRepository = ResolveUpdateRepository();
+    public static readonly string ReleasesPageUrl = BuildReleasesPageUrl(UpdateRepository);
+    private static readonly string LatestReleaseApiUrl = BuildLatestReleaseApiUrl(UpdateRepository);
     private const string UserAgent = "TriffView/1.0 (+https://triff.tools)";
     private static readonly HttpClient Http = new()
     {
@@ -122,6 +125,42 @@ internal sealed class TriffViewUpdateChecker
         if (!string.IsNullOrWhiteSpace(informational)) return informational.Trim();
         return assembly.GetName().Version?.ToString(3) ?? "0.0.0";
     }
+
+    private static string ResolveUpdateRepository()
+    {
+        try
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            var metadata = assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+                .FirstOrDefault(attribute => attribute.Key == "UpdateRepository");
+            return NormalizeRepositorySlug(metadata?.Value);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Failed to resolve update repository: {ex}");
+            return DefaultUpdateRepository;
+        }
+    }
+
+    public static string NormalizeRepositorySlug(string? slug)
+    {
+        if (string.IsNullOrWhiteSpace(slug)) return DefaultUpdateRepository;
+
+        var trimmed = slug.Trim().Trim('/');
+        var segments = trimmed.Split('/');
+        if (segments.Length != 2 || string.IsNullOrWhiteSpace(segments[0]) || string.IsNullOrWhiteSpace(segments[1]))
+        {
+            return DefaultUpdateRepository;
+        }
+
+        return $"{segments[0]}/{segments[1]}";
+    }
+
+    public static string BuildReleasesPageUrl(string? slug) =>
+        $"https://github.com/{NormalizeRepositorySlug(slug)}/releases";
+
+    public static string BuildLatestReleaseApiUrl(string? slug) =>
+        $"https://api.github.com/repos/{NormalizeRepositorySlug(slug)}/releases/latest";
 
     private static int CompareVersionStrings(string left, string right)
     {
