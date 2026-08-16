@@ -1074,6 +1074,7 @@ function TriffViewSettings({ open = true }) {
     ["layout", "Preview layout"],
     ["colors", "Color settings"],
     ["alerts", "Alerts"],
+    ["combat-logs", "Combat log export"],
     ["hotkeys", "Character Hotkeys"],
     ["cycles", "Cycle Groups and Hotkeys"],
     ["clients", "Client management"],
@@ -1785,13 +1786,6 @@ function TriffViewSettings({ open = true }) {
               <p className="triffview-muted">No alerts in this session yet.</p>
             )}
           </div>
-          <CombatLogExport
-            lastFight={lastFight}
-            exportState={combatLogExport}
-            range={combatLogRange}
-            onRangeChange={setCombatLogRange}
-            onExport={exportCombatLogs}
-          />
           <SliderControl
             label="Master volume"
             min={0}
@@ -1800,6 +1794,18 @@ function TriffViewSettings({ open = true }) {
             unit="%"
             value={Math.round((alerts.masterVolume ?? 0.75) * 100)}
             onCommit={(value) => patchAlerts({ masterVolume: value / 100 })}
+          />
+        </div>
+        ) : null}
+
+        {activeSection === "combat-logs" ? (
+        <div className="triffview-panel">
+          <CombatLogExport
+            lastFight={lastFight}
+            exportState={combatLogExport}
+            range={combatLogRange}
+            onRangeChange={setCombatLogRange}
+            onExport={exportCombatLogs}
           />
         </div>
         ) : null}
