@@ -78,6 +78,28 @@ public class CombatLogUploadWebhookTests
         Assert.Null(credentials.Stored(TriffViewController.CombatLogWebhookCredentialTarget));
     }
 
+    [Fact]
+    public void SetCombatLogWebhookStoresAValidUrlAndRepliesWithARedactedDescription()
+    {
+        var messages = new ConcurrentQueue<string>();
+        var credentials = new MemoryCredentials();
+        using var controller = Controller(credentials, messages);
+
+        controller.HandleWebMessage(
+            "triffview:set-combat-log-webhook",
+            JsonNode.Parse("""{"url":"https://discord.com/api/webhooks/1234/sekrit-token-value"}""")!.AsObject());
+
+        Assert.True(SpinWait.SpinUntil(
+            () => messages.Any(json => json.Contains("\"type\":\"triffview:combat-log-webhook\"", StringComparison.Ordinal)),
+            TimeSpan.FromSeconds(5)));
+        var reply = messages.First(json => json.Contains("\"type\":\"triffview:combat-log-webhook\"", StringComparison.Ordinal));
+        Assert.Contains("\"configured\":true", reply, StringComparison.Ordinal);
+        Assert.DoesNotContain("sekrit-token-value", reply, StringComparison.Ordinal);
+        Assert.Equal(
+            "https://discord.com/api/webhooks/1234/sekrit-token-value",
+            credentials.Stored(TriffViewController.CombatLogWebhookCredentialTarget));
+    }
+
     private static TriffViewController Controller(MemoryCredentials credentials, ConcurrentQueue<string> messages)
     {
         return new TriffViewController(
