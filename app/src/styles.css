@@ -3063,29 +3063,53 @@ button:disabled {
   border-left-color: var(--tv-accent);
 }
 
-.triff-combat-export-window {
-  margin: 0;
-  color: var(--tv-text);
-  font-size: 11px;
+.triff-combat-export {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
-.triff-combat-export-actions {
+.triff-combat-export-paths {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+/* The container is `.triff-combat-export`, the query target is its descendant
+   `.triff-combat-export-paths`. An element cannot respond to a container query
+   on itself, so these must be two different elements. */
+@container (max-width: 620px) {
+  .triff-combat-export-paths {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.triff-combat-export-path {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
+  border: 1px solid var(--tv-border-soft);
+  padding: 12px;
+}
+
+.triff-combat-export-path h4 {
+  margin: 0;
+  color: var(--tv-text-strong);
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .triff-combat-export-range {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 8px;
   align-items: end;
 }
 
-@media (max-width: 620px) {
-  .triff-combat-export-range {
-    grid-template-columns: 1fr;
-  }
+.triff-combat-export-status {
+  min-height: 46px;
 }
 
 .triff-combat-export-result,

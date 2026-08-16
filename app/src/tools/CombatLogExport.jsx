@@ -30,81 +30,96 @@ function formatBytes(value) {
 
 function CombatLogExport({ lastFight, exportState, range, onRangeChange, onExport }) {
   return (
-    <div className="triffview-subsection">
-      <div className="triff-alert-history-head">
-        <h4>Combat log export</h4>
-      </div>
+    <div className="triff-combat-export">
       <p className="triffview-muted">
         Packages the EVE game logs covering a fight into a zip you can upload to Discord for
         eve-intel. Game logs only, copied as-is, plus a small manifest listing your characters.
         Chat logs are never included.
       </p>
-      {lastFight ? (
-        <p className="triff-combat-export-window">
-          Last fight <strong>{formatUtcWindow(lastFight.startUtc, lastFight.endUtc)}</strong>
-          {lastFight.characters?.length ? ` - ${lastFight.characters.join(", ")}` : ""}
-        </p>
-      ) : (
-        <p className="triffview-muted">
-          No fight detected yet. Alerts must be enabled, and only fights seen while TriffView
-          has been running are detected - use the time range below for anything older.
-        </p>
-      )}
-      <div className="triff-combat-export-actions">
-        <button
-          type="button"
-          disabled={!lastFight || exportState.busy}
-          onClick={() => onExport(null)}
-        >
-          Export last fight
-        </button>
+
+      <div className="triff-alert-summary">
+        <div>
+          <strong>Last fight</strong>
+          <span>
+            {lastFight
+              ? `${formatUtcWindow(lastFight.startUtc, lastFight.endUtc)}${
+                  lastFight.characters?.length ? ` - ${lastFight.characters.join(", ")}` : ""
+                }`
+              : "No fight detected yet. Alerts must be enabled, and only fights seen while TriffView has been running are detected - use a time range for anything older."}
+          </span>
+        </div>
+        <span className={lastFight ? "triff-alert-status is-on" : "triff-alert-status"}>
+          {lastFight ? "Ready" : "None"}
+        </span>
       </div>
-      <div className="triff-combat-export-range">
-        <Field label="From (UTC)">
-          <input
-            type="text"
-            placeholder="2026-08-14 20:10"
-            value={range.from}
-            onChange={(event) => onRangeChange((current) => ({ ...current, from: event.target.value }))}
-          />
-        </Field>
-        <Field label="To (UTC)">
-          <input
-            type="text"
-            placeholder="2026-08-14 20:35"
-            value={range.to}
-            onChange={(event) => onRangeChange((current) => ({ ...current, to: event.target.value }))}
-          />
-        </Field>
-        <button
-          type="button"
-          disabled={!range.from || !range.to || exportState.busy}
-          onClick={() => onExport(range)}
-        >
-          Export range
-        </button>
+
+      <div className="triff-combat-export-paths">
+        <div className="triff-combat-export-path">
+          <h4>Last fight</h4>
+          <p className="triffview-muted">Export the fight TriffAlerts most recently detected.</p>
+          <button
+            type="button"
+            disabled={!lastFight || exportState.busy}
+            onClick={() => onExport(null)}
+          >
+            Export last fight
+          </button>
+        </div>
+
+        <div className="triff-combat-export-path">
+          <h4>Time range</h4>
+          <p className="triffview-muted">For a fight from before TriffView was started.</p>
+          <div className="triff-combat-export-range">
+            <Field label="From (UTC)">
+              <input
+                type="text"
+                placeholder="2026-08-14 20:10"
+                value={range.from}
+                onChange={(event) => onRangeChange((current) => ({ ...current, from: event.target.value }))}
+              />
+            </Field>
+            <Field label="To (UTC)">
+              <input
+                type="text"
+                placeholder="2026-08-14 20:35"
+                value={range.to}
+                onChange={(event) => onRangeChange((current) => ({ ...current, to: event.target.value }))}
+              />
+            </Field>
+          </div>
+          <button
+            type="button"
+            disabled={!range.from || !range.to || exportState.busy}
+            onClick={() => onExport(range)}
+          >
+            Export range
+          </button>
+        </div>
       </div>
-      {exportState.result ? (
-        <p className="triff-combat-export-result">
-          Exported {exportState.result.fileCount} log
-          {exportState.result.fileCount === 1 ? "" : "s"}
-          {exportState.result.characters?.length
-            ? ` (${exportState.result.characters.join(", ")})`
-            : ""}{" "}
-          to {exportState.result.path} - {formatBytes(exportState.result.zipBytes)} zipped.
-          {exportState.result.droppedFileCount
-            ? ` ${exportState.result.droppedFileCount} further matching log${
-                exportState.result.droppedFileCount === 1 ? " was" : "s were"
-              } left out at the file limit - narrow the time range to cover them.`
-            : ""}
-          {exportState.result.exceedsDiscordLimit
-            ? " This is over Discord's 10 MB upload limit, so a narrower time range may be needed."
-            : ""}
-        </p>
-      ) : null}
-      {exportState.error ? (
-        <p className="triff-combat-export-error">{exportState.error}</p>
-      ) : null}
+
+      <div className="triff-combat-export-status">
+        {exportState.result ? (
+          <p className="triff-combat-export-result">
+            Exported {exportState.result.fileCount} log
+            {exportState.result.fileCount === 1 ? "" : "s"}
+            {exportState.result.characters?.length
+              ? ` (${exportState.result.characters.join(", ")})`
+              : ""}{" "}
+            to {exportState.result.path} - {formatBytes(exportState.result.zipBytes)} zipped.
+            {exportState.result.droppedFileCount
+              ? ` ${exportState.result.droppedFileCount} further matching log${
+                  exportState.result.droppedFileCount === 1 ? " was" : "s were"
+                } left out at the file limit - narrow the time range to cover them.`
+              : ""}
+            {exportState.result.exceedsDiscordLimit
+              ? " This is over Discord's 10 MB upload limit, so a narrower time range may be needed."
+              : ""}
+          </p>
+        ) : null}
+        {exportState.error ? (
+          <p className="triff-combat-export-error">{exportState.error}</p>
+        ) : null}
+      </div>
     </div>
   );
 }
