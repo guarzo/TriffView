@@ -67,6 +67,10 @@ function CombatLogExport({
   onUpload,
 }) {
   const [webhookInput, setWebhookInput] = useState("");
+  // Once a webhook is configured, the URL field and its explanation are just
+  // clutter - collapse down to the configured summary and only bring the
+  // field back if the user asks to replace it.
+  const [replacing, setReplacing] = useState(false);
   // Only a successful *save* should clear the typed URL - if this fired on
   // any action finishing, a successful "Send test" or "Clear" would wipe out
   // an edit the user had not saved yet.
@@ -74,11 +78,13 @@ function CombatLogExport({
   useEffect(() => {
     if (prevActionRef.current === "save" && webhookState.action === null && !webhookState.error) {
       setWebhookInput("");
+      setReplacing(false);
     }
     prevActionRef.current = webhookState.action;
   }, [webhookState.action, webhookState.error]);
 
   const webhookBusy = webhookState.action !== null;
+  const showWebhookForm = !webhookState.configured || replacing;
   // Export and upload both compress the archive on the native side, so
   // either one running blocks the other rather than racing two builds.
   const runBusy = exportState.busy || uploadState.busy;
@@ -94,46 +100,58 @@ function CombatLogExport({
 
       <div className="triff-combat-export-webhook">
         <h3>Discord destination</h3>
-        <p className="triffview-muted">
-          Paste a webhook URL to enable one-click uploads. It is stored in Windows Credential
-          Manager, never written to triffview-settings.json, and never sent back to this screen
-          once saved.
-        </p>
-        <div className="triff-combat-export-webhook-row">
-          <Field label="Webhook URL">
-            <input
-              type="password"
-              placeholder="https://discord.com/api/webhooks/…"
-              value={webhookInput}
-              disabled={webhookBusy}
-              onChange={(event) => setWebhookInput(event.target.value)}
-            />
-          </Field>
-          <button
-            type="button"
-            disabled={webhookBusy || !webhookInput.trim()}
-            onClick={() => onSaveWebhook(webhookInput.trim())}
-          >
-            Save
-          </button>
-          <button
-            type="button"
-            disabled={webhookBusy || !webhookState.configured}
-            onClick={onClearWebhook}
-          >
-            Clear
-          </button>
-          <button
-            type="button"
-            disabled={webhookBusy || !webhookState.configured}
-            onClick={onTestWebhook}
-          >
-            Send test
-          </button>
-        </div>
-        <p className="triffview-muted">
-          {webhookState.configured ? `Configured: ${webhookState.description}` : "No webhook configured."}
-        </p>
+        {showWebhookForm ? (
+          <>
+            <p className="triffview-muted">
+              Paste a webhook URL to enable one-click uploads. It is stored in Windows Credential
+              Manager, never written to triffview-settings.json, and never sent back to this screen
+              once saved.
+            </p>
+            <div className="triff-combat-export-webhook-row">
+              <Field label="Webhook URL">
+                <input
+                  type="password"
+                  placeholder="https://discord.com/api/webhooks/…"
+                  value={webhookInput}
+                  disabled={webhookBusy}
+                  onChange={(event) => setWebhookInput(event.target.value)}
+                />
+              </Field>
+              <button
+                type="button"
+                disabled={webhookBusy || !webhookInput.trim()}
+                onClick={() => onSaveWebhook(webhookInput.trim())}
+              >
+                Save
+              </button>
+              {replacing && webhookState.configured ? (
+                <button
+                  type="button"
+                  disabled={webhookBusy}
+                  onClick={() => {
+                    setReplacing(false);
+                    setWebhookInput("");
+                  }}
+                >
+                  Cancel
+                </button>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <div className="triff-combat-export-webhook-row">
+            <p className="triffview-muted">Configured: {webhookState.description}</p>
+            <button type="button" disabled={webhookBusy} onClick={onTestWebhook}>
+              Send test
+            </button>
+            <button type="button" disabled={webhookBusy} onClick={() => setReplacing(true)}>
+              Replace
+            </button>
+            <button type="button" disabled={webhookBusy} onClick={onClearWebhook}>
+              Clear
+            </button>
+          </div>
+        )}
         {webhookState.testResult ? (
           <p
             className={
