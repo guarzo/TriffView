@@ -99,6 +99,48 @@ public class CombatLogUploadFlowTests
         }
     }
 
+    [Fact]
+    public void UploadCombatLogsReportsDroppedFilesOnASuccessfulUpload()
+    {
+        var gamelogsDir = CreateFixtureGamelogsDir();
+        try
+        {
+            var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            // One more than CombatLogExport's 64-file cap (MaxFiles), so this
+            // export is forced to drop exactly one.
+            for (var i = 0; i < 65; i++)
+            {
+                WriteFixtureGamelog(
+                    gamelogsDir, $"20260101000000_{i}_Pilot_{i}.txt", $"Pilot {i}", start,
+                    "[ 2026.01.01 00:00:05 ] (combat) hits you for 10 damage\r\n");
+            }
+
+            var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NoContent));
+            var messages = new ConcurrentQueue<string>();
+            var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
+            using var controller = Controller(credentials, messages, gamelogsPath: gamelogsDir, handler: handler);
+
+            controller.HandleWebMessage(
+                "triffview:upload-combat-logs",
+                JsonNode.Parse($$"""{"fromUtc":"{{start:O}}","toUtc":"{{start.AddMinutes(1):O}}"}""")!.AsObject());
+
+            Assert.True(SpinWait.SpinUntil(
+                () => messages.Any(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(10)));
+            var reply = messages.Last(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal));
+
+            Assert.Contains("\"succeeded\":true", reply, StringComparison.Ordinal);
+            Assert.Contains("\"droppedFileCount\":1", reply, StringComparison.Ordinal);
+
+            var bodyText = Encoding.UTF8.GetString(handler.LastRequestBytes ?? Array.Empty<byte>());
+            Assert.Contains("1 additional matching log file(s) were not included", bodyText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(gamelogsDir, recursive: true);
+        }
+    }
+
     private static TriffViewController Controller(
         MemoryCredentials credentials,
         ConcurrentQueue<string> messages,
