@@ -53,6 +53,7 @@ internal sealed class TriffViewController : IDisposable
     private nint _activeClientHandle;
     private int _alertDispatchScheduled;
     private int _periodicRefreshInProgress;
+    private int _combatLogUploadInProgress;
     private string _lastClientTopologySignature = "";
     private string _lastClientStateSignature = "";
     private readonly Dictionary<string, nint> _cycleGroupCursors = new(StringComparer.OrdinalIgnoreCase);
@@ -1414,7 +1415,24 @@ internal sealed class TriffViewController : IDisposable
     /// </summary>
     private async void UploadCombatLogs(string? fromUtc, string? toUtc)
     {
+        // One upload at a time, in the same shape QueuePeriodicRefresh and
+        // SchedulePendingAlertDispatch use. The staging path is derived from
+        // SuggestFileName, which is deterministic, so two runs over the same
+        // fight would compress into the same file and each other's finally would
+        // delete it out from under the other. Nothing else stops that: the web
+        // UI's own button state is not an invariant this side can rely on.
+        // Deliberately no reply for the rejected run -- the in-flight one always
+        // ends in a terminal combat-log-upload or error message, and a second
+        // reply arriving first would tell the UI an upload had finished while
+        // one was still going.
+        if (Interlocked.CompareExchange(ref _combatLogUploadInProgress, 1, 0) != 0) return;
+
         string? tempPath = null;
+        // Hoisted out of the try so the catch can redact against it. Every other
+        // outbound string on this path has been through DiscordWebhook.Redact
+        // (see its own header comment); an exception message is the one that can
+        // carry the whole request URI without anyone having written it there.
+        Uri? webhook = null;
         try
         {
             var window = BuildCombatLogWindow(fromUtc, toUtc);
@@ -1427,7 +1445,7 @@ internal sealed class TriffViewController : IDisposable
                 return;
             }
 
-            var webhook = ReadCombatLogWebhook();
+            webhook = ReadCombatLogWebhook();
             if (webhook == null)
             {
                 PostError("upload-combat-logs", "Configure a Discord webhook first.");
@@ -1500,8 +1518,13 @@ internal sealed class TriffViewController : IDisposable
             // Unlike the upload's own failure (reported via result above), an
             // exception here comes from BuildCombatLogWindow, CombatLogExport.Export,
             // or file I/O around the temp path -- nothing Discord ever saw, so
-            // there is no "attempt" to report an outcome of.
-            PostError("upload-combat-logs", ex.Message);
+            // there is no "attempt" to report an outcome of. Redacted all the
+            // same: HttpRequestException and friends can carry the request URI,
+            // and TestCombatLogWebhook's structurally identical catch does the
+            // same. Null webhook means the throw happened before it was read.
+            PostError(
+                "upload-combat-logs",
+                webhook == null ? ex.Message : DiscordWebhook.Redact(ex.Message, webhook));
         }
         finally
         {
@@ -1509,6 +1532,7 @@ internal sealed class TriffViewController : IDisposable
             // successful one, and any exception above -- the temp copy's job ends
             // here on every path, matching the spec's flow description exactly.
             if (tempPath != null) TryDeleteCombatLogTemp(tempPath);
+            Interlocked.Exchange(ref _combatLogUploadInProgress, 0);
         }
     }
 

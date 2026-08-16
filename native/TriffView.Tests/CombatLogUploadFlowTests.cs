@@ -44,7 +44,11 @@ public class CombatLogUploadFlowTests
 
             Assert.True(SpinWait.SpinUntil(
                 () => messages.Any(json => json.Contains("\"type\":\"triffview:error\"", StringComparison.Ordinal)
-                    && json.Contains("\"action\":\"upload-combat-logs\"", StringComparison.Ordinal)),
+                    && json.Contains("\"action\":\"upload-combat-logs\"", StringComparison.Ordinal)
+                    // The message too, not just the envelope: any error on this
+                    // path would satisfy the type/action pair, including one
+                    // raised before Export ever ran.
+                    && json.Contains("No EVE logs overlap", StringComparison.Ordinal)),
                 TimeSpan.FromSeconds(10)));
         }
         finally
@@ -81,13 +85,20 @@ public class CombatLogUploadFlowTests
                 TimeSpan.FromSeconds(10)));
             var reply = messages.Last(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal));
 
-            // These fields (fileCount, characters) are exactly what the merge in
-            // UploadCombatLogs pulls from the CombatLogExportResult rather than
-            // from upload.ToState() alone -- UploadAsync never sees the export, so
-            // a regression there would show up here as fileCount:0 / characters:[].
+            // These fields (fileCount, characters, startUtc, endUtc) are exactly
+            // what the merge in UploadCombatLogs pulls from the
+            // CombatLogExportResult rather than from upload.ToState() alone --
+            // UploadAsync never sees the export, so a regression there would show
+            // up here as fileCount:0 / characters:[] / default timestamps. The
+            // window in particular is checked nowhere else: the Discord content
+            // line is formatted from the export result directly, not from the
+            // merged one, so a dropped merge of those two fields is invisible
+            // everywhere but here.
             Assert.Contains("\"succeeded\":true", reply, StringComparison.Ordinal);
             Assert.Contains("\"fileCount\":1", reply, StringComparison.Ordinal);
             Assert.Contains("\"characters\":[\"Pilot One\"]", reply, StringComparison.Ordinal);
+            Assert.Contains($"\"startUtc\":\"{start:O}\"", reply, StringComparison.Ordinal);
+            Assert.Contains($"\"endUtc\":\"{start.AddMinutes(1):O}\"", reply, StringComparison.Ordinal);
             Assert.Equal(1, handler.RequestCount);
             Assert.True(SpinWait.SpinUntil(
                 () => !Directory.EnumerateFiles(TriffViewController.CombatLogUploadTempDir).Any(),
@@ -192,6 +203,115 @@ public class CombatLogUploadFlowTests
             {
                 if (File.Exists(path)) File.Delete(path);
             }
+        }
+    }
+
+    /// <summary>
+    /// The staging path is derived from the deterministic SuggestFileName, so a
+    /// second concurrent upload of the same window would compress into the same
+    /// file and each run's finally would delete it under the other. Nothing on
+    /// the web side prevents that -- there is no client-side in-flight state this
+    /// half can rely on -- so the guard has to be here.
+    /// </summary>
+    [Fact]
+    public void UploadCombatLogsRefusesASecondRunWhileOneIsStillInFlight()
+    {
+        var gamelogsDir = CreateFixtureGamelogsDir();
+        using var release = new ManualResetEventSlim(false);
+        try
+        {
+            var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            WriteFixtureGamelog(
+                gamelogsDir, "20260101000000_1_Pilot_One.txt", "Pilot One", start,
+                "[ 2026.01.01 00:00:05 ] (combat) hits you for 10 damage\r\n");
+
+            // Holds the first upload open at the POST, so the second request is
+            // sent while the first is provably still running rather than
+            // whenever the scheduler happens to get to it.
+            var handler = new FakeHttpMessageHandler(_ =>
+            {
+                release.Wait(TimeSpan.FromSeconds(30));
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
+            });
+            var messages = new ConcurrentQueue<string>();
+            var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
+            using var controller = Controller(credentials, messages, gamelogsPath: gamelogsDir, handler: handler);
+            var body = JsonNode.Parse($$"""{"fromUtc":"{{start:O}}","toUtc":"{{start.AddMinutes(1):O}}"}""")!.AsObject();
+
+            controller.HandleWebMessage("triffview:upload-combat-logs", body);
+            Assert.True(SpinWait.SpinUntil(() => handler.RequestCount >= 1, TimeSpan.FromSeconds(10)));
+
+            controller.HandleWebMessage("triffview:upload-combat-logs", body);
+            // The observable is that the second run posts nothing at all. It is
+            // not enough to watch the request count: without the guard the second
+            // run still never reaches Discord, because its Export tries to move a
+            // fresh archive over the one the first run holds open and fails with
+            // a sharing violation -- which is exactly the corruption the guard
+            // exists to prevent, and it surfaces as an extra upload-combat-logs
+            // error message.
+            Assert.False(SpinWait.SpinUntil(
+                () => messages.Any(json => json.Contains("\"type\":\"triffview:error\"", StringComparison.Ordinal)
+                    && json.Contains("\"action\":\"upload-combat-logs\"", StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(3)));
+            Assert.Equal(1, handler.RequestCount);
+
+            release.Set();
+            Assert.True(SpinWait.SpinUntil(
+                () => messages.Any(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(10)));
+            Assert.Equal(
+                1,
+                messages.Count(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal)));
+            Assert.Equal(1, handler.RequestCount);
+        }
+        finally
+        {
+            release.Set();
+            Directory.Delete(gamelogsDir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// UploadAsync only redacts the outcomes it can classify (server responses,
+    /// OperationCanceledException, HttpRequestException). Anything else escapes
+    /// to UploadCombatLogs' generic catch, which is the last place that can strip
+    /// the token before it reaches PostError -- and an exception message is the
+    /// one outbound string that can carry the whole request URI without anyone
+    /// having put it there.
+    /// </summary>
+    [Fact]
+    public void UploadCombatLogsRedactsTheWebhookTokenOutOfAnUnclassifiedException()
+    {
+        var gamelogsDir = CreateFixtureGamelogsDir();
+        try
+        {
+            var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            WriteFixtureGamelog(
+                gamelogsDir, "20260101000000_1_Pilot_One.txt", "Pilot One", start,
+                "[ 2026.01.01 00:00:05 ] (combat) hits you for 10 damage\r\n");
+
+            // Neither OperationCanceledException nor HttpRequestException, so
+            // UploadAsync's own redaction never sees it.
+            var handler = new FakeHttpMessageHandler(request =>
+                throw new InvalidOperationException($"exploded talking to {request.RequestUri}"));
+            var messages = new ConcurrentQueue<string>();
+            var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1234/sekrit-token-value"));
+            using var controller = Controller(credentials, messages, gamelogsPath: gamelogsDir, handler: handler);
+
+            controller.HandleWebMessage(
+                "triffview:upload-combat-logs",
+                JsonNode.Parse($$"""{"fromUtc":"{{start:O}}","toUtc":"{{start.AddMinutes(1):O}}"}""")!.AsObject());
+
+            Assert.True(SpinWait.SpinUntil(
+                () => messages.Any(json => json.Contains("\"type\":\"triffview:error\"", StringComparison.Ordinal)
+                    && json.Contains("\"action\":\"upload-combat-logs\"", StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(10)));
+            var reply = messages.Last(json => json.Contains("\"type\":\"triffview:error\"", StringComparison.Ordinal));
+            Assert.DoesNotContain("sekrit-token-value", reply, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(gamelogsDir, recursive: true);
         }
     }
 
