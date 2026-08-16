@@ -1,3 +1,9 @@
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+
 namespace TriffView.Alerts;
 
 /// <summary>
@@ -118,5 +124,122 @@ public static class DiscordWebhook
         }
 
         return result;
+    }
+}
+
+/// <summary>
+/// Outcome of one POST to a Discord webhook. <see cref="FileCount"/>,
+/// <see cref="StartUtc"/>, <see cref="EndUtc"/>, <see cref="Characters"/> and
+/// <see cref="DroppedFileCount"/> are not filled in by
+/// <see cref="CombatLogUpload.UploadAsync"/> -- it only ever sees the zip on
+/// disk and the HTTP exchange -- and are expected to be copied in by the
+/// caller from the <c>CombatLogExportResult</c> that produced the archive
+/// before this result is posted to the web UI.
+/// </summary>
+public sealed class CombatLogUploadResult
+{
+    public bool Succeeded { get; init; }
+    public string Message { get; init; } = "";
+    public int FileCount { get; init; }
+    public long ZipBytes { get; init; }
+    public DateTime StartUtc { get; init; }
+    public DateTime EndUtc { get; init; }
+    public IReadOnlyList<string> Characters { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Rides through from the export result and, per the design doc, is
+    /// reported on a *successful* upload too -- an upload that quietly
+    /// dropped files would read as complete coverage to whoever builds an
+    /// after-action report from the Discord channel, having never seen this
+    /// app's UI.
+    /// </summary>
+    public int DroppedFileCount { get; init; }
+
+    public object ToState()
+    {
+        return new
+        {
+            succeeded = Succeeded,
+            message = Message,
+            fileCount = FileCount,
+            zipBytes = ZipBytes,
+            startUtc = StartUtc.ToString("O"),
+            endUtc = EndUtc.ToString("O"),
+            characters = Characters,
+            droppedFileCount = DroppedFileCount,
+        };
+    }
+}
+
+/// <summary>
+/// Posts a combat log archive to a Discord webhook. Every path through
+/// <see cref="UploadAsync"/> returns a result rather than throwing, for any
+/// response the server produced or any transport error it can classify --
+/// that single return path is what makes it possible to guarantee every
+/// outbound string has been through <see cref="DiscordWebhook.Redact"/>.
+/// An exception escaping to the subsystem's generic catch would bypass that
+/// and reach the UI unredacted.
+/// </summary>
+public static class CombatLogUpload
+{
+    /// <summary>
+    /// The HttpClient instances elsewhere in this repo are tuned for small
+    /// JSON calls to ESI (8-20s) and would be wrong for pushing up to 10MB
+    /// over a domestic connection. Callers are expected to bound their own
+    /// CancellationToken to this many seconds rather than lower the timeout
+    /// on a shared client.
+    /// </summary>
+    public const int UploadTimeoutSeconds = 120;
+
+    public static async Task<CombatLogUploadResult> UploadAsync(
+        HttpClient http, Uri webhook, string zipPath, string content, CancellationToken ct)
+    {
+        var zipBytes = new FileInfo(zipPath).Length;
+
+        // Not disposed here: MultipartContent.Dispose() clears its own nested-parts
+        // list as well as the streams within it, and a caller (or a test double)
+        // that inspects the request's content after this method returns would see
+        // an empty multipart. The one resource that actually needs closing --
+        // the file handle -- is closed explicitly below instead.
+        var form = new MultipartFormDataContent();
+        var payloadJson = JsonSerializer.Serialize(new { content });
+        form.Add(new StringContent(payloadJson, Encoding.UTF8, "application/json"), "payload_json");
+
+        await using var fileStream = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var fileContent = new StreamContent(fileStream);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+        form.Add(fileContent, "files[0]", Path.GetFileName(zipPath));
+
+        using var response = await http.PostAsync(webhook, form, ct);
+        return await BuildResultAsync(response, zipBytes, webhook, ct);
+    }
+
+    private static async Task<CombatLogUploadResult> BuildResultAsync(
+        HttpResponseMessage response, long zipBytes, Uri webhook, CancellationToken ct)
+    {
+        if (response.StatusCode == HttpStatusCode.OK || response.StatusCode == HttpStatusCode.NoContent)
+        {
+            return new CombatLogUploadResult
+            {
+                Succeeded = true,
+                Message = "Uploaded to Discord.",
+                ZipBytes = zipBytes,
+            };
+        }
+
+        return Failed($"Discord returned {(int)response.StatusCode} {response.ReasonPhrase}.", zipBytes, webhook);
+    }
+
+    private static CombatLogUploadResult Failed(string message, long zipBytes, Uri webhook)
+    {
+        return new CombatLogUploadResult
+        {
+            Succeeded = false,
+            // Routed through Redact even for messages that plainly do not
+            // contain the token: "every outbound string" means every one,
+            // not every one a reviewer remembered to check by hand.
+            Message = DiscordWebhook.Redact(message, webhook),
+            ZipBytes = zipBytes,
+        };
     }
 }

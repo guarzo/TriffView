@@ -1,3 +1,7 @@
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
 using TriffView.Alerts;
 using Xunit;
 
@@ -137,5 +141,105 @@ public class CombatLogUploadTests
         var redacted = DiscordWebhook.Redact("Discord returned 500 Internal Server Error", SampleWebhook);
 
         Assert.Equal("Discord returned 500 Internal Server Error", redacted);
+    }
+}
+
+/// <summary>
+/// A stub transport. Real sockets are never touched: the framing, status
+/// mapping and redaction guarantees are all specified against a handler that
+/// hands back exactly the response each test needs.
+/// </summary>
+public sealed class StubHandler : HttpMessageHandler
+{
+    private readonly Func<HttpRequestMessage, HttpResponseMessage> _respond;
+
+    public HttpRequestMessage? LastRequest { get; private set; }
+    public string? LastMultipartBody { get; private set; }
+
+    public StubHandler(Func<HttpRequestMessage, HttpResponseMessage> respond)
+    {
+        _respond = respond;
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        LastRequest = request;
+        if (request.Content != null)
+        {
+            LastMultipartBody = await request.Content.ReadAsStringAsync(cancellationToken);
+        }
+
+        return _respond(request);
+    }
+}
+
+public class CombatLogUploadTransportTests : IDisposable
+{
+    private static readonly Uri SampleWebhook = new(
+        "https://discord.com/api/webhooks/123456789/abcDEF-token_123");
+
+    private readonly string _zipPath = Path.Combine(
+        Path.GetTempPath(), $"triffview-upload-test-{Guid.NewGuid():N}.zip");
+
+    public CombatLogUploadTransportTests()
+    {
+        // Content does not matter to CombatLogUpload -- it streams whatever is
+        // on disk -- but ZipBytes is read from the real file, so the bytes
+        // have to exist.
+        File.WriteAllBytes(_zipPath, new byte[] { 1, 2, 3, 4, 5 });
+    }
+
+    public void Dispose()
+    {
+        try { File.Delete(_zipPath); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+    }
+
+    private static HttpClient ClientReturning(Func<HttpRequestMessage, HttpResponseMessage> respond, out StubHandler handler)
+    {
+        handler = new StubHandler(respond);
+        return new HttpClient(handler);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.OK)]
+    [InlineData(HttpStatusCode.NoContent)]
+    public async Task ASuccessfulPostReportsSuccessAndTheZipSizeOnDisk(HttpStatusCode status)
+    {
+        using var http = ClientReturning(_ => new HttpResponseMessage(status), out _);
+
+        var result = await CombatLogUpload.UploadAsync(
+            http, SampleWebhook, _zipPath, "content", CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(5, result.ZipBytes);
+    }
+
+    [Fact]
+    public async Task TheMultipartBodyCarriesThePayloadJsonAndTheZipUnderItsFileName()
+    {
+        using var http = ClientReturning(
+            _ => new HttpResponseMessage(HttpStatusCode.OK), out var handler);
+
+        await CombatLogUpload.UploadAsync(
+            http, SampleWebhook, _zipPath, "3 pilots, 12:00-12:05Z", CancellationToken.None);
+
+        Assert.NotNull(handler.LastRequest);
+        Assert.IsType<MultipartFormDataContent>(handler.LastRequest!.Content);
+
+        var multipart = (MultipartFormDataContent)handler.LastRequest.Content!;
+        var names = multipart.Select(part => part.Headers.ContentDisposition?.Name?.Trim('"')).ToArray();
+        Assert.Contains("payload_json", names);
+        Assert.Contains("files[0]", names);
+
+        var filePart = multipart.Single(part => part.Headers.ContentDisposition?.Name?.Trim('"') == "files[0]");
+        Assert.Equal(
+            Path.GetFileName(_zipPath),
+            filePart.Headers.ContentDisposition!.FileName!.Trim('"'));
+
+        var payloadPart = multipart.Single(part => part.Headers.ContentDisposition?.Name?.Trim('"') == "payload_json");
+        var payloadJson = await payloadPart.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(payloadJson);
+        Assert.Equal("3 pilots, 12:00-12:05Z", doc.RootElement.GetProperty("content").GetString());
     }
 }
