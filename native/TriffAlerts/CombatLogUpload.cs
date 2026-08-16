@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -196,22 +197,37 @@ public static class CombatLogUpload
     {
         var zipBytes = new FileInfo(zipPath).Length;
 
-        // Not disposed here: MultipartContent.Dispose() clears its own nested-parts
-        // list as well as the streams within it, and a caller (or a test double)
-        // that inspects the request's content after this method returns would see
-        // an empty multipart. The one resource that actually needs closing --
-        // the file handle -- is closed explicitly below instead.
-        var form = new MultipartFormDataContent();
-        var payloadJson = JsonSerializer.Serialize(new { content });
-        form.Add(new StringContent(payloadJson, Encoding.UTF8, "application/json"), "payload_json");
+        try
+        {
+            // Not disposed here: MultipartContent.Dispose() clears its own nested-parts
+            // list as well as the streams within it, and a caller (or a test double)
+            // that inspects the request's content after this method returns would see
+            // an empty multipart. The one resource that actually needs closing --
+            // the file handle -- is closed explicitly below instead.
+            var form = new MultipartFormDataContent();
+            var payloadJson = JsonSerializer.Serialize(new { content });
+            form.Add(new StringContent(payloadJson, Encoding.UTF8, "application/json"), "payload_json");
 
-        await using var fileStream = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var fileContent = new StreamContent(fileStream);
-        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
-        form.Add(fileContent, "files[0]", Path.GetFileName(zipPath));
+            await using var fileStream = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var fileContent = new StreamContent(fileStream);
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
+            form.Add(fileContent, "files[0]", Path.GetFileName(zipPath));
 
-        using var response = await http.PostAsync(webhook, form, ct);
-        return await BuildResultAsync(response, zipBytes, webhook, ct);
+            using var response = await http.PostAsync(webhook, form, ct);
+            return await BuildResultAsync(response, zipBytes, webhook, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            // Covers both HttpClient's own internal timeout and a caller-supplied
+            // token bounded to UploadTimeoutSeconds -- either way, the caller
+            // gets a reportable result instead of an exception reaching the
+            // subsystem's generic catch unredacted.
+            return Failed("The upload timed out.", zipBytes, webhook);
+        }
+        catch (HttpRequestException ex)
+        {
+            return Failed($"Could not reach Discord: {ex.Message}", zipBytes, webhook);
+        }
     }
 
     private static async Task<CombatLogUploadResult> BuildResultAsync(
@@ -227,7 +243,49 @@ public static class CombatLogUpload
             };
         }
 
+        if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.NotFound)
+        {
+            return Failed("The webhook no longer exists or was deleted in Discord.", zipBytes, webhook);
+        }
+
+        if ((int)response.StatusCode == 413)
+        {
+            return Failed("The archive is too large for that server.", zipBytes, webhook);
+        }
+
+        if ((int)response.StatusCode == 429)
+        {
+            var retryAfter = await TryReadRetryAfterSecondsAsync(response, ct);
+            var suffix = retryAfter is { } seconds
+                ? $" Retry after {seconds.ToString("0.#", CultureInfo.InvariantCulture)}s."
+                : "";
+            return Failed($"Rate limited by Discord.{suffix}", zipBytes, webhook);
+        }
+
         return Failed($"Discord returned {(int)response.StatusCode} {response.ReasonPhrase}.", zipBytes, webhook);
+    }
+
+    /// <summary>
+    /// Discord's JSON body carries sub-second precision; the Retry-After
+    /// header, when present at all, is whole seconds. The body wins when both
+    /// are there.
+    /// </summary>
+    private static async Task<double?> TryReadRetryAfterSecondsAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            var body = await response.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("retry_after", out var value) && value.ValueKind == JsonValueKind.Number)
+            {
+                return value.GetDouble();
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return response.Headers.RetryAfter?.Delta?.TotalSeconds;
     }
 
     private static CombatLogUploadResult Failed(string message, long zipBytes, Uri webhook)

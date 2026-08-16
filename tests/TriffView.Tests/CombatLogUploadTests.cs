@@ -242,4 +242,117 @@ public class CombatLogUploadTransportTests : IDisposable
         using var doc = JsonDocument.Parse(payloadJson);
         Assert.Equal("3 pilots, 12:00-12:05Z", doc.RootElement.GetProperty("content").GetString());
     }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.NotFound)]
+    public async Task AGoneWebhookIsReportedAsDeletedRatherThanAsARawStatusCode(HttpStatusCode status)
+    {
+        using var http = ClientReturning(_ => new HttpResponseMessage(status), out _);
+
+        var result = await CombatLogUpload.UploadAsync(
+            http, SampleWebhook, _zipPath, "content", CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("no longer exists", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ATooLargeArchiveIsReportedAsSuchRatherThanAsA413()
+    {
+        using var http = ClientReturning(
+            _ => new HttpResponseMessage((HttpStatusCode)413), out _);
+
+        var result = await CombatLogUpload.UploadAsync(
+            http, SampleWebhook, _zipPath, "content", CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("too large", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ARateLimitedResponseReportsTheRetryAfterFromTheBody()
+    {
+        using var http = ClientReturning(_ =>
+        {
+            var response = new HttpResponseMessage((HttpStatusCode)429)
+            {
+                Content = new StringContent("{\"retry_after\": 1.5, \"message\": \"rate limited\"}",
+                    Encoding.UTF8, "application/json"),
+            };
+            return response;
+        }, out _);
+
+        var result = await CombatLogUpload.UploadAsync(
+            http, SampleWebhook, _zipPath, "content", CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("1.5", result.Message);
+    }
+
+    [Fact]
+    public async Task AnUnclassifiedStatusReportsTheCodeAndReasonPhrase()
+    {
+        using var http = ClientReturning(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)
+        {
+            ReasonPhrase = "Internal Server Error",
+        }, out _);
+
+        var result = await CombatLogUpload.UploadAsync(
+            http, SampleWebhook, _zipPath, "content", CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("500", result.Message);
+    }
+
+    [Fact]
+    public async Task ATransportFailureIsReportedAndRedacted()
+    {
+        using var http = new HttpClient(new ThrowingHandler());
+
+        var result = await CombatLogUpload.UploadAsync(
+            http, SampleWebhook, _zipPath, "content", CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.DoesNotContain("abcDEF-token_123", result.Message);
+    }
+
+    [Fact]
+    public async Task ATimeoutReturnsAFailedResultRatherThanThrowing()
+    {
+        using var http = new HttpClient(new NeverRespondingHandler());
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+
+        var result = await CombatLogUpload.UploadAsync(
+            http, SampleWebhook, _zipPath, "content", cts.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.DoesNotContain("abcDEF-token_123", result.Message);
+    }
+
+    private sealed class ThrowingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            // A message shaped like the ones HttpRequestException carries on a
+            // real DNS or connection failure, including the credential --
+            // exactly the string Redact exists to catch.
+            throw new HttpRequestException(
+                $"Connection to {request.RequestUri} refused");
+        }
+    }
+
+    private sealed class NeverRespondingHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            // Waits on the caller's own token rather than Task.Delay(Infinite),
+            // so this fails fast if UploadAsync ever stops passing ct through.
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            throw new InvalidOperationException("unreachable");
+        }
+    }
 }
