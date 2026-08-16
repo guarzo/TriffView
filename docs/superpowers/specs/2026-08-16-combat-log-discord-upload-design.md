@@ -95,6 +95,18 @@ nothing to do with combat logs. The read is wrapped: any failure resolves to
 whose credential store is broken gets a webhook that appears unconfigured, which
 is recoverable, rather than an app that will not start.
 
+**And it is read once, not per state post.** `PostState` is not a cold path — it
+runs from the 700 ms periodic refresh whenever client topology or state changes
+(`TriffViewSubsystem.cs:415`), and again on a 100 ms timer after every client
+switch. Deriving the webhook state inside it would put a `CredRead` P/Invoke on
+that path, several times a minute, forever, to answer a question whose answer
+changes only when the user edits it.
+
+So the derived `{ configured, description }` pair is held in a controller field,
+computed once during `Start()` and recomputed only when a set or clear succeeds.
+`PostState` reads the field. This also means the guarded read above exists in
+exactly one place rather than on every post.
+
 **It never reaches an error message.** `PostError` posts `ex.Message` straight
 through to the UI (`TriffViewSubsystem.cs:2088`), and `HttpRequestException` and
 its inner exceptions routinely carry the request URI — which *is* the
