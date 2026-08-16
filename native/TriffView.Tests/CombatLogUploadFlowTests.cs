@@ -315,6 +315,83 @@ public class CombatLogUploadFlowTests
         }
     }
 
+    /// <summary>
+    /// Regression for the hazard fixed in UploadCombatLogs' catch: the success post
+    /// (<c>_postToHud(new { type = "triffview:combat-log-upload", ... })</c>) is inside the
+    /// same try as everything else, so a WebView torn down between the disposal check and
+    /// that post throws from inside the try, straight into the catch. If that catch called
+    /// PostError directly -- an unguarded _postToHud itself -- it would throw the same
+    /// exception a second time, unhandled, out of this async void method, reaching the
+    /// thread pool and taking the whole process down.
+    ///
+    /// postToHud here throws unconditionally, the same way a torn-down WebView would fail
+    /// every post rather than only the first one it is asked to make. It cannot be observed
+    /// through TriffViewDiagnostics.LogPath -- that is a real, shared file this fork's own
+    /// running instance was found to be actively writing to on the machine this test was
+    /// developed on, and TriffViewDiagnostics.Log silently drops its write on any contention
+    /// (by design, see its own header comment), which made that assertion flake against a
+    /// live app rather than against this fix. The invocation count is proof enough instead:
+    /// exactly two throwing posts (the success post, then the catch's guarded retry through
+    /// PostError) followed by silence and a completed cleanup is only reachable if the second
+    /// throw was caught rather than left to reach the thread pool -- an unguarded regression
+    /// would take the whole test process down before ever reaching the assertions below,
+    /// rather than fail one of them.
+    /// </summary>
+    [Fact]
+    public void UploadCombatLogsSurvivesThePostToHudForItsSuccessReportThrowing()
+    {
+        var gamelogsDir = CreateFixtureGamelogsDir();
+        try
+        {
+            var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            WriteFixtureGamelog(
+                gamelogsDir, "20260101000000_1_Pilot_One.txt", "Pilot One", start,
+                "[ 2026.01.01 00:00:05 ] (combat) hits you for 10 damage\r\n");
+
+            var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NoContent));
+            var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
+            var postCount = 0;
+
+            using var controller = new TriffViewController(
+                Dispatcher.CurrentDispatcher,
+                _ =>
+                {
+                    Interlocked.Increment(ref postCount);
+                    throw new ObjectDisposedException("webview torn down between the disposal check and a post");
+                },
+                reassertHudTopmost: () => { },
+                applySettingsAlwaysOnTop: _ => { },
+                credentials,
+                gamelogsDir,
+                new HttpClient(handler));
+
+            controller.HandleWebMessage(
+                "triffview:upload-combat-logs",
+                JsonNode.Parse($$"""{"fromUtc":"{{start:O}}","toUtc":"{{start.AddMinutes(1):O}}"}""")!.AsObject());
+
+            Assert.True(SpinWait.SpinUntil(
+                () => Interlocked.CompareExchange(ref postCount, 0, 0) >= 2,
+                TimeSpan.FromSeconds(10)));
+
+            // Reaching the unconditional finally (temp file cleanup) despite both posts
+            // throwing is itself part of the proof: an unhandled exception on this
+            // async void's continuation would have unwound past the finally, not through
+            // it, on its way to the thread pool.
+            Assert.True(SpinWait.SpinUntil(
+                () => !Directory.EnumerateFiles(TriffViewController.CombatLogUploadTempDir).Any(),
+                TimeSpan.FromSeconds(5)));
+
+            // No third attempt -- confirms the method returned after the catch rather
+            // than looping or retrying the post again.
+            Thread.Sleep(200);
+            Assert.Equal(2, Interlocked.CompareExchange(ref postCount, 0, 0));
+        }
+        finally
+        {
+            Directory.Delete(gamelogsDir, recursive: true);
+        }
+    }
+
     private static TriffViewController Controller(
         MemoryCredentials credentials,
         ConcurrentQueue<string> messages,

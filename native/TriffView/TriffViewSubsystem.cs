@@ -1578,9 +1578,26 @@ internal sealed class TriffViewController : IDisposable
             // same: HttpRequestException and friends can carry the request URI,
             // and TestCombatLogWebhook's structurally identical catch does the
             // same. Null webhook means the throw happened before it was read.
-            PostError(
-                "upload-combat-logs",
-                webhook == null ? ex.Message : DiscordWebhook.Redact(ex.Message, webhook));
+            var message = webhook == null ? ex.Message : DiscordWebhook.Redact(ex.Message, webhook);
+            try
+            {
+                PostError("upload-combat-logs", message);
+            }
+            catch (Exception postEx)
+            {
+                // PostError is an unguarded _postToHud with no try of its own, and
+                // the success post above is inside this same try -- so ex could
+                // already be PostError's own failure mode (e.g. an
+                // ObjectDisposedException from a WebView torn down between the
+                // _disposed check just above and a post). Letting that throw reach
+                // the caller of this async void method takes the whole process
+                // down with it. TriffViewDiagnostics.Log is catch-all guarded and
+                // cannot do that, the same way TestCombatLogWebhook's outer catch
+                // relies on it for the identical hazard.
+                TriffViewDiagnostics.Log(
+                    "combat-log-upload",
+                    $"Reporting the upload failure also failed: {postEx.Message}. Original failure: {message}");
+            }
         }
         finally
         {
