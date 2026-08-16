@@ -2066,23 +2066,50 @@ internal sealed class TriffViewController : IDisposable
 
     private static bool TryActivateWindow(EveClientWindow client, TriffViewProfile profile)
     {
-        var activated = TriffViewNativeMethods.SetForegroundWindow(client.Handle);
-        TriffViewNativeMethods.SetFocus(client.Handle);
+        // The overlay is WS_EX_NOACTIVATE + ShowWithoutActivation, so TriffView's process never
+        // holds the foreground; Windows refuses SetForegroundWindow from a background process
+        // unless its thread's input queue is attached to the current foreground thread's. Without
+        // this, a held/auto-repeating key (the reported trigger was push-to-talk) keeps feeding
+        // input to the other foreground process and clicking a preview does nothing.
+        var foregroundWindow = TriffViewNativeMethods.GetForegroundWindow();
+        var currentThreadId = TriffViewNativeMethods.GetCurrentThreadId();
+        var foregroundThreadId = foregroundWindow != nint.Zero
+            ? TriffViewNativeMethods.GetWindowThreadProcessId(foregroundWindow, out _)
+            : 0;
 
-        if (profile.AlwaysMaximizeClients)
+        var attached = false;
+        if (foregroundWindow != nint.Zero && foregroundThreadId != 0 && foregroundThreadId != currentThreadId)
         {
-            TriffViewNativeMethods.ShowWindowAsync(client.Handle, TriffViewNativeMethods.SwMaximize);
-            activated |= TriffViewNativeMethods.SetForegroundWindow(client.Handle);
+            attached = TriffViewNativeMethods.AttachThreadInput(currentThreadId, foregroundThreadId, true);
+        }
+
+        try
+        {
+            var activated = TriffViewNativeMethods.SetForegroundWindow(client.Handle);
+            TriffViewNativeMethods.SetFocus(client.Handle);
+
+            if (profile.AlwaysMaximizeClients)
+            {
+                TriffViewNativeMethods.ShowWindowAsync(client.Handle, TriffViewNativeMethods.SwMaximize);
+                activated |= TriffViewNativeMethods.SetForegroundWindow(client.Handle);
+                return activated || TriffViewNativeMethods.GetForegroundWindow() == client.Handle;
+            }
+
+            if (TriffViewNativeMethods.IsIconic(client.Handle))
+            {
+                TriffViewNativeMethods.ShowWindowAsync(client.Handle, TriffViewNativeMethods.SwRestore);
+                activated |= TriffViewNativeMethods.SetForegroundWindow(client.Handle);
+            }
+
             return activated || TriffViewNativeMethods.GetForegroundWindow() == client.Handle;
         }
-
-        if (TriffViewNativeMethods.IsIconic(client.Handle))
+        finally
         {
-            TriffViewNativeMethods.ShowWindowAsync(client.Handle, TriffViewNativeMethods.SwRestore);
-            activated |= TriffViewNativeMethods.SetForegroundWindow(client.Handle);
+            if (attached)
+            {
+                TriffViewNativeMethods.AttachThreadInput(currentThreadId, foregroundThreadId, false);
+            }
         }
-
-        return activated || TriffViewNativeMethods.GetForegroundWindow() == client.Handle;
     }
 
     private void PostError(string action, string message)
@@ -4418,6 +4445,12 @@ internal static class TriffViewNativeMethods
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern nint SetFocus(nint hwnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool ShowWindow(nint hwnd, int command);
