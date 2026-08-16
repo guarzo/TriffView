@@ -35,9 +35,14 @@ jobs:
       # Unsigned, because this fork has no code-signing certificate.
       - name: Publish release executable
         shell: pwsh
+        # Passed as env rather than interpolated into the script body: a tag name is
+        # arbitrary text, and ${{ }} substitution would splice it into PowerShell source.
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          UPDATE_REPOSITORY: ${{ github.repository }}
         run: |
-          $version = "${{ github.ref_name }}" -replace '^v', ''
-          ./scripts/publish-release.ps1 -PackageMode SingleFile -SkipSign -SkipDefenderScan -Version $version -UpdateRepository "${{ github.repository }}"
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          ./scripts/publish-release.ps1 -PackageMode SingleFile -SkipSign -SkipDefenderScan -Version "$version" -UpdateRepository "$env:UPDATE_REPOSITORY"
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
