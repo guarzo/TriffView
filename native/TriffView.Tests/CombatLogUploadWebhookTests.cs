@@ -41,6 +41,24 @@ public class CombatLogUploadWebhookTests
         Assert.Contains("\"configured\":false", state, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void RepeatedStatePostsDoNotRereadTheCredentialStore()
+    {
+        var messages = new ConcurrentQueue<string>();
+        var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
+        using var controller = Controller(credentials, messages);
+
+        controller.Start();
+        Assert.True(SpinWait.SpinUntil(() => credentials.ReadCalls >= 1, TimeSpan.FromSeconds(5)));
+        var readsAfterStart = credentials.ReadCalls;
+
+        controller.HandleWebMessage("triffview:get-state", null);
+        controller.HandleWebMessage("triffview:get-state", null);
+        controller.HandleWebMessage("triffview:get-state", null);
+
+        Assert.Equal(readsAfterStart, credentials.ReadCalls);
+    }
+
     private static TriffViewController Controller(MemoryCredentials credentials, ConcurrentQueue<string> messages)
     {
         return new TriffViewController(
