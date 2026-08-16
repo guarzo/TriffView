@@ -23,6 +23,12 @@
     <Compile Include="..\..\native\TriffAlerts\CombatLogExport.cs" Link="CombatLogExport.cs" />
   </ItemGroup>
 
+  <!-- Same arrangement again. CombatLogUpload is plain BCL (Net.Http, Text.Json,
+       Uri parsing) with no WPF or Forms dependency, so it builds on net8.0 too. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAlerts\CombatLogUpload.cs" Link="CombatLogUpload.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
