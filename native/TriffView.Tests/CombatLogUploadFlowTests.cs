@@ -53,6 +53,52 @@ public class CombatLogUploadFlowTests
         }
     }
 
+    // Not async: nothing here is awaited (the flow under test is async void and
+    // is observed through the message queue), and an async method with no await
+    // is a CS1998 warning, which CI's --warnaserror turns into a build failure.
+    [Fact]
+    public void UploadCombatLogsComposesExportAndUploadAgainstAFakeHandlerAndCleansUpItsTempFile()
+    {
+        var gamelogsDir = CreateFixtureGamelogsDir();
+        try
+        {
+            var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            WriteFixtureGamelog(
+                gamelogsDir, "20260101000000_1_Pilot_One.txt", "Pilot One", start,
+                "[ 2026.01.01 00:00:05 ] (combat) hits you for 10 damage\r\n");
+
+            var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NoContent));
+            var messages = new ConcurrentQueue<string>();
+            var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
+            using var controller = Controller(credentials, messages, gamelogsPath: gamelogsDir, handler: handler);
+
+            controller.HandleWebMessage(
+                "triffview:upload-combat-logs",
+                JsonNode.Parse($$"""{"fromUtc":"{{start:O}}","toUtc":"{{start.AddMinutes(1):O}}"}""")!.AsObject());
+
+            Assert.True(SpinWait.SpinUntil(
+                () => messages.Any(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(10)));
+            var reply = messages.Last(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal));
+
+            // These fields (fileCount, characters) are exactly what the merge in
+            // UploadCombatLogs pulls from the CombatLogExportResult rather than
+            // from upload.ToState() alone -- UploadAsync never sees the export, so
+            // a regression there would show up here as fileCount:0 / characters:[].
+            Assert.Contains("\"succeeded\":true", reply, StringComparison.Ordinal);
+            Assert.Contains("\"fileCount\":1", reply, StringComparison.Ordinal);
+            Assert.Contains("\"characters\":[\"Pilot One\"]", reply, StringComparison.Ordinal);
+            Assert.Equal(1, handler.RequestCount);
+            Assert.True(SpinWait.SpinUntil(
+                () => !Directory.EnumerateFiles(TriffViewController.CombatLogUploadTempDir).Any(),
+                TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            Directory.Delete(gamelogsDir, recursive: true);
+        }
+    }
+
     private static TriffViewController Controller(
         MemoryCredentials credentials,
         ConcurrentQueue<string> messages,
