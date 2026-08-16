@@ -19,7 +19,16 @@ internal sealed class StubWebhookServer : IDisposable
     public Uri Uri { get; }
     public int StatusCode { get; set; } = 204;
     public string ResponseBody { get; set; } = "";
-    public int RequestCount { get; private set; }
+    private int _requestCount;
+
+    /// <summary>
+    /// Incremented on the accept-loop thread and read from the test thread, so
+    /// both sides go through <see cref="Interlocked"/>: a plain field would let
+    /// a test that waits for a request to arrive observe a stale zero (or, for
+    /// concurrent requests, a lost increment) with no memory barrier forcing
+    /// the write to become visible.
+    /// </summary>
+    public int RequestCount => Interlocked.CompareExchange(ref _requestCount, 0, 0);
     public string? LastContentType { get; private set; }
     public string? LastRequestBody { get; private set; }
 
@@ -69,7 +78,7 @@ internal sealed class StubWebhookServer : IDisposable
             }
             LastRequestBody = Encoding.UTF8.GetString(LastRequestBytes);
             LastContentType = context.Request.ContentType;
-            RequestCount++;
+            Interlocked.Increment(ref _requestCount);
 
             context.Response.StatusCode = StatusCode;
             var bytes = Encoding.UTF8.GetBytes(ResponseBody);
