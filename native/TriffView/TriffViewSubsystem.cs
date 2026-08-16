@@ -128,11 +128,19 @@ internal sealed class TriffViewController : IDisposable
     }
 
     /// <summary>
-    /// Reads the stored webhook, if any, resolving every failure to "absent"
-    /// rather than throwing. ICredentialStore.Read throws for every Win32 error
-    /// but "not found" (EveCredentialStore.cs), and Start() calls PostState()
-    /// unprotected -- an unavailable credential store must not take down startup
-    /// on a code path that has nothing to do with combat logs.
+    /// Reads the stored webhook, if any, resolving every failure -- including a
+    /// stored value that no longer satisfies the Discord host allowlist -- to
+    /// "absent" rather than throwing or trusting it. The credential store holds
+    /// opaque bytes and makes no promise about what wrote them
+    /// (native/Eve/EveCredentialStore.cs:56): a corrupted entry, a value written
+    /// by a future build with different rules, or a Credential Manager edit made
+    /// outside this app could all put an arbitrary host into this target.
+    /// Re-running TryParse on every read costs one string parse and closes that
+    /// hole (design doc, "The allowlist is also enforced on read, not only on
+    /// write"). ICredentialStore.Read also throws for every Win32 error but "not
+    /// found" (EveCredentialStore.cs), and Start() calls PostState() unprotected
+    /// -- an unavailable credential store must not take down startup on a code
+    /// path that has nothing to do with combat logs.
     /// </summary>
     private Uri? ReadCombatLogWebhook()
     {
@@ -140,7 +148,12 @@ internal sealed class TriffViewController : IDisposable
         {
             var raw = _credentials.Read(CombatLogWebhookCredentialTarget);
             if (string.IsNullOrWhiteSpace(raw)) return null;
-            return Uri.TryCreate(raw, UriKind.Absolute, out var webhook) ? webhook : null;
+            if (!DiscordWebhook.TryParse(raw, out var webhook, out var error))
+            {
+                TriffViewDiagnostics.Log("combat-log-webhook", $"Stored webhook no longer validates: {error}");
+                return null;
+            }
+            return webhook;
         }
         catch (Exception ex)
         {

@@ -21,7 +21,7 @@ public class CombatLogUploadWebhookTests
         Assert.True(SpinWait.SpinUntil(
             () => messages.Any(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal)),
             TimeSpan.FromSeconds(5)));
-        var state = messages.First(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal));
+        var state = messages.Last(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal));
         Assert.Contains("\"configured\":false", state, StringComparison.Ordinal);
     }
 
@@ -38,7 +38,7 @@ public class CombatLogUploadWebhookTests
         Assert.True(SpinWait.SpinUntil(
             () => messages.Any(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal)),
             TimeSpan.FromSeconds(5)));
-        var state = messages.First(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal));
+        var state = messages.Last(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal));
         Assert.Contains("\"configured\":false", state, StringComparison.Ordinal);
     }
 
@@ -133,6 +133,45 @@ public class CombatLogUploadWebhookTests
                 && json.Contains("\"action\":\"test-combat-log-webhook\"", StringComparison.Ordinal)
                 && json.Contains("Configure a Discord webhook first.", StringComparison.Ordinal)),
             TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public void StartReportsUnconfiguredWhenTheStoredWebhookFailsTheDiscordAllowlist()
+    {
+        var messages = new ConcurrentQueue<string>();
+        // A syntactically valid absolute URL, but not a Discord host -- exactly
+        // the case ReadCombatLogWebhook's read-time re-validation exists to catch.
+        var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://example.com/api/webhooks/1/tok"));
+        using var controller = Controller(credentials, messages);
+
+        controller.Start();
+
+        Assert.True(SpinWait.SpinUntil(
+            () => messages.Any(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal)),
+            TimeSpan.FromSeconds(5)));
+        var state = messages.Last(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal));
+        Assert.Contains("\"configured\":false", state, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TestCombatLogWebhookNeverDialsAStoredUrlThatFailsTheDiscordAllowlist()
+    {
+        using var stub = new StubWebhookServer();
+        var messages = new ConcurrentQueue<string>();
+        // Seeded directly, bypassing SetCombatLogWebhook's front-door validation --
+        // a loopback host can never satisfy the Discord allowlist, which is the
+        // point: this must resolve to "not configured", not an actual HTTP call.
+        var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, stub.Uri.ToString()));
+        using var controller = Controller(credentials, messages);
+
+        controller.HandleWebMessage("triffview:test-combat-log-webhook", null);
+
+        Assert.True(SpinWait.SpinUntil(
+            () => messages.Any(json => json.Contains("\"type\":\"triffview:error\"", StringComparison.Ordinal)
+                && json.Contains("\"action\":\"test-combat-log-webhook\"", StringComparison.Ordinal)
+                && json.Contains("Configure a Discord webhook first.", StringComparison.Ordinal)),
+            TimeSpan.FromSeconds(5)));
+        Assert.Equal(0, stub.RequestCount);
     }
 
     private static TriffViewController Controller(MemoryCredentials credentials, ConcurrentQueue<string> messages)
