@@ -20,6 +20,31 @@ function formatUtcWindow(startUtc, endUtc) {
   return start === end ? `${start}Z` : `${start}-${end}Z`;
 }
 
+// The range inputs are minute-granular and read as UTC by the native parser
+// (DateTime.TryParse with AssumeUniversal), so this must match the placeholder
+// format exactly. Local time never enters into it - every accessor is getUTC*.
+function formatUtcInput(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return (
+    `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}` +
+    ` ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`
+  );
+}
+
+// Rounds the window end up to the next minute. Truncating "now" would exclude
+// anything logged in the current partial minute - the tail of a fight that just
+// ended, which is exactly what these buttons are for.
+function quickRange(hours) {
+  const now = new Date();
+  const end = new Date(now);
+  if (end.getUTCSeconds() > 0 || end.getUTCMilliseconds() > 0) {
+    end.setUTCMinutes(end.getUTCMinutes() + 1);
+  }
+  end.setUTCSeconds(0, 0);
+  const start = new Date(end.getTime() - hours * 60 * 60 * 1000);
+  return { from: formatUtcInput(start), to: formatUtcInput(end) };
+}
+
 function formatBytes(value) {
   const bytes = Number(value);
   if (!Number.isFinite(bytes) || bytes < 0) return "";
@@ -55,7 +80,7 @@ function CombatLogExport({ lastFight, exportState, range, onRangeChange, onExpor
 
       <div className="triff-combat-export-paths">
         <div className="triff-combat-export-path">
-          <h4>Last fight</h4>
+          <h3>Last fight</h3>
           <p className="triffview-muted">Export the fight TriffAlerts most recently detected.</p>
           <button
             type="button"
@@ -67,8 +92,25 @@ function CombatLogExport({ lastFight, exportState, range, onRangeChange, onExpor
         </div>
 
         <div className="triff-combat-export-path">
-          <h4>Time range</h4>
+          <h3>Time range</h3>
           <p className="triffview-muted">For a fight from before TriffView was started.</p>
+          <div className="triff-combat-export-quick">
+            <span>Quick range:</span>
+            <button
+              type="button"
+              disabled={exportState.busy}
+              onClick={() => onRangeChange(quickRange(1))}
+            >
+              Last 1 hour
+            </button>
+            <button
+              type="button"
+              disabled={exportState.busy}
+              onClick={() => onRangeChange(quickRange(2))}
+            >
+              Last 2 hours
+            </button>
+          </div>
           <div className="triff-combat-export-range">
             <Field label="From (UTC)">
               <input

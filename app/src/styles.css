@@ -3094,11 +3094,23 @@ button:disabled {
   padding: 12px;
 }
 
-.triff-combat-export-path h4 {
+.triff-combat-export-path h3 {
   margin: 0;
   color: var(--tv-text-strong);
   font-size: 13px;
   font-weight: 700;
+}
+
+.triff-combat-export-quick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.triff-combat-export-quick span {
+  color: var(--tv-muted);
+  font-size: 11px;
 }
 
 .triff-combat-export-range {
