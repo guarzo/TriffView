@@ -92,7 +92,7 @@ public class CombatLogUploadWebhookTests
         Assert.True(SpinWait.SpinUntil(
             () => messages.Any(json => json.Contains("\"type\":\"triffview:combat-log-webhook\"", StringComparison.Ordinal)),
             TimeSpan.FromSeconds(5)));
-        var reply = messages.First(json => json.Contains("\"type\":\"triffview:combat-log-webhook\"", StringComparison.Ordinal));
+        var reply = messages.Last(json => json.Contains("\"type\":\"triffview:combat-log-webhook\"", StringComparison.Ordinal));
         Assert.Contains("\"configured\":true", reply, StringComparison.Ordinal);
         Assert.DoesNotContain("sekrit-token-value", reply, StringComparison.Ordinal);
         Assert.Equal(
@@ -154,13 +154,15 @@ public class CombatLogUploadWebhookTests
     }
 
     [Fact]
-    public void TestCombatLogWebhookNeverDialsAStoredUrlThatFailsTheDiscordAllowlist()
+    public void TestCombatLogWebhookNeverDialsAStoredUrlThatFailsHttpsValidation()
     {
         using var stub = new StubWebhookServer();
         var messages = new ConcurrentQueue<string>();
         // Seeded directly, bypassing SetCombatLogWebhook's front-door validation --
-        // a loopback host can never satisfy the Discord allowlist, which is the
-        // point: this must resolve to "not configured", not an actual HTTP call.
+        // a plain-http loopback URL is rejected by TryParse's https check before it
+        // ever reaches the host allowlist, which is the point: this must resolve to
+        // "not configured", not an actual HTTP call. Host-allowlist coverage lives
+        // in StartReportsUnconfiguredWhenTheStoredWebhookFailsTheDiscordAllowlist.
         var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, stub.Uri.ToString()));
         using var controller = Controller(credentials, messages);
 

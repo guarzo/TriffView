@@ -335,7 +335,7 @@ public class CombatLogUploadFlowTests
     /// Stands in for Discord's endpoint the same way StubWebhookServer does, but
     /// as an in-process HttpMessageHandler rather than a real socket -- this is
     /// what lets a genuine TriffViewController (built with a fixture Gamelogs
-    /// path from Task 3's constructor seam) be exercised end to end without
+    /// path from the constructor's gamelogsPath seam) be exercised end to end without
     /// touching the network or the credential store's Discord-host allowlist
     /// twice.
     /// </summary>

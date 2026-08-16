@@ -20,7 +20,7 @@ public class CombatLogUploadStubServerTests
         using var server = new StubWebhookServer { StatusCode = 204 };
         // The token segment is whatever this instance of the shared stub happens to use --
         // read it back from the Uri rather than hard-coding it, so this assertion still means
-        // something if Task 3's server ever changes its path shape.
+        // something if StubWebhookServer ever changes its path shape.
         var token = server.Uri.Segments[^1];
         const string content = "3 pilots, 2026-08-16 00:00-01:00 UTC. 4 files dropped.";
 
@@ -62,7 +62,7 @@ public class CombatLogUploadStubServerTests
     }
 
     [Fact]
-    public async Task FailedUpload_ReturnsFailureResult_AndStillDeletesTempFiles()
+    public async Task FailedUpload_ReturnsFailureResult()
     {
         var zipBytes = Encoding.UTF8.GetBytes("fake zip contents for failure-path test");
         var zipPath = Path.Combine(Path.GetTempPath(), $"triffview-fight-{Guid.NewGuid():N}.zip");
@@ -88,6 +88,11 @@ public class CombatLogUploadStubServerTests
 
         Assert.False(result.Succeeded);
         Assert.DoesNotContain(token, result.Message, StringComparison.Ordinal);
+        // Not cleanup coverage -- the finally above deletes both files unconditionally,
+        // so these can only ever observe this test's own tidy-up (real coverage is in
+        // CombatLogUploadFlowTests). What they retain is a leaked-handle check only a
+        // live socket can give: if UploadAsync ever failed to close its FileStream, the
+        // File.Delete in the finally would throw IOException and fail the test.
         Assert.False(File.Exists(zipPath));
         Assert.False(File.Exists(stagingPath));
     }

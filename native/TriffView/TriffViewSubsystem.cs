@@ -145,7 +145,7 @@ internal sealed class TriffViewController : IDisposable
     /// stored value that no longer satisfies the Discord host allowlist -- to
     /// "absent" rather than throwing or trusting it. The credential store holds
     /// opaque bytes and makes no promise about what wrote them
-    /// (native/Eve/EveCredentialStore.cs:56): a corrupted entry, a value written
+    /// (native/Eve/EveCredentialStore.cs): a corrupted entry, a value written
     /// by a future build with different rules, or a Credential Manager edit made
     /// outside this app could all put an arbitrary host into this target.
     /// Re-running TryParse on every read costs one string parse and closes that
