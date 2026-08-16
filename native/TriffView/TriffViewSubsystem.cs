@@ -2701,10 +2701,17 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 
         var deltaX = e.Location.X - _mouseDownPoint.X;
         var deltaY = e.Location.Y - _mouseDownPoint.Y;
+
+        // Locked previews cannot be dragged, so there is nothing for this displacement check to
+        // decide: a press stays PendingClick no matter how far the cursor travels before release,
+        // and OnMouseUp judges the click by where the button came back up instead. Reclassifying
+        // to Move/None here on distance alone is exactly what used to swallow clicks made while
+        // the mouse was in motion — a real click covers far more than SM_CXDRAG at ordinary speed.
         if (_mouseMode == MouseMode.PendingClick
+            && !_profile.LockPreviews
             && !PreviewPointerGesture.IsClick(_mouseDownPoint, e.Location, Forms.SystemInformation.DragSize))
         {
-            _mouseMode = _profile.LockPreviews ? MouseMode.None : MouseMode.Move;
+            _mouseMode = MouseMode.Move;
         }
 
         if (_mouseMode == MouseMode.Move)
@@ -2779,6 +2786,21 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 
         if (mode == MouseMode.PendingClick && e.Button == Forms.MouseButtons.Left)
         {
+            // Locked previews never leave PendingClick in OnMouseMove regardless of distance
+            // travelled, so the gesture is decided here instead: release over the SAME preview
+            // that was pressed activates it, release elsewhere is a cancelled click (pressed,
+            // changed their mind, dragged off before letting go). Checked against the pressed
+            // preview's own frame rather than HitPreview so an overlapping preview can't steal it.
+            if (_profile.LockPreviews)
+            {
+                var releaseAbsolute = new Point(e.Location.X + _virtualDesktop.Left, e.Location.Y + _virtualDesktop.Top);
+                if (PreviewPointerGesture.IsLockedReleaseActivation(preview.FrameRect, releaseAbsolute))
+                {
+                    ActivateRequested?.Invoke(preview.Client);
+                }
+                return;
+            }
+
             ActivateRequested?.Invoke(preview.Client);
         }
     }
