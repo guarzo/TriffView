@@ -83,4 +83,40 @@ public static class DiscordWebhook
         token = segments[3];
         return true;
     }
+
+    /// <summary>
+    /// A human-readable name for a webhook that omits its token, for the
+    /// state posted back to the web UI ("discord.com/api/webhooks/1234…") and
+    /// for anywhere else a webhook needs to be named without handing back the
+    /// credential that names it.
+    /// </summary>
+    public static string Describe(Uri webhook)
+    {
+        return TryReadIdAndToken(webhook, out var id, out _)
+            ? $"{webhook.Host}/api/webhooks/{id}…"
+            : webhook.Host;
+    }
+
+    /// <summary>
+    /// Scrubs the token out of an arbitrary string -- an exception message,
+    /// most often. Two passes because the token can surface either way:
+    /// <see cref="HttpRequestException"/> messages sometimes carry the whole
+    /// request URI and sometimes just a fragment naming the token, depending
+    /// on platform and .NET version. This is the one thing standing between a
+    /// stray exception and the credential reaching <c>PostError</c>, so it is
+    /// tested directly rather than assumed.
+    /// </summary>
+    public static string Redact(string message, Uri webhook)
+    {
+        if (string.IsNullOrEmpty(message)) return message;
+
+        var result = message.Replace(webhook.AbsoluteUri, Describe(webhook), StringComparison.Ordinal);
+
+        if (TryReadIdAndToken(webhook, out _, out var token) && token.Length > 0)
+        {
+            result = result.Replace(token, "…", StringComparison.Ordinal);
+        }
+
+        return result;
+    }
 }

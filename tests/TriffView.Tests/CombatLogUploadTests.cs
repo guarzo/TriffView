@@ -90,4 +90,52 @@ public class CombatLogUploadTests
         Assert.False(DiscordWebhook.TryParse("not a url", out _, out var error));
         Assert.NotEqual("", error);
     }
+
+    // ---- DiscordWebhook.Describe / Redact ----
+
+    private static readonly Uri SampleWebhook = new(
+        "https://discord.com/api/webhooks/123456789/abcDEF-token_123");
+
+    [Fact]
+    public void DescribeNamesTheHostAndIdButNeverTheToken()
+    {
+        var description = DiscordWebhook.Describe(SampleWebhook);
+
+        Assert.Contains("discord.com", description);
+        Assert.Contains("123456789", description);
+        Assert.DoesNotContain("abcDEF-token_123", description);
+    }
+
+    [Fact]
+    public void RedactScrubsTheFullUrlFromAnArbitraryMessage()
+    {
+        var message = $"Could not reach {SampleWebhook.AbsoluteUri}: connection refused";
+
+        var redacted = DiscordWebhook.Redact(message, SampleWebhook);
+
+        Assert.DoesNotContain("abcDEF-token_123", redacted);
+        Assert.Contains("connection refused", redacted);
+    }
+
+    [Fact]
+    public void RedactScrubsALoneTokenEvenWithoutTheFullUrl()
+    {
+        // HttpRequestException messages vary by platform and .NET version --
+        // some carry the full request URI, some just a fragment of it. The
+        // token itself must never survive either shape.
+        var message = "PostAsync failed for token abcDEF-token_123 after 3 retries";
+
+        var redacted = DiscordWebhook.Redact(message, SampleWebhook);
+
+        Assert.DoesNotContain("abcDEF-token_123", redacted);
+        Assert.Contains("after 3 retries", redacted);
+    }
+
+    [Fact]
+    public void RedactLeavesUnrelatedTextAlone()
+    {
+        var redacted = DiscordWebhook.Redact("Discord returned 500 Internal Server Error", SampleWebhook);
+
+        Assert.Equal("Discord returned 500 Internal Server Error", redacted);
+    }
 }
