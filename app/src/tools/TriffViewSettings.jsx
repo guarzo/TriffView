@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Pencil } from "lucide-react";
 import { clearHudTextFocus, onNativeMessage, postNative } from "../nativeBridge.js";
+import Field from "./Field.jsx";
+import CombatLogExport from "./CombatLogExport.jsx";
 
 const EMPTY_STATE = {
   enabled: false,
@@ -132,15 +134,6 @@ function patchAlerts(patch) {
 
 function patchAlertEvent(eventType, patch) {
   send("triffalerts:update-event", { eventType, patch });
-}
-
-function Field({ label, children }) {
-  return (
-    <label className="triffview-field">
-      <span>{label}</span>
-      {children}
-    </label>
-  );
 }
 
 function Toggle({ label, checked, onChange }) {
@@ -540,33 +533,6 @@ function formatAlertTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-// EVE writes its logs in EVE time, which is UTC, and the export window is
-// matched against those timestamps. Showing it in local time would invite the
-// user to type a local range into a field that is read as UTC.
-function formatUtcTime(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const hours = String(date.getUTCHours()).padStart(2, "0");
-  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
-  return `${hours}:${minutes}`;
-}
-
-function formatUtcWindow(startUtc, endUtc) {
-  const start = formatUtcTime(startUtc);
-  const end = formatUtcTime(endUtc);
-  if (!start || !end) return "";
-  return start === end ? `${start}Z` : `${start}-${end}Z`;
-}
-
-function formatBytes(value) {
-  const bytes = Number(value);
-  if (!Number.isFinite(bytes) || bytes < 0) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function severityLabel(value) {
@@ -1819,82 +1785,13 @@ function TriffViewSettings({ open = true }) {
               <p className="triffview-muted">No alerts in this session yet.</p>
             )}
           </div>
-          <div className="triffview-subsection">
-            <div className="triff-alert-history-head">
-              <h4>Combat log export</h4>
-            </div>
-            <p className="triffview-muted">
-              Packages the EVE game logs covering a fight into a zip you can upload to Discord for
-              eve-intel. Game logs only, copied as-is, plus a small manifest listing your characters.
-              Chat logs are never included.
-            </p>
-            {lastFight ? (
-              <p className="triff-combat-export-window">
-                Last fight <strong>{formatUtcWindow(lastFight.startUtc, lastFight.endUtc)}</strong>
-                {lastFight.characters?.length ? ` - ${lastFight.characters.join(", ")}` : ""}
-              </p>
-            ) : (
-              <p className="triffview-muted">
-                No fight detected yet. Alerts must be enabled, and only fights seen while TriffView
-                has been running are detected - use the time range below for anything older.
-              </p>
-            )}
-            <div className="triff-combat-export-actions">
-              <button
-                type="button"
-                disabled={!lastFight || combatLogExport.busy}
-                onClick={() => exportCombatLogs(null)}
-              >
-                Export last fight
-              </button>
-            </div>
-            <div className="triff-combat-export-range">
-              <Field label="From (UTC)">
-                <input
-                  type="text"
-                  placeholder="2026-08-14 20:10"
-                  value={combatLogRange.from}
-                  onChange={(event) => setCombatLogRange((current) => ({ ...current, from: event.target.value }))}
-                />
-              </Field>
-              <Field label="To (UTC)">
-                <input
-                  type="text"
-                  placeholder="2026-08-14 20:35"
-                  value={combatLogRange.to}
-                  onChange={(event) => setCombatLogRange((current) => ({ ...current, to: event.target.value }))}
-                />
-              </Field>
-              <button
-                type="button"
-                disabled={!combatLogRange.from || !combatLogRange.to || combatLogExport.busy}
-                onClick={() => exportCombatLogs(combatLogRange)}
-              >
-                Export range
-              </button>
-            </div>
-            {combatLogExport.result ? (
-              <p className="triff-combat-export-result">
-                Exported {combatLogExport.result.fileCount} log
-                {combatLogExport.result.fileCount === 1 ? "" : "s"}
-                {combatLogExport.result.characters?.length
-                  ? ` (${combatLogExport.result.characters.join(", ")})`
-                  : ""}{" "}
-                to {combatLogExport.result.path} - {formatBytes(combatLogExport.result.zipBytes)} zipped.
-                {combatLogExport.result.droppedFileCount
-                  ? ` ${combatLogExport.result.droppedFileCount} further matching log${
-                      combatLogExport.result.droppedFileCount === 1 ? " was" : "s were"
-                    } left out at the file limit - narrow the time range to cover them.`
-                  : ""}
-                {combatLogExport.result.exceedsDiscordLimit
-                  ? " This is over Discord's 10 MB upload limit, so a narrower time range may be needed."
-                  : ""}
-              </p>
-            ) : null}
-            {combatLogExport.error ? (
-              <p className="triff-combat-export-error">{combatLogExport.error}</p>
-            ) : null}
-          </div>
+          <CombatLogExport
+            lastFight={lastFight}
+            exportState={combatLogExport}
+            range={combatLogRange}
+            onRangeChange={setCombatLogRange}
+            onExport={exportCombatLogs}
+          />
           <SliderControl
             label="Master volume"
             min={0}
