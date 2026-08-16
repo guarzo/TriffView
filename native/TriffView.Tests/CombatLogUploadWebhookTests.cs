@@ -100,6 +100,26 @@ public class CombatLogUploadWebhookTests
             credentials.Stored(TriffViewController.CombatLogWebhookCredentialTarget));
     }
 
+    [Fact]
+    public void ClearCombatLogWebhookDeletesTheCredentialAndRepliesUnconfigured()
+    {
+        var messages = new ConcurrentQueue<string>();
+        var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
+        using var controller = Controller(credentials, messages);
+        controller.Start();
+
+        controller.HandleWebMessage("triffview:clear-combat-log-webhook", null);
+
+        // One, not two: Start() reports the webhook inside triffview:state, so
+        // the clear is the first message of this type the UI ever sees.
+        Assert.True(SpinWait.SpinUntil(
+            () => messages.Count(json => json.Contains("\"type\":\"triffview:combat-log-webhook\"", StringComparison.Ordinal)) >= 1,
+            TimeSpan.FromSeconds(5)));
+        var reply = messages.Last(json => json.Contains("\"type\":\"triffview:combat-log-webhook\"", StringComparison.Ordinal));
+        Assert.Contains("\"configured\":false", reply, StringComparison.Ordinal);
+        Assert.Null(credentials.Stored(TriffViewController.CombatLogWebhookCredentialTarget));
+    }
+
     private static TriffViewController Controller(MemoryCredentials credentials, ConcurrentQueue<string> messages)
     {
         return new TriffViewController(

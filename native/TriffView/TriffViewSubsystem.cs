@@ -266,6 +266,9 @@ internal sealed class TriffViewController : IDisposable
             case "triffview:set-combat-log-webhook":
                 SetCombatLogWebhook(message?["url"]?.GetValue<string>());
                 return true;
+            case "triffview:clear-combat-log-webhook":
+                ClearCombatLogWebhook();
+                return true;
             case "triffview:restore-settings-backup":
                 RestoreSettingsBackup();
                 return true;
@@ -1249,6 +1252,22 @@ internal sealed class TriffViewController : IDisposable
             // nothing was tested, so this is still a refusal to report, not an
             // outcome of testing the webhook.
             PostError("set-combat-log-webhook", DiscordWebhook.Redact(ex.Message, webhook));
+            return;
+        }
+
+        RefreshCombatLogWebhookState();
+        PostCombatLogWebhookState();
+    }
+
+    private void ClearCombatLogWebhook()
+    {
+        try
+        {
+            _credentials.Delete(CombatLogWebhookCredentialTarget);
+        }
+        catch (Exception ex)
+        {
+            PostError("clear-combat-log-webhook", ex.Message);
             return;
         }
 
