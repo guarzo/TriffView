@@ -276,6 +276,11 @@ internal sealed class TriffViewController : IDisposable
                     message?["fromUtc"]?.GetValue<string>(),
                     message?["toUtc"]?.GetValue<string>());
                 return true;
+            case "triffview:upload-combat-logs":
+                UploadCombatLogs(
+                    message?["fromUtc"]?.GetValue<string>(),
+                    message?["toUtc"]?.GetValue<string>());
+                return true;
             case "triffview:set-combat-log-webhook":
                 SetCombatLogWebhook(message?["url"]?.GetValue<string>());
                 return true;
@@ -1336,6 +1341,163 @@ internal sealed class TriffViewController : IDisposable
             description = _combatLogWebhook.Description,
             testResult,
         });
+    }
+
+    /// <summary>
+    /// Everything under here was put there by UploadCombatLogs below and has no
+    /// other owner, which is what lets SweepStaleCombatLogTemps enumerate it
+    /// without risk. SuggestFileName is deterministic, and %TEMP% itself is a
+    /// valid destination for the Export save dialog -- sweeping a
+    /// triffview-fight-*.zip glob across the whole temp directory could delete
+    /// an archive a user deliberately saved there by hand, since the generated
+    /// name could collide with one this feature also generates. Created on
+    /// demand; never assumed to already exist. Internal rather than private so
+    /// the upload tests can assert the staging file is actually gone.
+    /// </summary>
+    internal static string CombatLogUploadTempDir => Path.Combine(Path.GetTempPath(), "TriffView-upload");
+
+    /// <summary>
+    /// Mirrors ExportCombatLogs' disposal discipline (see its own header comment),
+    /// widened for a slower and less certain step: a stalled upload socket can
+    /// hang far longer than compressing ever could, which is exactly the kind of
+    /// hang that comment warns an async void method must never risk -- a throw
+    /// reaching the catch below after disposal reaches the thread pool and takes
+    /// the process with it. The CancellationTokenSource below is what guarantees
+    /// this method always terminates.
+    /// </summary>
+    private async void UploadCombatLogs(string? fromUtc, string? toUtc)
+    {
+        string? tempPath = null;
+        try
+        {
+            var window = BuildCombatLogWindow(fromUtc, toUtc);
+            if (window == null)
+            {
+                PostError(
+                    "upload-combat-logs",
+                    "No recent fight found in the alert history. Alerts must be enabled and a fight " +
+                    "must have happened while TriffView was running, or you can enter a UTC time range.");
+                return;
+            }
+
+            var webhook = ReadCombatLogWebhook();
+            if (webhook == null)
+            {
+                PostError("upload-combat-logs", "Configure a Discord webhook first.");
+                return;
+            }
+
+            // Staged in a subdirectory this feature owns exclusively -- see
+            // CombatLogUploadTempDir's header comment for why the sweep and the
+            // export save dialog would otherwise be able to collide.
+            Directory.CreateDirectory(CombatLogUploadTempDir);
+            tempPath = Path.Combine(CombatLogUploadTempDir, CombatLogExport.SuggestFileName(window));
+            var gamelogsPath = _alerts.GamelogsPath;
+            // Off the dispatcher for the same reason ExportCombatLogs is: compressing
+            // a long session's logs on the UI thread would stall every preview.
+            var result = await Task.Run(() => CombatLogExport.Export(
+                gamelogsPath, window.StartUtc, window.EndUtc, tempPath, window.Source));
+
+            if (result.ExceedsDiscordLimit)
+            {
+                PostError(
+                    "upload-combat-logs",
+                    $"That archive is {result.ZipBytes / (1024.0 * 1024.0):F1} MB, over Discord's 10 MB limit. " +
+                    "Narrow the time range, or use Export to save it and upload by hand.");
+                return;
+            }
+
+            var content = FormatCombatLogUploadContent(result);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(CombatLogUpload.UploadTimeoutSeconds));
+            var upload = await CombatLogUpload.UploadAsync(_combatLogUploadHttp, webhook, tempPath, content, cts.Token);
+
+            // Same race ExportCombatLogs guards against: an upload can outlive a
+            // shutdown, and posting to a disposed controller from the catch below
+            // would throw into the thread pool and take the process with it.
+            if (_disposed) return;
+
+            // UploadAsync is handed only a path and a string -- it knows nothing of the export
+            // window, the pilots, or the file counts, which is what lets it be tested with a fake
+            // handler and no export at all (CombatLogUpload.cs). So FileCount, StartUtc, EndUtc,
+            // Characters and DroppedFileCount all come back at their defaults, and the merge has
+            // to happen here, from the CombatLogExportResult already sitting in `result`, before
+            // anything is posted. ToState() stays the one place the wire shape is defined; this
+            // just fills in what UploadAsync could not have known.
+            var merged = new CombatLogUploadResult
+            {
+                Succeeded = upload.Succeeded,
+                Message = upload.Message,
+                ZipBytes = upload.ZipBytes,
+                FileCount = result.FileCount,
+                StartUtc = result.StartUtc,
+                EndUtc = result.EndUtc,
+                Characters = result.Characters,
+                DroppedFileCount = result.DroppedFileCount,
+            };
+
+            // Everything above this point (no fight window, no webhook, oversize
+            // archive) is a pre-flight refusal reported through PostError: nothing
+            // was attempted. Past this line the upload genuinely ran, so its
+            // result -- success or failure -- is always reported through
+            // combat-log-upload's result field, never through PostError. Same
+            // split TestCombatLogWebhook uses for testResult.
+            _postToHud(new
+            {
+                type = "triffview:combat-log-upload",
+                result = merged.ToState(),
+            });
+        }
+        catch (Exception ex)
+        {
+            if (_disposed) return;
+            // Unlike the upload's own failure (reported via result above), an
+            // exception here comes from BuildCombatLogWindow, CombatLogExport.Export,
+            // or file I/O around the temp path -- nothing Discord ever saw, so
+            // there is no "attempt" to report an outcome of.
+            PostError("upload-combat-logs", ex.Message);
+        }
+        finally
+        {
+            // Unconditional: covers the size-limit refusal, a failed upload, a
+            // successful one, and any exception above -- the temp copy's job ends
+            // here on every path, matching the spec's flow description exactly.
+            if (tempPath != null) TryDeleteCombatLogTemp(tempPath);
+        }
+    }
+
+    /// <summary>
+    /// The line posted to Discord alongside the archive. Framing lives here,
+    /// not in CombatLogUpload, which stays free of any opinion about wording.
+    /// DroppedFileCount is reported on success as well as failure: an upload
+    /// lands directly in a channel someone builds an after-action report from,
+    /// having never seen this app's UI, so the warning has to reach the channel
+    /// itself rather than only the operator (see CombatLogExport.cs's own
+    /// DroppedFileCount comment for the same reasoning on the save path).
+    /// </summary>
+    private static string FormatCombatLogUploadContent(CombatLogExportResult result)
+    {
+        var pilots = result.Characters.Count;
+        var pilotWord = pilots == 1 ? "pilot" : "pilots";
+        var line = $"TriffView combat log: {result.StartUtc:yyyy-MM-dd HH:mm}Z to {result.EndUtc:yyyy-MM-dd HH:mm}Z, {pilots} {pilotWord}.";
+        if (result.DroppedFileCount > 0)
+        {
+            line += $" {result.DroppedFileCount} additional matching log file(s) were not included (64-file cap).";
+        }
+        return line;
+    }
+
+    private static void TryDeleteCombatLogTemp(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch (Exception ex)
+        {
+            // Best-effort: a file already gone or briefly locked must not turn a
+            // completed (or failed) upload into a reported error.
+            TriffViewDiagnostics.Log("combat-log-upload", $"Failed to delete temp archive '{path}': {ex.Message}");
+        }
     }
 
     /// <summary>
