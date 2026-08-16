@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows.Threading;
@@ -27,14 +28,100 @@ public class CombatLogUploadFlowTests
             TimeSpan.FromSeconds(5)));
     }
 
-    private static TriffViewController Controller(MemoryCredentials credentials, ConcurrentQueue<string> messages)
+    [Fact]
+    public void UploadCombatLogsReportsANoOverlapWindowAsAnErrorNotASilentSkip()
+    {
+        var gamelogsDir = CreateFixtureGamelogsDir();
+        try
+        {
+            var messages = new ConcurrentQueue<string>();
+            var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
+            using var controller = Controller(credentials, messages, gamelogsPath: gamelogsDir);
+
+            controller.HandleWebMessage(
+                "triffview:upload-combat-logs",
+                JsonNode.Parse("""{"fromUtc":"2000-01-01T00:00:00Z","toUtc":"2000-01-01T00:01:00Z"}""")!.AsObject());
+
+            Assert.True(SpinWait.SpinUntil(
+                () => messages.Any(json => json.Contains("\"type\":\"triffview:error\"", StringComparison.Ordinal)
+                    && json.Contains("\"action\":\"upload-combat-logs\"", StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(10)));
+        }
+        finally
+        {
+            Directory.Delete(gamelogsDir, recursive: true);
+        }
+    }
+
+    private static TriffViewController Controller(
+        MemoryCredentials credentials,
+        ConcurrentQueue<string> messages,
+        string? gamelogsPath = null,
+        HttpMessageHandler? handler = null)
     {
         return new TriffViewController(
             Dispatcher.CurrentDispatcher,
             value => messages.Enqueue(JsonSerializer.Serialize(value)),
             reassertHudTopmost: () => { },
             applySettingsAlwaysOnTop: _ => { },
-            credentials);
+            credentials,
+            gamelogsPath,
+            handler == null ? null : new HttpClient(handler));
+    }
+
+    /// <summary>
+    /// Stands in for Discord's endpoint the same way StubWebhookServer does, but
+    /// as an in-process HttpMessageHandler rather than a real socket -- this is
+    /// what lets a genuine TriffViewController (built with a fixture Gamelogs
+    /// path from Task 3's constructor seam) be exercised end to end without
+    /// touching the network or the credential store's Discord-host allowlist
+    /// twice.
+    /// </summary>
+    private sealed class FakeHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        private int _requestCount;
+
+        /// <summary>
+        /// Written on whatever thread HttpClient resumes on and read from the
+        /// test thread, so it goes through Interlocked for the same reason
+        /// StubWebhookServer's counter does.
+        /// </summary>
+        public int RequestCount => Interlocked.CompareExchange(ref _requestCount, 0, 0);
+
+        public byte[]? LastRequestBytes { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            LastRequestBytes = request.Content == null
+                ? null
+                : await request.Content.ReadAsByteArrayAsync(cancellationToken);
+            // After the body capture, so a test that waits on the count and then
+            // reads the bytes can never observe the count without them.
+            Interlocked.Increment(ref _requestCount);
+            return respond(request);
+        }
+    }
+
+    private static string CreateFixtureGamelogsDir() =>
+        Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "triffview-upload-fixture", Guid.NewGuid().ToString("N"))).FullName;
+
+    /// <summary>
+    /// Matches the real Gamelog header format CombatLogExport.cs parses:
+    /// "Listener:" is the pilot identity, "Session Started:" is read as a
+    /// fallback window anchor, but SelectLogs actually windows against the
+    /// file's real filesystem LastWriteTimeUtc (i.e. "now", when this writes
+    /// it) -- which is why every fixture window below starts in the past and
+    /// leaves its end open-ended, the same shape already proven out by the
+    /// no-overlap test above.
+    /// </summary>
+    private static void WriteFixtureGamelog(string dir, string fileName, string listener, DateTime sessionStartUtc, string body)
+    {
+        File.WriteAllText(
+            Path.Combine(dir, fileName),
+            "Gamelog\r\n\r\n" +
+            $"            Listener: {listener}\r\n" +
+            $"  Session Started: {sessionStartUtc:yyyy.MM.dd HH:mm:ss}\r\n\r\n" +
+            body);
     }
 
     private sealed class MemoryCredentials(params (string Target, string Secret)[] entries) : ICredentialStore
