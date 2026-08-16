@@ -24,6 +24,23 @@ public class CombatLogUploadWebhookTests
         Assert.Contains("\"configured\":false", state, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void StartResolvesUnreadableCredentialStoreToUnconfiguredWithoutThrowing()
+    {
+        var messages = new ConcurrentQueue<string>();
+        var credentials = new MemoryCredentials { FailRead = true };
+        using var controller = Controller(credentials, messages);
+
+        var exception = Record.Exception(() => controller.Start());
+
+        Assert.Null(exception);
+        Assert.True(SpinWait.SpinUntil(
+            () => messages.Any(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal)),
+            TimeSpan.FromSeconds(5)));
+        var state = messages.First(json => json.Contains("\"combatLogWebhook\"", StringComparison.Ordinal));
+        Assert.Contains("\"configured\":false", state, StringComparison.Ordinal);
+    }
+
     private static TriffViewController Controller(MemoryCredentials credentials, ConcurrentQueue<string> messages)
     {
         return new TriffViewController(
