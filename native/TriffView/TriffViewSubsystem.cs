@@ -3,12 +3,14 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows.Threading;
 using TriffView.Alerts;
+using TriffView.Eve;
 using Forms = System.Windows.Forms;
 
 namespace TriffView.Preview;
@@ -22,7 +24,20 @@ internal sealed class TriffViewController : IDisposable
     private readonly Action<bool> _applySettingsAlwaysOnTop;
     private readonly EveWindowTracker _tracker = new();
     private readonly object _trackerGate = new();
-    private readonly TriffAlertsService _alerts = new();
+    private readonly TriffAlertsService _alerts;
+    private readonly ICredentialStore _credentials;
+
+    /// <summary>
+    /// Its own client, deliberately separate from any ESI HttpClient elsewhere in
+    /// the repo (those are tuned to 8s/20s for small JSON calls). Timeout is left
+    /// infinite and bounded per-request instead, via the CancellationTokenSource
+    /// in UploadCombatLogs and TestCombatLogWebhook (both below) -- see
+    /// CombatLogUpload.cs's header comment for why one client is shared between
+    /// test and upload. Constructor-injectable for the same reason `_credentials`
+    /// is: standing up a real socket per test case is slower and noisier than
+    /// substituting a fake `HttpMessageHandler`.
+    /// </summary>
+    private readonly HttpClient _combatLogUploadHttp;
     private readonly ConcurrentQueue<TriffAlertEvent> _pendingAlerts = new();
     private readonly DispatcherTimer _timer;
     private readonly DispatcherTimer _switchStateTimer;
@@ -44,17 +59,29 @@ internal sealed class TriffViewController : IDisposable
     private nint _foregroundWinEventHook;
     private bool _hasObservedForeground;
     private bool _lastObservedForegroundWasEve;
+    private (bool Configured, string Description) _combatLogWebhook;
 
     public TriffViewSettings Settings { get; }
     public bool SettingsPanelOpen => _settingsPanelOpen;
+    internal const string CombatLogWebhookCredentialTarget = "TriffView.CombatLogExport.DiscordWebhook";
     public event Action<TriffAlertEvent>? AlertNotificationRequested;
 
-    public TriffViewController(Dispatcher dispatcher, Action<object> postToHud, Action reassertHudTopmost, Action<bool> applySettingsAlwaysOnTop)
+    public TriffViewController(
+        Dispatcher dispatcher,
+        Action<object> postToHud,
+        Action reassertHudTopmost,
+        Action<bool> applySettingsAlwaysOnTop,
+        ICredentialStore? credentials = null,
+        string? gamelogsPath = null,
+        HttpClient? combatLogUploadHttp = null)
     {
         _dispatcher = dispatcher;
         _postToHud = postToHud;
         _reassertHudTopmost = reassertHudTopmost;
         _applySettingsAlwaysOnTop = applySettingsAlwaysOnTop;
+        _credentials = credentials ?? new WindowsCredentialStore();
+        _alerts = new TriffAlertsService(gamelogsPath);
+        _combatLogUploadHttp = combatLogUploadHttp ?? new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         _foregroundWinEventProc = OnForegroundWinEvent;
         Settings = TriffViewSettings.Load();
         _overlay = new TriffViewOverlayForm();
@@ -96,7 +123,43 @@ internal sealed class TriffViewController : IDisposable
         StartForegroundTracking();
         StartDisplayTracking();
         LogLayoutSnapshot("startup");
+        RefreshCombatLogWebhookState();
         PostState();
+    }
+
+    /// <summary>
+    /// Reads the stored webhook, if any, resolving every failure to "absent"
+    /// rather than throwing. ICredentialStore.Read throws for every Win32 error
+    /// but "not found" (EveCredentialStore.cs), and Start() calls PostState()
+    /// unprotected -- an unavailable credential store must not take down startup
+    /// on a code path that has nothing to do with combat logs.
+    /// </summary>
+    private Uri? ReadCombatLogWebhook()
+    {
+        try
+        {
+            var raw = _credentials.Read(CombatLogWebhookCredentialTarget);
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            return Uri.TryCreate(raw, UriKind.Absolute, out var webhook) ? webhook : null;
+        }
+        catch (Exception ex)
+        {
+            TriffViewDiagnostics.Log("combat-log-webhook", $"Credential read failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Recomputes the cached { configured, description } pair. Called once from
+    /// Start() and again only when a set or clear succeeds -- PostState runs from
+    /// the 700ms periodic refresh and the 100ms post-switch timer, and a CredRead
+    /// P/Invoke on that path would run several times a minute forever to answer a
+    /// question whose answer changes only when the user edits it.
+    /// </summary>
+    private void RefreshCombatLogWebhookState()
+    {
+        var webhook = ReadCombatLogWebhook();
+        _combatLogWebhook = webhook == null ? (false, "") : (true, DiscordWebhook.Describe(webhook));
     }
 
     /// <summary>
@@ -2020,6 +2083,11 @@ internal sealed class TriffViewController : IDisposable
             lastFight = CombatLogExport.DetectLastFight(alertHistory)?.ToState(),
             hotkeyFailures = _overlay.HotkeyFailures,
             dwmAvailable = _overlay.DwmAvailable,
+            combatLogWebhook = new
+            {
+                configured = _combatLogWebhook.Configured,
+                description = _combatLogWebhook.Description,
+            },
         };
 
         var json = JsonSerializer.Serialize(payload);
