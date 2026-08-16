@@ -29,6 +29,12 @@ No keystrokes, no chat, no screenshots, no game data, no network activity. It ne
 logs or memory. Nothing is transmitted anywhere; the file sits on your disk until you choose to
 send it.
 
+That is a claim about this log specifically, not about TriffView as a whole. The combat log export
+panel can upload a zip of your actual game logs to a Discord webhook you configure yourself — that
+is real network activity, and it lives entirely outside this file. See the [Combat log
+export](../README.md#combat-log-export) section of the README for what that upload sends and where
+it goes.
+
 ## Privacy note before you send it
 
 **The log contains your EVE character names.** They are how preview positions are stored, so they
