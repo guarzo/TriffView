@@ -605,6 +605,17 @@ internal sealed class TriffViewController : IDisposable
         _hasObservedForeground = true;
         _lastObservedForegroundWasEve = foregroundIsEve;
 
+        // Focus left EVE entirely. Clear the alert-acknowledgement signal immediately rather
+        // than waiting for the next periodic refresh to recompute it: this method is driven by
+        // an EVENT_SYSTEM_FOREGROUND WinEvent hook, so it observes the transition as it happens,
+        // whereas SetClients/SyncClientStates only catch up on the 700ms timer. Without this,
+        // an alert arriving inside that window for the client you just switched away from would
+        // read as "already selected" and flash-and-stop instead of persisting.
+        //
+        // Cleared before the enabled/visible checks below on purpose: a stale selected handle
+        // must not survive across the overlay being hidden or the feature being toggled off.
+        if (!foregroundIsEve) _overlay.ClearSelectedClient();
+
         if (!foregroundIsEve || !Settings.Enabled || !_overlay.Visible) return;
 
         _activeClientHandle = foreground;
@@ -2844,6 +2855,11 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     // the bug this field exists to prevent. It is also not _foreground above, which
     // MarkActiveClient sets to whatever handle the caller wants highlighted, not
     // necessarily the real live foreground window. Keep all three separate.
+    //
+    // Kept current from two directions: the periodic refresh recomputes it in SetClients and
+    // SyncClientStates, and ObserveForegroundTransition clears it via ClearSelectedClient the
+    // moment the EVENT_SYSTEM_FOREGROUND hook reports focus leaving EVE. The second path is what
+    // makes "user is away from EVE" accurate immediately rather than up to one refresh late.
     private nint _selectedHandle;
     private Rectangle _virtualDesktop;
     private IReadOnlyList<EveClientWindow> _clients = Array.Empty<EveClientWindow>();
@@ -3033,6 +3049,25 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             );
     }
 
+    /// <summary>
+    /// Clears the "which client is selected" signal used for alert acknowledgement, because the
+    /// foreground window is no longer an EVE client at all.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately does NOT touch _activeClientHandle on the subsystem or _foreground here:
+    /// those drive which preview is highlighted, and that is supposed to keep pointing at the
+    /// last EVE client while the user is in Discord or a browser. Only the alert-acknowledgement
+    /// signal is cleared, so that an alert arriving while the user is away from EVE arms as
+    /// persistent rather than reading as "already selected".
+    ///
+    /// No repaint is needed: clearing this cannot start or stop a pulse, it only stops
+    /// TickAlertFlashes from matching a preview for acknowledgement.
+    /// </remarks>
+    public void ClearSelectedClient()
+    {
+        _selectedHandle = nint.Zero;
+    }
+
     public void MarkActiveClient(nint activeHandle)
     {
         if (activeHandle == nint.Zero) return;
@@ -3043,8 +3078,9 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         // which guarantee activeHandle is a client's own handle. Caveat on the latter path:
         // ActivateWindow can report success before Windows actually switches focus (the
         // bug fixed by commit 1315183 / PR #6), so an alert landing in that gap arms
-        // non-persistent; it self-corrects on the next 700ms refresh and is smaller than
-        // the lag already documented above — accepted limitation, not a bug to fix here.
+        // non-persistent; it self-corrects on the next 700ms refresh. Note the foreground
+        // WinEvent does NOT rescue this case: if focus never actually moved, no transition is
+        // reported, so there is nothing to observe. Accepted limitation, not a bug to fix here.
         _selectedHandle = activeHandle;
         _clients = _clients
             .Select(client => client with { IsForeground = client.Handle == activeHandle })

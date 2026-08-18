@@ -972,7 +972,26 @@ No code change in this step. Two of the spec's "Accepted limitations" touch exac
 
 - With `HideActivePreview` on, `SyncHiddenActivePreview` (line 3099) removes the `PreviewState` for whichever client is currently the highlight target, disposing its `Alerts` along with it. A persistent alert on that client is gone the moment it becomes selected — which happens to be the same client `_selectedHandle` would target for `Acknowledge()`, so the outcome (no lingering alert on the selected client) is correct even though it is reached by disposal rather than by `Acknowledge()` ever running.
 - A `PreviewState` is recreated whenever its `PreviewClientIdentity` changes (`SetClients`, line 2982; `SyncHiddenActivePreview`, line 3118), for example when a client goes from character-select to a named character. The new `PreviewState` gets a fresh `Alerts` with no armed alert, so any persistent alert in flight for the old identity is silently dropped. This is called out in the spec's "Accepted limitations" and is out of scope to fix here.
-- **`_selectedHandle` lags the foreground by up to 700 ms when you leave EVE entirely.** `ObserveForegroundTransition` returns early for a non-EVE foreground without notifying the overlay (`TriffViewSubsystem.cs:596-611`), so `_selectedHandle` is only cleared on the next periodic refresh through `SetClients`/`SyncClientStates` — and `_timer` runs at 700 ms (`TriffViewSubsystem.cs:107-110`). An alert that lands inside that window, targeting the client you *just* switched away from, arms as non-persistent and so flashes-and-stops instead of persisting. This is a deliberate accepted limitation, not an oversight: closing it means adding a foreground-change hook that fires for every non-EVE window activation, which is a materially larger change to the activation model than this feature warrants. The window is sub-second and the alert is still shown; only its persistence is lost. Do not "fix" this by making `_selectedHandle` fall back to `_activeClientHandle` — that reintroduces exactly the latching bug this field exists to avoid.
+- **`_selectedHandle` lags the foreground by up to 700 ms when you leave EVE entirely.** `ObserveForegroundTransition` returns early for a non-EVE foreground without notifying the overlay (`TriffViewSubsystem.cs:596-611`), so `_selectedHandle` is only cleared on the next periodic refresh through `SetClients`/`SyncClientStates` — and `_timer` runs at 700 ms (`TriffViewSubsystem.cs:107-110`). An alert that lands inside that window, targeting the client you *just* switched away from, arms as non-persistent and so flashes-and-stops instead of persisting. ~~This is a deliberate accepted limitation, not an oversight: closing it means adding a foreground-change hook that fires for every non-EVE window activation, which is a materially larger change to the activation model than this feature warrants.~~
+
+> **SUPERSEDED after review (CodeRabbit, on PR #24).** The reasoning above was wrong on its central
+> claim. No new hook was needed — one already existed. `OnForegroundWinEvent`
+> (`TriffViewSubsystem.cs:97`, hooked at `:557`) subscribes to `EVENT_SYSTEM_FOREGROUND` and
+> dispatches straight into `ObserveForegroundTransition` at `DispatcherPriority.Send`. So the
+> transition out of EVE was already being observed immediately; the method simply returned early
+> without acting on it. The fix is one call, `_overlay.ClearSelectedClient()`, on the non-EVE
+> branch, leaving `_activeClientHandle` untouched so preview highlighting still latches as intended.
+> The lag on leaving EVE is now closed rather than accepted.
+>
+> The lesson is the same one this branch hit with the "form is not layered" premise: a stated cost
+> that justifies accepting a limitation is a claim, and it needs checking like any other. This one
+> was asserted from memory of the architecture rather than from reading it.
+>
+> Still accepted, and genuinely not closable this way: the `ActivateWindow`-reports-success race.
+> If focus never actually moved, no foreground transition occurs, so there is no event to observe
+> and the stale value persists until the next periodic refresh.
+
+Do not "fix" the remaining case by making `_selectedHandle` fall back to `_activeClientHandle` — that reintroduces exactly the latching bug this field exists to avoid.
 
 - [ ] **Step 12: Commit**
 
