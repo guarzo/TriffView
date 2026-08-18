@@ -1730,7 +1730,7 @@ function TriffViewSettings({ open = true }) {
             <Toggle label="Enable alerts" checked={alerts.enabled} onChange={(value) => patchAlerts({ enabled: value })} />
             <Toggle label="Only alert in PvP, ignore NPC's" checked={alerts.pveMode} onChange={(value) => patchAlerts({ pveMode: value })} />
             <Toggle
-              label="Keep alerting until I select that character"
+              label="Keep alerting until selected"
               checked={alerts.persistUntilSelected}
               onChange={(value) => patchAlerts({ persistUntilSelected: value })}
             />
