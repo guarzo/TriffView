@@ -3047,6 +3047,18 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         {
             Opacity = Math.Max(0.2, Math.Min(1, _profile.Opacity));
             _suppressLabelOverlay = false;
+
+            // Consume any alert repaint owed from TickAlertFlashes: this is the fastest of the
+            // three sites that restore Opacity from 0 (it fires immediately off the foreground
+            // WinEvent, ahead of the 700ms SetClients/SyncClientStates poll), so it is the one
+            // most likely to be the first to observe the transition on a typical alt-tab back
+            // into EVE. Placed BEFORE the HideActivePreview early return below - that path must
+            // not skip this, or a whole profile silently gets the slower ~700ms fallback instead.
+            if (_alertRepaintOwed)
+            {
+                _alertRepaintOwed = false;
+                Invalidate();
+            }
         }
 
         if (_profile.HideActivePreview)
