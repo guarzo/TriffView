@@ -105,12 +105,21 @@ Two changes:
    exactly the preview that just cleared and leave its last-painted border on
    screen. Capture each alert's dirty rect before clearing it. The existing bare
    `Invalidate()` is load-bearing for correctness here, not merely lazy.
-   Bounded invalidation is safe **on this form specifically**:
-   the preview overlay is not layered (`CreateParams` at `:2883` sets only
-   `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST`, with no
-   `TransparencyKey`). The "partial invalidation leaves ghosts" finding recorded
-   at `:3971` applies to the *label* overlay form, which is layered
-   (`:3899-3907`). Do not generalise that comment to this form.
+   Bounded invalidation is safe **on this form**, but not because it is
+   unlayered - it may in fact be layered: WinForms' `Opacity` setter turns on
+   `AllowTransparency` for any value below 1, and `CreateParams` (`:2883`) then
+   adds `WS_EX_LAYERED` on top of the `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+   WS_EX_TOPMOST` it always sets. The profile's `Opacity` is user-configurable
+   from 0.2-1.0 and `HideOnLostFocus` drives it to 0, so below 1 this form *is*
+   `WS_EX_LAYERED` - just alpha-layered (`LWA_ALPHA`), not colour-keyed. The
+   "partial invalidation leaves ghosts" finding recorded at `:3971` concerns a
+   *different* layering mechanism: the label overlay form is layered via
+   `WS_EX_LAYERED` + `TransparencyKey` (`LWA_COLORKEY`, `:3899-3907`). That
+   failure mode has not been observed on the alpha-layered case, and
+   `MarkActiveClient` (`:3054`) and `SyncClientStates` (`:3091`) already rely on
+   bounded `Invalidate(rect)` on this same form today at whatever opacity the
+   user has configured, without reported ghosting. Not yet verified on hardware
+   specifically for alpha layering below 1.0.
 2. Skip invalidation entirely while `HideOnLostFocus` has the form at
    `Opacity = 0` (`:2998`, `:3073`), and repaint once on return. The alert stays
    armed throughout; only the painting pauses.

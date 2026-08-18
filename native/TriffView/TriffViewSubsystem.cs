@@ -2999,8 +2999,15 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         // Consume any alert repaint owed from TickAlertFlashes: this is one of the sites that
         // actually restores Opacity from 0, so it knows visibility just came back. This method
         // already Invalidates unconditionally below, so clearing the flag here is enough - no
-        // extra repaint needed.
-        if (wasHiddenForAlerts && Opacity > 0) _alertRepaintOwed = false;
+        // extra repaint needed. Also clear _alertPaintSuppressed so it stays coherent with
+        // _alertRepaintOwed - otherwise the next alert's first tick would see a stale
+        // "resuming" transition and issue a spurious full-form Invalidate() (harmless, since
+        // full covers bounded, but it defeats the point of this method existing).
+        if (wasHiddenForAlerts && Opacity > 0)
+        {
+            _alertRepaintOwed = false;
+            _alertPaintSuppressed = false;
+        }
         Invalidate();
     }
 
@@ -3057,6 +3064,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             if (_alertRepaintOwed)
             {
                 _alertRepaintOwed = false;
+                _alertPaintSuppressed = false;
                 Invalidate();
             }
         }
@@ -3104,6 +3112,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             if (!shouldHideForLostFocus && _alertRepaintOwed)
             {
                 _alertRepaintOwed = false;
+                _alertPaintSuppressed = false;
                 Invalidate();
             }
         }
@@ -3672,14 +3681,21 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         // preview's dirty state (cleared-this-tick OR still-active) before moving on, and
         // invalidate that rect, not the whole form.
         //
-        // Bounded Invalidate(rect) is safe on THIS form specifically: TriffViewOverlayForm's
-        // CreateParams sets only WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (optionally)
-        // WS_EX_TOPMOST - no WS_EX_LAYERED, no TransparencyKey - and MarkActiveClient and
-        // SyncClientStates already rely on bounded Invalidate(rect) on this same form today.
-        // The "partial invalidation leaves ghosts" comment elsewhere in this file is about
-        // TriffViewLabelOverlayForm, a DIFFERENT, layered form (WS_EX_LAYERED +
-        // TransparencyKey) where the compositor needs the whole surface repainted. Do not
-        // apply that reasoning here.
+        // Bounded Invalidate(rect) is safe on THIS form, but not because it is unlayered -
+        // it may in fact BE layered: WinForms' Opacity setter flips AllowTransparency on for
+        // any value below 1, and CreateParams then adds WS_EX_LAYERED on top of the
+        // WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (optionally) WS_EX_TOPMOST this form always
+        // sets. The profile's Opacity is user-configurable from 0.2-1.0 and HideOnLostFocus
+        // drives it to 0, so whenever opacity is below 1 this form IS WS_EX_LAYERED - just
+        // alpha-layered (LWA_ALPHA) rather than colour-keyed. The "partial invalidation
+        // leaves ghosts" comment elsewhere in this file is about TriffViewLabelOverlayForm,
+        // which is layered via a DIFFERENT mechanism - WS_EX_LAYERED + TransparencyKey
+        // (LWA_COLORKEY) - where the compositor needs the whole surface repainted. That
+        // failure mode has not been observed on the alpha-layered case, and MarkActiveClient
+        // and SyncClientStates already rely on bounded Invalidate(rect) on this same form
+        // today at whatever opacity the user has configured, without reported ghosting. Not
+        // yet verified on hardware specifically for alpha layering below 1.0 - if bounded
+        // invalidation ever turns out to ghost here too, this is the assumption to revisit.
         var dirty = new List<Rectangle>();
         foreach (var state in _previews.Values)
         {

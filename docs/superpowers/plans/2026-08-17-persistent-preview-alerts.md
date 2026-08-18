@@ -1116,6 +1116,30 @@ was the last active alert the timer then stops, so no later tick exists to fix i
 
 No test for this step alone; it is exercised by Step 5.
 
+> **SUPERSEDED during implementation.** The `_deferredAlertRects` field above shipped, then
+> was removed. What this step originally specified: accumulate dirty rects into a list while
+> the overlay is at `Opacity <= 0`, and flush that list as bounded `Invalidate(rect)` calls
+> "on resume" (see Step 5's original `resuming` branch below).
+>
+> **Why it was rejected (found Critical during implementation):** the plan's own resume
+> detection lives entirely inside `TickAlertFlashes`, which only runs when `_alertTimer` is
+> ticking. But the same tick that clears the *last* active alert while hidden also stops that
+> timer (this file's existing `if (!... .Any(...)) _alertTimer.Stop();` line). So the one
+> case this field exists for — an alert expiring while the overlay is hidden — stops the
+> timer on the very tick that would have needed a later tick to observe "opacity came back"
+> and flush `_deferredAlertRects`. No later tick ever runs, so the flush is unreachable and a
+> stale border can survive on screen indefinitely once the overlay becomes visible again.
+>
+> **What shipped instead:** a single `bool _alertRepaintOwed` (declared next to
+> `_alertPaintSuppressed`, no rect list) raised whenever a tick has dirty rects but is
+> suppressed, and consumed as one full `Invalidate()` by whichever of `SetClients`,
+> `MarkActiveClient`, or `SyncClientStates` is the call site that actually restores `Opacity`
+> from 0 — those sites, not the timer, are the ones that know visibility just returned. See
+> `TriffViewSubsystem.cs` near `_alertRepaintOwed`'s declaration and its three consume sites
+> for the final version; the belt-and-braces `resuming` branch inside `TickAlertFlashes`
+> stays only as a fallback for the (non-primary) case where the timer is still running when
+> `Opacity` comes back.
+
 - [ ] **Step 5: Rewrite `TickAlertFlashes` — bounded invalidation, opacity suppression, resume repaint**
 
 Replace `native/TriffView/TriffViewSubsystem.cs:3618-3630`:
@@ -1198,6 +1222,20 @@ Replace `native/TriffView/TriffViewSubsystem.cs:3618-3630`:
         _deferredAlertRects.Clear();
     }
 ```
+
+> **SUPERSEDED during implementation** (same finding as the amendment on Step 4). The
+> `TickAlertFlashes` body above — accumulating into `_deferredAlertRects` at line "Rects that
+> fell due..." and flushing/clearing that list in both the `resuming` branch and the final
+> `foreach` — is the rejected design. It reads as internally consistent, which is exactly the
+> trap: the flush code is correct in isolation, it is just unreachable in the one scenario
+> that matters (the last alert clearing while `Opacity <= 0`, which stops `_alertTimer` on
+> that same tick and prevents any later tick from ever reaching the `resuming` branch to
+> perform the flush). The shipped method instead has no rect list: it sets a single
+> `_alertRepaintOwed = true` when `paintSuppressed && dirty.Count > 0`, and returns — leaving
+> the actual repaint to whichever of `SetClients` / `MarkActiveClient` / `SyncClientStates`
+> next restores `Opacity` from 0. Read `TickAlertFlashes` and those three call sites in
+> `TriffViewSubsystem.cs` directly for the final, shipped form rather than transcribing this
+> code block.
 
 **Ownership note:** `UpdateAlertTimer` (`TriffViewSubsystem.cs:3632-3637`) is retargeted onto `state.Alerts.Active(...)` by **Task 1**, which owns every mechanical call-site rename in this file. By the time you reach this task it should already read the new form. Verify it does; if it still reads `state.ActiveAlert(...)`, that is a Task 1 gap — flag it rather than silently patching it here. For reference, the correct final form is:
 
