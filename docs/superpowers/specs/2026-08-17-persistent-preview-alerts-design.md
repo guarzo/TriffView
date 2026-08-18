@@ -1,7 +1,7 @@
 # Persistent preview alerts
 
 Date: 2026-08-17
-Status: approved design, not yet implemented
+Status: implemented and merged-ready — see "Verification performed" at the end of this document
 Branch base: `fork/main` @ `b57e400` (fork-only feature; not an upstream PR candidate)
 
 ## Problem
@@ -234,3 +234,32 @@ silently reads zero for it. If the harness is gone, rebuild it from CLAUDE.md's
 The mixed-DPI arrangement is deliberately *not* part of the performance gate.
 That trap governs geometry and placement, and this change moves no rectangles.
 Testing on a 100% monitor is still required, for rendering rather than cost.
+
+## Verification performed (recorded 2026-08-17)
+
+What was actually run, as opposed to what this document asked for.
+
+**Automated.** `native/TriffView.Tests`: 193 passed, 0 failed (174 before the branch, so +19).
+Release build of `native/TriffView.csproj` with `-warnaserror`: 0 warnings, 0 errors. Both re-run
+by the controller at each task boundary rather than taken from an implementer's report.
+
+Coverage caveat: that suite is one of three. `tests/TriffView.Tests` and `tests/TriffAlerts.Tests`
+also compile `TriffAlertsService.cs`, and neither was run locally. Both run in CI, and the change
+there is a single additive bool with no JSON-shape assertions anywhere, so the risk is low — but
+"193 passed" is not whole-repo coverage and should not be quoted as such.
+
+**Manual, on Windows, with real EVE clients — passed.** Persistence past the configured flash
+duration; border fully clears on selecting the client, with no frozen remnant; correct frame on
+returning to EVE after alt-tabbing away; the toggle round-trips and defaults off.
+
+**Bounded invalidation while alpha-layered — passed at profile opacity 20%**, the floor of both the
+UI stepper and the native clamp, and therefore the most transparent configuration a user can reach.
+No ghosting when alerts cleared or previews moved. This closes the one open premise in the
+"Timer and repaint cost" section.
+
+**Not measured: the performance gate.** The sampling described above was not run. This is a
+deliberate, recorded omission rather than an oversight, and it is the weakest point in this
+change's verification: an unbounded 80 ms timer's cost and, more importantly, GDI/USER handle
+growth over long sessions are exactly what watching the feature work correctly cannot reveal.
+The harness is intact at `C:\dev\triffview-perf\` (`sample.ps1`) if this is revisited. Note that
+`sample.ps1` writes its CSV only at the end of a run, so an interrupted run produces nothing.
