@@ -376,7 +376,7 @@ Expected: build succeeds. `npm run build` is `vite build` only — there is no l
 grep -n "CombatLogExport\|combatLogExport\|combatLogRange\|combatLogWebhook\|combatLogUpload\|lastFight" app/src/tools/TriffViewSettings.jsx
 ```
 
-Expected: exactly one hit — `lastFight: null` in `EMPTY_STATE` (:19). Any other hit is a leftover.
+Expected: exactly two hits — `lastFight: null` in `EMPTY_STATE`, and `lastFight: message.lastFight || null` inside the `setState({...})` call in the `triffview:state` branch, which this task deliberately leaves intact. Any other hit is a leftover.
 
 - [ ] **Step 6: Manual verification on Windows**
 
