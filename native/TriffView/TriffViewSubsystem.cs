@@ -2818,8 +2818,8 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 
     // Set when a tick has dirty alert rects to paint but Opacity is 0, so nothing would be
     // visible anyway. Consumed (and turned into one full Invalidate) by whichever call site
-    // actually restores Opacity from 0 - see SetClients and SyncClientStates - since only
-    // those sites know visibility just changed; the timer alone cannot (see TickAlertFlashes).
+    // actually restores Opacity from 0, since only that site knows visibility just changed;
+    // the timer alone cannot (see TickAlertFlashes).
     private bool _alertRepaintOwed;
     private readonly TriffViewLabelOverlayForm _labelOverlay = new();
     private string _hotkeySignature = "";
@@ -2996,10 +2996,10 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         _suppressLabelOverlay = shouldHideForLostFocus;
         UpdateWindowRegion(shouldHideForLostFocus);
         RefreshLabelOverlay();
-        // Consume any alert repaint owed from TickAlertFlashes: this is one of the two sites
-        // that actually restores Opacity from 0 (the other is SyncClientStates), so it is the
-        // one that knows visibility just came back. This method already Invalidates
-        // unconditionally below, so clearing the flag here is enough - no extra repaint needed.
+        // Consume any alert repaint owed from TickAlertFlashes: this is one of the sites that
+        // actually restores Opacity from 0, so it knows visibility just came back. This method
+        // already Invalidates unconditionally below, so clearing the flag here is enough - no
+        // extra repaint needed.
         if (wasHiddenForAlerts && Opacity > 0) _alertRepaintOwed = false;
         Invalidate();
     }
@@ -3048,12 +3048,12 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             Opacity = Math.Max(0.2, Math.Min(1, _profile.Opacity));
             _suppressLabelOverlay = false;
 
-            // Consume any alert repaint owed from TickAlertFlashes: this is the fastest of the
-            // three sites that restore Opacity from 0 (it fires immediately off the foreground
-            // WinEvent, ahead of the 700ms SetClients/SyncClientStates poll), so it is the one
-            // most likely to be the first to observe the transition on a typical alt-tab back
-            // into EVE. Placed BEFORE the HideActivePreview early return below - that path must
-            // not skip this, or a whole profile silently gets the slower ~700ms fallback instead.
+            // Consume any alert repaint owed from TickAlertFlashes: this site fires immediately
+            // off the foreground WinEvent, ahead of the 700ms SetClients/SyncClientStates poll,
+            // so it is the one most likely to be the first to observe the transition on a
+            // typical alt-tab back into EVE. Placed BEFORE the HideActivePreview early return
+            // below - that path must not skip this, or a whole profile silently gets the
+            // slower ~700ms fallback instead.
             if (_alertRepaintOwed)
             {
                 _alertRepaintOwed = false;
@@ -3097,10 +3097,10 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             Opacity = shouldHideForLostFocus ? 0 : Math.Max(0.2, Math.Min(1, _profile.Opacity));
             _suppressLabelOverlay = shouldHideForLostFocus;
 
-            // Consume any alert repaint owed from TickAlertFlashes: this is one of the two
-            // sites that actually restores Opacity from 0 (the other is SetClients), so it is
-            // the one that knows visibility just came back. Unlike SetClients, this method
-            // does not always Invalidate, so a real full Invalidate() is needed here.
+            // Consume any alert repaint owed from TickAlertFlashes: this is one of the sites
+            // that actually restores Opacity from 0, so it knows visibility just came back.
+            // Unlike SetClients, this method does not always Invalidate, so a real full
+            // Invalidate() is needed here.
             if (!shouldHideForLostFocus && _alertRepaintOwed)
             {
                 _alertRepaintOwed = false;
@@ -3652,16 +3652,16 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     {
         var now = DateTime.UtcNow;
 
-        // HideOnLostFocus parks the whole overlay at Opacity 0 (SetClients, SyncClientStates)
-        // without hiding it, so DWM still composites nothing visible. Alerts stay armed and
-        // keep expiring on schedule underneath, but there is nothing on screen to repaint, so
-        // skip Invalidate entirely while suppressed. Do NOT accumulate a rect list here to
-        // flush "on resume" - this timer stops itself the moment no alert is left active
-        // (below), and that can happen on the very tick that would have set the resume flag,
-        // so a resume detected only inside this method can be permanently unreachable. Instead
-        // this tick just raises _alertRepaintOwed, and whichever call site actually restores
-        // Opacity from 0 (SetClients/SyncClientStates) is responsible for consuming it - see
-        // the field's own comment for why this timer cannot do that job alone.
+        // HideOnLostFocus parks the whole overlay at Opacity 0 without hiding it, so DWM still
+        // composites nothing visible. Alerts stay armed and keep expiring on schedule
+        // underneath, but there is nothing on screen to repaint, so skip Invalidate entirely
+        // while suppressed. Do NOT accumulate a rect list here to flush "on resume" - this
+        // timer stops itself the moment no alert is left active (below), and that can happen
+        // on the very tick that would have set the resume flag, so a resume detected only
+        // inside this method can be permanently unreachable. Instead this tick just raises
+        // _alertRepaintOwed, and whichever call site actually restores Opacity from 0 is
+        // responsible for consuming it - see the field's own comment for why this timer cannot
+        // do that job alone.
         var paintSuppressed = Opacity <= 0;
         var resuming = _alertPaintSuppressed && !paintSuppressed;
         _alertPaintSuppressed = paintSuppressed;
