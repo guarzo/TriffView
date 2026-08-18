@@ -1198,7 +1198,7 @@ internal sealed class TriffViewController : IDisposable
                         config.FlashThickness,
                         config.FlashDurationMs,
                         config.FlashPulseCount,
-                        false
+                        Settings.Alerts.PersistUntilSelected
                     ));
                 }
 
@@ -2824,6 +2824,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     private Rectangle _mouseStartRect;
     private TriffViewProfile _profile = TriffViewProfile.CreateDefault("Default");
     private nint _foreground;
+    private nint _selectedHandle;
     private Rectangle _virtualDesktop;
     private IReadOnlyList<EveClientWindow> _clients = Array.Empty<EveClientWindow>();
     private bool? _appliedTopmost;
@@ -2914,6 +2915,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         _clients = clients;
         _profile = profile;
         _foreground = foreground;
+        _selectedHandle = clients.Any(c => c.Handle == foreground) ? foreground : nint.Zero;
         SizeToVirtualDesktop();
 
         var highlightHandle = activeHandle != nint.Zero ? activeHandle : foreground;
@@ -3002,6 +3004,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     {
         if (activeHandle == nint.Zero) return;
         _foreground = activeHandle;
+        _selectedHandle = activeHandle;
         _clients = _clients
             .Select(client => client with { IsForeground = client.Handle == activeHandle })
             .ToArray();
@@ -3039,6 +3042,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     {
         _clients = clients;
         _foreground = foreground;
+        _selectedHandle = clients.Any(c => c.Handle == foreground) ? foreground : nint.Zero;
 
         var shouldHideForLostFocus = _profile.HideOnLostFocus && clients.All(client => client.Handle != foreground);
         var lostFocusVisibilityChanged = _suppressLabelOverlay != shouldHideForLostFocus;
@@ -3121,7 +3125,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         foreach (var state in _previews.Values)
         {
             if (!MatchesAlertTarget(state, characterName)) continue;
-            state.Alerts.Arm(alert, now, targetIsSelected: false);
+            state.Alerts.Arm(alert, now, targetIsSelected: state.Client.Handle == _selectedHandle);
             matched = true;
         }
 
@@ -3596,6 +3600,10 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         foreach (var state in _previews.Values)
         {
             removed |= state.Alerts.ClearExpired(now);
+            if (state.Client.Handle == _selectedHandle)
+            {
+                removed |= state.Alerts.Acknowledge();
+            }
         }
 
         var anyActive = _previews.Values.Any(state => state.Alerts.Active(now) != null);

@@ -98,4 +98,109 @@ public class PreviewAlertStateTests
         Assert.False(cleared);
         Assert.NotNull(state.Active(Now));
     }
+
+    [Fact]
+    public void PersistentAlertStaysActivePastExpiry()
+    {
+        var state = new PreviewAlertState();
+        var now = new DateTime(2026, 8, 17, 12, 0, 0, DateTimeKind.Utc);
+        var alert = new TriffViewPreviewAlert(2, "#ff3b3b", 3, 1000, 4, Persistent: true);
+
+        state.Arm(alert, now, targetIsSelected: false);
+
+        var farPast = now.AddHours(1);
+        var active = state.Active(farPast);
+
+        Assert.NotNull(active);
+        Assert.True(active!.Persistent);
+    }
+
+    [Fact]
+    public void ClearExpiredNeverClearsAPersistentAlert()
+    {
+        var state = new PreviewAlertState();
+        var now = new DateTime(2026, 8, 17, 12, 0, 0, DateTimeKind.Utc);
+        var alert = new TriffViewPreviewAlert(2, "#ff3b3b", 3, 1000, 4, Persistent: true);
+
+        state.Arm(alert, now, targetIsSelected: false);
+
+        var cleared = state.ClearExpired(now.AddHours(1));
+
+        Assert.False(cleared);
+        Assert.NotNull(state.Active(now.AddHours(1)));
+    }
+
+    [Fact]
+    public void AcknowledgeClearsAPersistentAlertAndReturnsTrue()
+    {
+        var state = new PreviewAlertState();
+        var now = new DateTime(2026, 8, 17, 12, 0, 0, DateTimeKind.Utc);
+        var alert = new TriffViewPreviewAlert(2, "#ff3b3b", 3, 1000, 4, Persistent: true);
+
+        state.Arm(alert, now, targetIsSelected: false);
+
+        var acknowledged = state.Acknowledge();
+
+        Assert.True(acknowledged);
+        Assert.Null(state.Active(now.AddHours(1)));
+    }
+
+    [Fact]
+    public void ArmWithTargetSelectedProducesANonPersistentAlertEvenWhenRequested()
+    {
+        var state = new PreviewAlertState();
+        var now = new DateTime(2026, 8, 17, 12, 0, 0, DateTimeKind.Utc);
+        var alert = new TriffViewPreviewAlert(2, "#ff3b3b", 3, 1000, 4, Persistent: true);
+
+        state.Arm(alert, now, targetIsSelected: true);
+
+        var active = state.Active(now);
+        Assert.NotNull(active);
+        Assert.False(active!.Persistent);
+
+        // And because it is not persistent, it clears exactly like a normal flash.
+        Assert.True(state.ClearExpired(now.AddSeconds(2)));
+    }
+
+    [Fact]
+    public void LowerSeverityAlertArrivingAfterPersistentAlertsNominalExpiryDoesNotReplaceOrDowngradeIt()
+    {
+        var state = new PreviewAlertState();
+        var now = new DateTime(2026, 8, 17, 12, 0, 0, DateTimeKind.Utc);
+        var persistent = new TriffViewPreviewAlert(3, "#ff3b3b", 3, 1000, 4, Persistent: true);
+        state.Arm(persistent, now, targetIsSelected: false);
+
+        // Nominal ExpiresUtc (now + 1000ms) is long past; a persistent alert must still
+        // read as logically active, so the severity guard must reject this lower-severity
+        // arrival rather than treating the persistent alert as expired and free to replace.
+        var muchLater = now.AddHours(1);
+        var lowerSeverity = new TriffViewPreviewAlert(1, "#ffd23b", 2, 1000, 2, Persistent: false);
+        state.Arm(lowerSeverity, muchLater, targetIsSelected: false);
+
+        var active = state.Active(muchLater);
+        Assert.NotNull(active);
+        Assert.Equal(3, active!.SeverityRank);
+        Assert.True(active.Persistent);
+        Assert.Equal("#ff3b3b", active.Color);
+    }
+
+    [Fact]
+    public void ReplacingHigherSeverityAlertRecomputesPersistenceRatherThanInheritingIt()
+    {
+        var state = new PreviewAlertState();
+        var now = new DateTime(2026, 8, 17, 12, 0, 0, DateTimeKind.Utc);
+        var persistentLow = new TriffViewPreviewAlert(1, "#ffd23b", 2, 1000, 2, Persistent: true);
+        state.Arm(persistentLow, now, targetIsSelected: false);
+
+        // Higher severity replaces outright (not just an expiry bump), and targetIsSelected
+        // is true this time, so the replacement must come out non-persistent even though
+        // the alert it replaced was persistent and the incoming alert also requests it.
+        var higherSeverity = new TriffViewPreviewAlert(3, "#ff3b3b", 3, 1000, 4, Persistent: true);
+        state.Arm(higherSeverity, now, targetIsSelected: true);
+
+        var active = state.Active(now);
+        Assert.NotNull(active);
+        Assert.Equal(3, active!.SeverityRank);
+        Assert.False(active.Persistent);
+    }
 }
