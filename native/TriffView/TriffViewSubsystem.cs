@@ -3017,10 +3017,14 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     {
         if (activeHandle == nint.Zero) return;
         _foreground = activeHandle;
-        // Safe to assign directly here (unlike SetClients/SyncClientStates, which check
-        // membership in _clients first): this method is only ever invoked from
-        // ObserveForegroundTransition after it has confirmed the real foreground window
-        // is an EVE client, so activeHandle is already known-good.
+        // Safe to assign directly here (no membership check, unlike SetClients/
+        // SyncClientStates): reached via ObserveForegroundTransition (foreground already
+        // confirmed EVE) and via TryActivateClient after ActivateWindow succeeds, both of
+        // which guarantee activeHandle is a client's own handle. Caveat on the latter path:
+        // ActivateWindow can report success before Windows actually switches focus (the
+        // bug fixed by commit 1315183 / PR #6), so an alert landing in that gap arms
+        // non-persistent; it self-corrects on the next 700ms refresh and is smaller than
+        // the lag already documented above — accepted limitation, not a bug to fix here.
         _selectedHandle = activeHandle;
         _clients = _clients
             .Select(client => client with { IsForeground = client.Handle == activeHandle })
