@@ -176,7 +176,7 @@ function CombatLogExport({
               : "No fight detected yet. Alerts must be enabled, and only fights seen while TriffView has been running are detected - use a time range for anything older."}
           </span>
           {!lastFight && onOpenAlerts ? (
-            <button type="button" onClick={onOpenAlerts}>
+            <button type="button" className="triff-alert-summary-action" onClick={onOpenAlerts}>
               Open Alerts settings
             </button>
           ) : null}

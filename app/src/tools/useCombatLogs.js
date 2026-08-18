@@ -67,11 +67,16 @@ export function useCombatLogs() {
         // testResult is left alone so a "Send test" outcome isn't wiped out by
         // the next routine post before the user has read it.
         const nextWebhook = message.combatLogWebhook || {};
-        setWebhook((current) => ({
-          ...current,
-          configured: Boolean(nextWebhook.configured),
-          description: nextWebhook.description || "",
-        }));
+        setWebhook((current) => {
+          const configured = Boolean(nextWebhook.configured);
+          const description = nextWebhook.description || "";
+          if (current.configured === configured && current.description === description) {
+            // Bail out so this hook (mounted for the app's lifetime) doesn't force a
+            // root re-render on every periodic state post when nothing changed.
+            return current;
+          }
+          return { ...current, configured, description };
+        });
       }
 
       if (message?.type === "triffview:combat-log-export") {

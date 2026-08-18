@@ -142,6 +142,10 @@ function ThemePicker({ themes, activeTheme, onChange }) {
   }, [open, activeTheme.id]);
 
   useEffect(() => {
+    if (open) listRef.current?.focus();
+  }, [open]);
+
+  useEffect(() => {
     if (!open) return;
     const node = listRef.current?.querySelector(`[data-theme-id="${highlightedId}"]`);
     node?.scrollIntoView({ block: "nearest" });
@@ -164,11 +168,6 @@ function ThemePicker({ themes, activeTheme, onChange }) {
       event.preventDefault();
       setOpen(true);
     }
-  }
-
-  function onListRef(node) {
-    listRef.current = node;
-    node?.focus();
   }
 
   function onListKeyDown(event) {
@@ -221,7 +220,7 @@ function ThemePicker({ themes, activeTheme, onChange }) {
         <ul
           className="triffview-theme-listbox"
           role="listbox"
-          ref={onListRef}
+          ref={listRef}
           aria-label="GUI theme"
           aria-activedescendant={`triffview-theme-option-${highlightedId}`}
           tabIndex={-1}

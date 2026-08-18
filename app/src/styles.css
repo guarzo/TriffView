@@ -576,9 +576,9 @@
 }
 
 /* MUST out-specify `.triffview-standalone-topbar button { min-width: 112px }`
-   (styles.css:592-600), which is a (0,1,1) selector and would otherwise force
+   (styles.css:643-651), which is a (0,1,1) selector and would otherwise force
    this "compact" control to 112px and wipe out the width saving this whole
-   task exists for. This selector is (0,2,1). */
+   task exists for. This selector is (0,2,0). */
 .triffview-standalone-topbar .triffview-theme-button {
   min-width: 0;
 }
@@ -598,6 +598,20 @@
 .triffview-theme-caret {
   font-size: 10px;
   color: var(--tv-muted);
+}
+
+/* Same problem as the .triffview-theme-button override just above: must
+   out-specify `.triffview-standalone-topbar span` (0,1,1), which otherwise
+   forces this caret to 11px and locks its color to --tv-muted even when the
+   button is hovered/expanded. */
+.triffview-standalone-topbar .triffview-theme-caret {
+  font-size: 10px;
+  color: var(--tv-muted);
+}
+
+.triffview-theme-button:hover .triffview-theme-caret,
+.triffview-theme-button[aria-expanded="true"] .triffview-theme-caret {
+  color: var(--tv-text-active);
 }
 
 .triffview-theme-listbox {
@@ -2901,6 +2915,10 @@ button:disabled {
   min-width: 0;
   flex-direction: column;
   gap: 3px;
+}
+
+.triff-alert-summary-action {
+  align-self: flex-start;
 }
 
 .triff-alert-summary strong,

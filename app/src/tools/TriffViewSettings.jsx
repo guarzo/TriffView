@@ -15,6 +15,8 @@ const EMPTY_STATE = {
   clients: [],
   alerts: null,
   alertHistory: [],
+  // Not read in this file; retained here as part of the native `triffview:state`
+  // shape and consumed by useCombatLogs.
   lastFight: null,
   hotkeyFailures: [],
   dwmAvailable: true,
@@ -1220,7 +1222,6 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
       [eventType]: !current[eventType],
     }));
   }
-
 
   useEffect(() => {
     if (!recording) return undefined;
