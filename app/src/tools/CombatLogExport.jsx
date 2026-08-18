@@ -99,10 +99,15 @@ function CombatLogExport({
         Chat logs are never included.
       </p>
 
-      <div className="triff-combat-export-webhook">
-        <h3>Discord destination</h3>
+      <div className={`triff-combat-export-webhook${showWebhookForm ? "" : " is-configured"}`}>
         {showWebhookForm ? (
           <>
+            <div className="triff-combat-export-webhook-head">
+              <h3>Discord destination</h3>
+              <span className={webhookState.configured ? "triff-alert-status is-on" : "triff-alert-status"}>
+                {webhookState.configured ? "Connected" : "Not connected"}
+              </span>
+            </div>
             <p className="triffview-muted">
               Paste a webhook URL to enable one-click uploads. It is stored in Windows Credential
               Manager, never written to triffview-settings.json, and never sent back to this screen
@@ -140,17 +145,20 @@ function CombatLogExport({
             </div>
           </>
         ) : (
-          <div className="triff-combat-export-webhook-row">
-            <p className="triffview-muted">Configured: {webhookState.description}</p>
-            <button type="button" disabled={webhookBusy} onClick={onTestWebhook}>
-              Send test
-            </button>
-            <button type="button" disabled={webhookBusy} onClick={() => setReplacing(true)}>
-              Replace
-            </button>
-            <button type="button" disabled={webhookBusy} onClick={onClearWebhook}>
-              Clear
-            </button>
+          <div className="triff-combat-export-webhook-summary">
+            <span className="triff-alert-status is-on">Connected</span>
+            <p className="triff-combat-export-webhook-desc">Configured: {webhookState.description}</p>
+            <div className="triff-combat-export-webhook-actions">
+              <button type="button" disabled={webhookBusy} onClick={onTestWebhook}>
+                Send test
+              </button>
+              <button type="button" disabled={webhookBusy} onClick={() => setReplacing(true)}>
+                Replace
+              </button>
+              <button type="button" disabled={webhookBusy} onClick={onClearWebhook}>
+                Clear
+              </button>
+            </div>
           </div>
         )}
         {webhookState.testResult ? (
@@ -166,7 +174,7 @@ function CombatLogExport({
       </div>
 
       <div className="triff-combat-export-paths">
-        <div className="triff-combat-export-path">
+        <div className="triff-combat-export-path is-detected">
           <h3>Last fight</h3>
           <div className="triff-alert-summary triff-alert-summary--embedded">
             <div>
@@ -189,11 +197,17 @@ function CombatLogExport({
           </div>
           <p className="triffview-muted">Export the fight TriffAlerts most recently detected.</p>
           <div className="triff-combat-export-path-actions">
-            <button type="button" disabled={!lastFight || runBusy} onClick={() => onExport(null)}>
+            <button
+              type="button"
+              className="primary-action"
+              disabled={!lastFight || runBusy}
+              onClick={() => onExport(null)}
+            >
               Export last fight
             </button>
             <button
               type="button"
+              className="primary-action"
               disabled={!lastFight || uploadDisabled}
               onClick={() => onUpload(null)}
             >
@@ -202,7 +216,7 @@ function CombatLogExport({
           </div>
         </div>
 
-        <div className="triff-combat-export-path">
+        <div className="triff-combat-export-path is-manual">
           <h3>Time range</h3>
           <p className="triffview-muted">For a fight from before TriffView was started.</p>
           <div className="triff-combat-export-quick">
@@ -235,6 +249,7 @@ function CombatLogExport({
           <div className="triff-combat-export-path-actions">
             <button
               type="button"
+              className="primary-action"
               disabled={!range.from || !range.to || runBusy}
               onClick={() => onExport(range)}
             >
@@ -242,6 +257,7 @@ function CombatLogExport({
             </button>
             <button
               type="button"
+              className="primary-action"
               disabled={!range.from || !range.to || uploadDisabled}
               onClick={() => onUpload(range)}
             >
