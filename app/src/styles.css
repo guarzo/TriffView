@@ -3132,6 +3132,16 @@ button:disabled {
   border-left-color: var(--tv-accent);
 }
 
+/* Combat Logs has no side rail (unlike `.triffview-settings-shell` tabs), so its
+   `.triffview-section-content` is ~214px wider than the layout below was designed
+   for. Cap it to the same usable column other tabs get, matching the precedent
+   set by `.triffview-guide` (the app's only other railless, full-width context).
+   904px here (a padded `.triffview-section-content`, padding: 18px 22px) yields
+   the same 860px content width that `.triffview-guide` caps itself at directly. */
+.triffview-combat-logs-content {
+  max-width: 904px;
+}
+
 .triff-combat-export {
   container-type: inline-size;
   display: flex;

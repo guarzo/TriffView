@@ -18,7 +18,10 @@ function CombatLogs({ combatLogs, onOpenAlerts }) {
 
   return (
     <div className="triffview-settings">
-      <div className="triffview-section-content" data-hud-scroll>
+      <div
+        className="triffview-section-content triffview-combat-logs-content"
+        data-hud-scroll
+      >
         <header className="triffview-section-header">
           <h2>Combat logs</h2>
         </header>
