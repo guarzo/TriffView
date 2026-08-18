@@ -540,10 +540,10 @@
 }
 
 .triffview-theme-picker {
+  position: relative;
   display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: 6px;
 }
 
 .triffview-theme-swatches {
@@ -561,25 +561,76 @@
   border: 1px solid rgba(var(--tv-white-rgb), 0.12);
 }
 
-.triffview-theme-select {
-  width: 178px;
+.triffview-theme-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   height: 28px;
-  min-width: 0;
   border: 1px solid var(--tv-border);
   border-radius: 0;
   background: var(--tv-control-bg-alt);
   color: var(--tv-text);
   padding: 0 8px;
   font: inherit;
-  font-size: 13px;
-  font-weight: 800;
-  outline: none;
+  cursor: pointer;
 }
 
-.triffview-theme-select:hover,
-.triffview-theme-select:focus {
+/* MUST out-specify `.triffview-standalone-topbar button { min-width: 112px }`
+   (styles.css:592-600), which is a (0,1,1) selector and would otherwise force
+   this "compact" control to 112px and wipe out the width saving this whole
+   task exists for. This selector is (0,2,1). */
+.triffview-standalone-topbar .triffview-theme-button {
+  min-width: 0;
+}
+
+.triffview-theme-button:hover,
+.triffview-theme-button[aria-expanded="true"] {
   border-color: var(--tv-accent);
   background: var(--tv-control-active-bg);
+  color: var(--tv-text-active);
+}
+
+.triffview-theme-button:focus-visible {
+  outline: 2px solid var(--tv-accent);
+  outline-offset: 1px;
+}
+
+.triffview-theme-caret {
+  font-size: 10px;
+  color: var(--tv-muted);
+}
+
+.triffview-theme-listbox {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 100000;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  min-width: 200px;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--tv-accent);
+  background: var(--tv-bg);
+  box-shadow:
+    0 0 0 1px rgba(var(--tv-accent-rgb), 0.2),
+    0 10px 28px rgba(var(--tv-shadow-rgb), 0.72);
+}
+
+.triffview-theme-listbox li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--tv-text);
+  cursor: pointer;
+}
+
+.triffview-theme-listbox li.is-highlighted,
+.triffview-theme-listbox li:hover {
+  background: var(--tv-accent-bg);
   color: var(--tv-text-active);
 }
 

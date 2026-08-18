@@ -121,6 +121,140 @@ function UpdateNotice({ update, onDismiss, onIgnore }) {
   );
 }
 
+function ThemePicker({ themes, activeTheme, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [highlightedId, setHighlightedId] = useState(activeTheme.id);
+  const buttonRef = useRef(null);
+  const listRef = useRef(null);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    setHighlightedId(activeTheme.id);
+
+    function onDocPointerDown(event) {
+      if (rootRef.current && !rootRef.current.contains(event.target)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", onDocPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onDocPointerDown, true);
+  }, [open, activeTheme.id]);
+
+  useEffect(() => {
+    if (!open) return;
+    const node = listRef.current?.querySelector(`[data-theme-id="${highlightedId}"]`);
+    node?.scrollIntoView({ block: "nearest" });
+  }, [open, highlightedId]);
+
+  function closeAndReturnFocus() {
+    setOpen(false);
+    buttonRef.current?.focus();
+  }
+
+  function moveHighlight(delta) {
+    const ids = themes.map((theme) => theme.id);
+    const index = ids.indexOf(highlightedId);
+    const next = (index + delta + ids.length) % ids.length;
+    setHighlightedId(ids[next]);
+  }
+
+  function onButtonKeyDown(event) {
+    if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setOpen(true);
+    }
+  }
+
+  function onListRef(node) {
+    listRef.current = node;
+    node?.focus();
+  }
+
+  function onListKeyDown(event) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveHighlight(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveHighlight(-1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setHighlightedId(themes[0].id);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      setHighlightedId(themes[themes.length - 1].id);
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onChange(highlightedId);
+      closeAndReturnFocus();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeAndReturnFocus();
+    } else if (event.key === "Tab") {
+      setOpen(false);
+    }
+  }
+
+  return (
+    <div className="triffview-theme-picker" ref={rootRef}>
+      <button
+        type="button"
+        ref={buttonRef}
+        className="triffview-theme-button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`GUI theme: ${activeTheme.name}`}
+        onClick={() => setOpen((value) => !value)}
+        onKeyDown={onButtonKeyDown}
+      >
+        <span className="triffview-theme-swatches" aria-hidden="true">
+          {activeTheme.swatches.map((color) => (
+            <i key={color} style={{ backgroundColor: color }} />
+          ))}
+        </span>
+        <span className="triffview-theme-caret" aria-hidden="true">
+          ▾
+        </span>
+      </button>
+      {open ? (
+        <ul
+          className="triffview-theme-listbox"
+          role="listbox"
+          ref={onListRef}
+          aria-label="GUI theme"
+          aria-activedescendant={`triffview-theme-option-${highlightedId}`}
+          tabIndex={-1}
+          onKeyDown={onListKeyDown}
+        >
+          {themes.map((theme) => (
+            <li
+              key={theme.id}
+              id={`triffview-theme-option-${theme.id}`}
+              data-theme-id={theme.id}
+              role="option"
+              aria-selected={theme.id === activeTheme.id}
+              className={theme.id === highlightedId ? "is-highlighted" : ""}
+              onMouseEnter={() => setHighlightedId(theme.id)}
+              onClick={() => {
+                onChange(theme.id);
+                closeAndReturnFocus();
+              }}
+            >
+              <span className="triffview-theme-swatches" aria-hidden="true">
+                {theme.swatches.map((color) => (
+                  <i key={color} style={{ backgroundColor: color }} />
+                ))}
+              </span>
+              <span>{theme.name}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 export default function App() {
   const [activeTool, setActiveTool] = useState("triffview");
   const combatLogs = useCombatLogs();
@@ -221,26 +355,7 @@ export default function App() {
       <header className="triffview-standalone-topbar" data-hud-input-region="topbar">
         <div className="triffview-brand-block">
           <strong>TriffView</strong>
-          <span>Previews, fleets, and EVE settings</span>
-          <label className="triffview-theme-picker">
-            <span className="triffview-theme-swatches" aria-hidden="true">
-              {activeTheme.swatches.map((color) => (
-                <i key={color} style={{ backgroundColor: color }} />
-              ))}
-            </span>
-            <select
-              className="triffview-theme-select"
-              value={activeTheme.id}
-              onChange={(event) => setThemeId(event.target.value)}
-              aria-label="GUI theme"
-            >
-              {GUI_THEMES.map((theme) => (
-                <option key={theme.id} value={theme.id}>
-                  {theme.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <ThemePicker themes={GUI_THEMES} activeTheme={activeTheme} onChange={setThemeId} />
         </div>
         {showUpdateNotice ? (
           <UpdateNotice
