@@ -2815,7 +2815,12 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     private readonly Dictionary<int, TriffViewHotkeyCommand> _hotkeys = new();
     private readonly Forms.Timer _alertTimer = new() { Interval = 80 };
     private bool _alertPaintSuppressed;
-    private readonly List<Rectangle> _deferredAlertRects = new();
+
+    // Set when a tick has dirty alert rects to paint but Opacity is 0, so nothing would be
+    // visible anyway. Consumed (and turned into one full Invalidate) by whichever call site
+    // actually restores Opacity from 0 - see SetClients and SyncClientStates - since only
+    // those sites know visibility just changed; the timer alone cannot (see TickAlertFlashes).
+    private bool _alertRepaintOwed;
     private readonly TriffViewLabelOverlayForm _labelOverlay = new();
     private string _hotkeySignature = "";
     private string _windowRegionSignature = "";
@@ -2986,10 +2991,16 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         }
 
         var shouldHideForLostFocus = profile.HideOnLostFocus && !suppressLostFocusHide && clients.All(client => client.Handle != foreground);
+        var wasHiddenForAlerts = Opacity <= 0;
         Opacity = shouldHideForLostFocus ? 0 : Math.Max(0.2, Math.Min(1, profile.Opacity));
         _suppressLabelOverlay = shouldHideForLostFocus;
         UpdateWindowRegion(shouldHideForLostFocus);
         RefreshLabelOverlay();
+        // Consume any alert repaint owed from TickAlertFlashes: this is one of the two sites
+        // that actually restores Opacity from 0 (the other is SyncClientStates), so it is the
+        // one that knows visibility just came back. This method already Invalidates
+        // unconditionally below, so clearing the flag here is enough - no extra repaint needed.
+        if (wasHiddenForAlerts && Opacity > 0) _alertRepaintOwed = false;
         Invalidate();
     }
 
@@ -3073,6 +3084,16 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         {
             Opacity = shouldHideForLostFocus ? 0 : Math.Max(0.2, Math.Min(1, _profile.Opacity));
             _suppressLabelOverlay = shouldHideForLostFocus;
+
+            // Consume any alert repaint owed from TickAlertFlashes: this is one of the two
+            // sites that actually restores Opacity from 0 (the other is SetClients), so it is
+            // the one that knows visibility just came back. Unlike SetClients, this method
+            // does not always Invalidate, so a real full Invalidate() is needed here.
+            if (!shouldHideForLostFocus && _alertRepaintOwed)
+            {
+                _alertRepaintOwed = false;
+                Invalidate();
+            }
         }
 
         if (_profile.HideActivePreview)
@@ -3619,10 +3640,16 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     {
         var now = DateTime.UtcNow;
 
-        // HideOnLostFocus parks the whole overlay at Opacity 0 (:2987, :3072) without hiding
-        // it, so DWM still composites nothing visible. Alerts stay armed and keep expiring on
-        // schedule underneath, but there is nothing on screen to repaint, so skip Invalidate
-        // entirely while suppressed and catch up with one full repaint the moment we return.
+        // HideOnLostFocus parks the whole overlay at Opacity 0 (SetClients, SyncClientStates)
+        // without hiding it, so DWM still composites nothing visible. Alerts stay armed and
+        // keep expiring on schedule underneath, but there is nothing on screen to repaint, so
+        // skip Invalidate entirely while suppressed. Do NOT accumulate a rect list here to
+        // flush "on resume" - this timer stops itself the moment no alert is left active
+        // (below), and that can happen on the very tick that would have set the resume flag,
+        // so a resume detected only inside this method can be permanently unreachable. Instead
+        // this tick just raises _alertRepaintOwed, and whichever call site actually restores
+        // Opacity from 0 (SetClients/SyncClientStates) is responsible for consuming it - see
+        // the field's own comment for why this timer cannot do that job alone.
         var paintSuppressed = Opacity <= 0;
         var resuming = _alertPaintSuppressed && !paintSuppressed;
         _alertPaintSuppressed = paintSuppressed;
@@ -3634,13 +3661,13 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         // invalidate that rect, not the whole form.
         //
         // Bounded Invalidate(rect) is safe on THIS form specifically: TriffViewOverlayForm's
-        // CreateParams (TriffViewSubsystem.cs:2871) sets only WS_EX_TOOLWINDOW |
-        // WS_EX_NOACTIVATE | (optionally) WS_EX_TOPMOST - no WS_EX_LAYERED, no
-        // TransparencyKey - and MarkActiveClient (:3052) and SyncClientStates (:3090) already
-        // rely on bounded Invalidate(rect) on this same form today. The "partial invalidation
-        // leaves ghosts" comment near :3946 is about TriffViewLabelOverlayForm, a DIFFERENT,
-        // layered form (WS_EX_LAYERED + TransparencyKey) where the compositor needs the whole
-        // surface repainted. Do not apply that reasoning here.
+        // CreateParams sets only WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (optionally)
+        // WS_EX_TOPMOST - no WS_EX_LAYERED, no TransparencyKey - and MarkActiveClient and
+        // SyncClientStates already rely on bounded Invalidate(rect) on this same form today.
+        // The "partial invalidation leaves ghosts" comment elsewhere in this file is about
+        // TriffViewLabelOverlayForm, a DIFFERENT, layered form (WS_EX_LAYERED +
+        // TransparencyKey) where the compositor needs the whole surface repainted. Do not
+        // apply that reasoning here.
         var dirty = new List<Rectangle>();
         foreach (var state in _previews.Values)
         {
@@ -3663,33 +3690,36 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             }
         }
 
-        // Rects that fell due while the overlay was invisible must not be thrown away - the
-        // border is still in the form's backing store and nothing else repaints it on the way
-        // back. Carry them until we are allowed to paint again.
-        _deferredAlertRects.AddRange(dirty);
-
         if (!_previews.Values.Any(state => state.Alerts.Active(now) != null))
         {
             _alertTimer.Stop();
         }
 
-        if (paintSuppressed) return;
+        if (paintSuppressed)
+        {
+            // Nothing is visible to repaint, so don't - but remember that a repaint is owed
+            // for whenever Opacity comes back off 0. Not a rect list: a single flag, consumed
+            // as one full Invalidate() by the site that restores Opacity.
+            if (dirty.Count > 0) _alertRepaintOwed = true;
+            return;
+        }
 
         if (resuming)
         {
-            // One full repaint on return covers every deferred rect at once, including any
-            // whose preview has since moved or been destroyed.
-            _deferredAlertRects.Clear();
+            // Belt-and-braces: only reachable if the alert timer is still running when
+            // Opacity comes back (i.e. some alert is still active), since a stopped timer
+            // never ticks again to observe this transition. The common case - the last
+            // alert expiring while hidden, which also stops the timer - is handled by the
+            // Opacity-restore call sites consuming _alertRepaintOwed instead.
+            _alertRepaintOwed = false;
             Invalidate();
             return;
         }
 
-        foreach (var rect in _deferredAlertRects)
+        foreach (var rect in dirty)
         {
             Invalidate(ToClientRect(rect));
         }
-
-        _deferredAlertRects.Clear();
     }
 
     private void UpdateAlertTimer()
