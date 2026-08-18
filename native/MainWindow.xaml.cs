@@ -279,10 +279,10 @@ public partial class MainWindow : Window
         };
         menu.Items.Add(_showHideItem);
         menu.Items.Add(openTriffViewItem);
+        menu.Items.Add(openCombatLogsItem);
         menu.Items.Add(openEveSettingsItem);
         menu.Items.Add(openFleetManagerItem);
         menu.Items.Add(openSkillPlannerItem);
-        menu.Items.Add(openCombatLogsItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add(_triffViewEnabledItem);
         menu.Items.Add(_triffViewHotkeysItem);
