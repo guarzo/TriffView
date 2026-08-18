@@ -1194,7 +1194,8 @@ internal sealed class TriffViewController : IDisposable
                         config.FlashColor,
                         config.FlashThickness,
                         config.FlashDurationMs,
-                        config.FlashPulseCount
+                        config.FlashPulseCount,
+                        false
                     ));
                 }
 
@@ -2803,36 +2804,6 @@ internal sealed class TriffViewController : IDisposable
     }
 }
 
-internal sealed record TriffViewPreviewAlert(
-    int SeverityRank,
-    string Color,
-    int Thickness,
-    int DurationMs,
-    int PulseCount
-);
-
-internal sealed class ActivePreviewAlert
-{
-    public ActivePreviewAlert(int severityRank, string color, int thickness, int durationMs, int pulseCount, DateTime startedUtc, DateTime expiresUtc)
-    {
-        SeverityRank = severityRank;
-        Color = color;
-        Thickness = thickness;
-        DurationMs = durationMs;
-        PulseCount = pulseCount;
-        StartedUtc = startedUtc;
-        ExpiresUtc = expiresUtc;
-    }
-
-    public int SeverityRank { get; }
-    public string Color { get; }
-    public int Thickness { get; }
-    public int DurationMs { get; }
-    public int PulseCount { get; }
-    public DateTime StartedUtc { get; }
-    public DateTime ExpiresUtc { get; set; }
-}
-
 internal sealed class TriffViewOverlayForm : Forms.Form
 {
     private const int ResizeHitSize = 16;
@@ -3147,7 +3118,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         foreach (var state in _previews.Values)
         {
             if (!MatchesAlertTarget(state, characterName)) continue;
-            state.SetAlert(alert, now);
+            state.Alerts.Arm(alert, now, targetIsSelected: false);
             matched = true;
         }
 
@@ -3587,7 +3558,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             graphics.DrawString(text, labelFont, textBrush, textRect, format);
         }
 
-        var activeAlert = state.ActiveAlert(DateTime.UtcNow);
+        var activeAlert = state.Alerts.Active(DateTime.UtcNow);
         if (activeAlert != null)
         {
             DrawAlertBorder(graphics, frame, activeAlert);
@@ -3621,17 +3592,17 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         var removed = false;
         foreach (var state in _previews.Values)
         {
-            removed |= state.ClearExpiredAlert(now);
+            removed |= state.Alerts.ClearExpired(now);
         }
 
-        var anyActive = _previews.Values.Any(state => state.ActiveAlert(now) != null);
+        var anyActive = _previews.Values.Any(state => state.Alerts.Active(now) != null);
         if (!anyActive) _alertTimer.Stop();
         if (removed || anyActive) Invalidate();
     }
 
     private void UpdateAlertTimer()
     {
-        var anyActive = _previews.Values.Any(state => state.ActiveAlert(DateTime.UtcNow) != null);
+        var anyActive = _previews.Values.Any(state => state.Alerts.Active(DateTime.UtcNow) != null);
         if (anyActive && !_alertTimer.Enabled) _alertTimer.Start();
         if (!anyActive && _alertTimer.Enabled) _alertTimer.Stop();
     }
@@ -3819,35 +3790,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         public Rectangle FrameRect { get; set; }
         public bool Active { get; set; }
         public bool Visible { get; set; }
-        private ActivePreviewAlert? Alert { get; set; }
-
-        public void SetAlert(TriffViewPreviewAlert alert, DateTime now)
-        {
-            if (Alert != null && Alert.ExpiresUtc > now && Alert.SeverityRank > alert.SeverityRank)
-            {
-                Alert.ExpiresUtc = now.AddMilliseconds(Math.Max(1, alert.DurationMs));
-                return;
-            }
-
-            Alert = new ActivePreviewAlert(
-                alert.SeverityRank,
-                alert.Color,
-                alert.Thickness,
-                alert.DurationMs,
-                alert.PulseCount,
-                now,
-                now.AddMilliseconds(Math.Max(1, alert.DurationMs))
-            );
-        }
-
-        public ActivePreviewAlert? ActiveAlert(DateTime now) => Alert != null && Alert.ExpiresUtc > now ? Alert : null;
-
-        public bool ClearExpiredAlert(DateTime now)
-        {
-            if (Alert == null || Alert.ExpiresUtc > now) return false;
-            Alert = null;
-            return true;
-        }
+        public PreviewAlertState Alerts { get; } = new();
     }
 
     private enum MouseMode
