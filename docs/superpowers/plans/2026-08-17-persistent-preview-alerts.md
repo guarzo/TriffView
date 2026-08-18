@@ -822,7 +822,7 @@ Do not implement anything yet. These six tests, plus Task 1's own tests, are the
 powershell.exe -NoProfile -Command "$env:DOTNET_CLI_HOME='C:\dev\TriffView\.dotnet-home'; $env:NUGET_PACKAGES='C:\dev\TriffView\.nuget'; $env:APPDATA='C:\dev\TriffView\.appdata'; $env:NUGET_HTTP_CACHE_PATH='C:\dev\TriffView\.nuget-cache'; $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'; & 'C:\dev\TriffView\.dotnet\dotnet.exe' test 'C:\dev\TriffView\.claude\worktrees\feat+persistent-preview-alerts\native\TriffView.Tests\TriffView.Tests.csproj' -c Release --filter \"FullyQualifiedName~PreviewAlertStateTests\""
 ```
 
-Expected: if Task 1 landed exactly per contract, `PersistentAlertStaysActivePastExpiry`, `ClearExpiredNeverClearsAPersistentAlert`, and `AcknowledgeClearsAPersistentAlertAndReturnsTrue` already PASS, because `Arm`/`Active`/`ClearExpired`/`Acknowledge` are Task 1's own contract and don't depend on anything in this task. The two tests that legitimately require no further production code beyond Task 1 are expected green here — that is fine, they are regression coverage for this task, not new-behaviour proof. `ArmWithTargetSelectedProducesANonPersistentAlertEvenWhenRequested`, `LowerSeverityAlertArrivingAfterPersistentAlertsNominalExpiryDoesNotReplaceOrDowngradeIt`, and `ReplacingHigherSeverityAlertRecomputesPersistenceRatherThanInheritingIt` are also implemented purely in terms of `Arm`'s `targetIsSelected` parameter per the CONTRACT.md body, so if Task 1 wired that parameter correctly these should also already pass. If any of the six fail, the failure means Task 1's `Arm` body deviated from CONTRACT.md — fix that expectation note in this task's notes and flag it, do not patch `PreviewAlertState.cs` from this task (Task 1 owns that file).
+Expected: if Task 1 landed exactly per contract, `PersistentAlertStaysActivePastExpiry`, `ClearExpiredNeverClearsAPersistentAlert`, and `AcknowledgeClearsAPersistentAlertAndReturnsTrue` already PASS, because `Arm`/`Active`/`ClearExpired`/`Acknowledge` are Task 1's own contract and don't depend on anything in this task. The two tests that legitimately require no further production code beyond Task 1 are expected green here — that is fine, they are regression coverage for this task, not new-behaviour proof. `ArmWithTargetSelectedProducesANonPersistentAlertEvenWhenRequested`, `LowerSeverityAlertArrivingAfterPersistentAlertsNominalExpiryDoesNotReplaceOrDowngradeIt`, and `ReplacingHigherSeverityAlertRecomputesPersistenceRatherThanInheritingIt` are also implemented purely in terms of `Arm`'s `targetIsSelected` parameter per Task 1's Interfaces block, so if Task 1 wired that parameter correctly these should also already pass. If any of the six fail, the failure means Task 1's `Arm` body deviated from the interface Task 1 publishes — fix that expectation note in this task's notes and flag it, do not patch `PreviewAlertState.cs` from this task (Task 1 owns that file).
 
 - [ ] **Step 3: Add `_selectedHandle` to `TriffViewOverlayForm`**
 
@@ -982,19 +982,19 @@ powershell.exe -NoProfile -Command "cd 'C:\dev\TriffView\.claude\worktrees\feat+
 ### Task 4: Free-running pulse and bounded repaint
 
 **Files:**
-- Modify: `native/TriffView/PreviewAlertState.cs` (add one static method; this file was created by an earlier task per CONTRACT.md)
+- Modify: `native/TriffView/PreviewAlertState.cs` (add one static method; created by Task 1)
 - Modify: `native/TriffView/TriffViewSubsystem.cs:3602-3616` (`DrawAlertBorder`)
 - Modify: `native/TriffView/TriffViewSubsystem.cs:3618-3630` (`TickAlertFlashes`)
 - Modify: `native/TriffView/TriffViewSubsystem.cs:2842` area / `TriffViewOverlayForm` field list (add `_alertPaintSuppressed`)
-- Test: `native/TriffView.Tests/PreviewAlertStateTests.cs` (append; file already exists per CONTRACT.md, created by the task that built `PreviewAlertState`)
+- Test: `native/TriffView.Tests/PreviewAlertStateTests.cs` (append; created by Task 1)
 
 **Interfaces:**
 - Consumes:
-  - `ActivePreviewAlert.Persistent` (`bool`, get-only) — from CONTRACT.md, Task 1.
+  - `ActivePreviewAlert.Persistent` (`bool`, get-only) — published by Task 1's Interfaces block.
   - `ActivePreviewAlert.StartedUtc`, `.DurationMs`, `.PulseCount`, `.Color`, `.Thickness` — unchanged existing members.
-  - `PreviewState.Alerts` (`PreviewAlertState`, on the private nested `PreviewState`) — from CONTRACT.md. Call sites use `state.Alerts.Active(now)` and `state.Alerts.ClearExpired(now)`.
-  - `PreviewAlertState.Active(DateTime now) : ActivePreviewAlert?` and `PreviewAlertState.ClearExpired(DateTime now) : bool` — from CONTRACT.md, Task 1.
-  - **Assumption, flagged for the integrator:** the design doc also says `TickAlertFlashes` clears a persistent alert when its preview's client becomes `_selectedHandle` (an `Acknowledge()` call). That wiring belongs to whichever task adds `_selectedHandle` to `TriffViewOverlayForm` (per CONTRACT.md, not this one). This task's `TickAlertFlashes` only performs `ClearExpired`. If that other task adds an `Acknowledge()` loop inside `TickAlertFlashes`, it must feed its cleared-rect results into the same `dirty` list built below, using the identical `cleared || stillActive` pattern — otherwise an acknowledged alert's border will ghost exactly the way this task exists to prevent. Do not silently drop that requirement; call it out in that task's own review if it lands separately.
+  - `PreviewState.Alerts` (`PreviewAlertState`, on the private nested `PreviewState`) — published by Task 1. Call sites use `state.Alerts.Active(now)` and `state.Alerts.ClearExpired(now)`.
+  - `PreviewAlertState.Active(DateTime now) : ActivePreviewAlert?` and `PreviewAlertState.ClearExpired(DateTime now) : bool` — published by Task 1's Interfaces block.
+  - **Resolved (was an open assumption during drafting):** Task 3 adds the `Acknowledge()` call, and this task's Step 5 block below already includes it, feeding its result into the same `dirty` list. Do not remove it. Background: the design doc also says `TickAlertFlashes` clears a persistent alert when its preview's client becomes `_selectedHandle` (an `Acknowledge()` call). That wiring belongs to whichever task adds `_selectedHandle` to `TriffViewOverlayForm` (Task 3, not this one). This task's `TickAlertFlashes` only performs `ClearExpired`. If that other task adds an `Acknowledge()` loop inside `TickAlertFlashes`, it must feed its cleared-rect results into the same `dirty` list built below, using the identical `cleared || stillActive` pattern — otherwise an acknowledged alert's border will ghost exactly the way this task exists to prevent. Do not silently drop that requirement; call it out in that task's own review if it lands separately.
 - Produces:
   - `PreviewAlertState.AlertProgress(DateTime startedUtc, DateTime now, int durationMs, bool persistent) : double` — a pure static helper, usable by any later task that needs the same phase maths (e.g. a settings-panel live preview).
   - `TriffViewOverlayForm._alertPaintSuppressed` (private bool) — internal to the form, not consumed elsewhere.
@@ -1003,7 +1003,7 @@ powershell.exe -NoProfile -Command "cd 'C:\dev\TriffView\.claude\worktrees\feat+
 
 - [ ] **Step 1: Write failing tests for the phase helper**
 
-Append to `native/TriffView.Tests/PreviewAlertStateTests.cs` (it already has `using TriffView.Preview;` / `using Xunit;` / `namespace TriffView.Tests;` per CONTRACT.md — do not duplicate those):
+Append to `native/TriffView.Tests/PreviewAlertStateTests.cs` (it already has `using TriffView.Preview;` / `using Xunit;` / `namespace TriffView.Tests;` from Task 1 — do not duplicate those):
 
 ```csharp
 public class PreviewAlertStatePhaseTests
@@ -1199,7 +1199,7 @@ Replace `native/TriffView/TriffViewSubsystem.cs:3618-3630`:
     }
 ```
 
-`UpdateAlertTimer` (`TriffViewSubsystem.cs:3632-3637`) also calls the old `state.ActiveAlert(...)`; update its one line to match the new API (this is a mechanical rename required by CONTRACT.md's `PreviewState.Alerts`, not new behavior):
+**Ownership note:** `UpdateAlertTimer` (`TriffViewSubsystem.cs:3632-3637`) is retargeted onto `state.Alerts.Active(...)` by **Task 1**, which owns every mechanical call-site rename in this file. By the time you reach this task it should already read the new form. Verify it does; if it still reads `state.ActiveAlert(...)`, that is a Task 1 gap — flag it rather than silently patching it here. For reference, the correct final form is:
 
 ```csharp
     private void UpdateAlertTimer()
