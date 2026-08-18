@@ -1089,6 +1089,9 @@ internal sealed class TriffViewController : IDisposable
                 case "pveMode":
                     alerts.PveMode = value?.GetValue<bool>() == true;
                     break;
+                case "persistUntilSelected":
+                    alerts.PersistUntilSelected = value?.GetValue<bool>() == true;
+                    break;
                 case "masterVolume":
                     alerts.MasterVolume = ClampDouble(value, 0, 1, alerts.MasterVolume);
                     break;

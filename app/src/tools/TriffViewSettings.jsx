@@ -103,6 +103,7 @@ const DEFAULT_ALERT_EVENTS = ALERT_EVENT_DEFS.reduce((events, event) => {
 const DEFAULT_ALERTS = {
   enabled: false,
   pveMode: true,
+  persistUntilSelected: false,
   masterVolume: 0.75,
   events: DEFAULT_ALERT_EVENTS,
 };
@@ -524,6 +525,7 @@ function normalizeAlertsState(alerts) {
     ...DEFAULT_ALERTS,
     ...source,
     masterVolume: Number.isFinite(Number(source.masterVolume)) ? Number(source.masterVolume) : DEFAULT_ALERTS.masterVolume,
+    persistUntilSelected: source.persistUntilSelected === true,
     events,
   };
 }
@@ -1727,6 +1729,11 @@ function TriffViewSettings({ open = true }) {
           <div className="triffview-toggle-grid">
             <Toggle label="Enable alerts" checked={alerts.enabled} onChange={(value) => patchAlerts({ enabled: value })} />
             <Toggle label="Only alert in PvP, ignore NPC's" checked={alerts.pveMode} onChange={(value) => patchAlerts({ pveMode: value })} />
+            <Toggle
+              label="Keep alerting until I select that character"
+              checked={alerts.persistUntilSelected}
+              onChange={(value) => patchAlerts({ persistUntilSelected: value })}
+            />
           </div>
           <div className="triff-alert-event-list">
             {ALERT_EVENT_DEFS.map((eventDef) => {
