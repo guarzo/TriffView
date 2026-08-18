@@ -32,9 +32,14 @@ cadence until X's EVE client is the real foreground window.
   selected. Alerts arm and persist. This deliberately differs from
   `_activeClientHandle`, which keeps the last-used client marked active while
   you are in Discord or a browser (`TriffViewSubsystem.cs:508-521`).
-- **Severity.** Unchanged. A higher-severity alert replaces a lower one; a
-  lower-severity alert arriving during an active alert extends its expiry rather
-  than downgrading its colour, which is a no-op for a persistent alert.
+- **Severity.** Unchanged in effect, but the rule has to be stated in terms of
+  *logical* activity rather than expiry. A higher-severity alert replaces a lower
+  one; a lower-severity alert arriving while an alert is still logically active
+  extends its expiry rather than downgrading its colour, which is a no-op for a
+  persistent alert. A persistent alert is logically active indefinitely,
+  including after its nominal `ExpiresUtc` has passed. When a replacement does
+  happen, the new alert recomputes `Persistent` from the toggle and the current
+  `selectedHandle`; persistence is never inherited from the alert it replaced.
 - **Cadence.** Unchanged, and driven by the same two settings. The existing wave
   is `sin(progress * PulseCount * 2*pi)` with `progress = elapsed /
   FlashDurationMs`, so one pulse takes `FlashDurationMs / FlashPulseCount` ms. A
@@ -70,6 +75,12 @@ deliberately **not** `_activeClientHandle`.
 - `ActivePreviewAlert` (`:2814`) gains `Persistent`. `ActiveAlert(now)` returns
   the alert when `Persistent || ExpiresUtc > now`; `ClearExpiredAlert` must not
   clear a persistent alert.
+- **The severity guard must become persistence-aware as well.** It currently
+  reads `Alert.ExpiresUtc > now && Alert.SeverityRank > alert.SeverityRank`
+  (`:3824`). Making only `ActiveAlert` and `ClearExpiredAlert` persistence-aware
+  would leave a persistent alert past its nominal `ExpiresUtc` failing that first
+  clause, so a *lower*-severity event would replace and downgrade it. All three
+  call sites must share one "is this alert logically active" predicate.
 
 ### Rendering
 
@@ -86,8 +97,15 @@ entire desktop-spanning overlay form. Today that is bounded by
 
 Two changes:
 
-1. Invalidate only the rects of previews that currently hold an alert, as
-   `:3054` and `:3091` already do. This is safe **on this form specifically**:
+1. Invalidate a bounded set of rects instead of the whole form, as `:3054` and
+   `:3091` already do. **That set is the union of (a) previews whose alert was
+   cleared during this tick and (b) previews that still hold an alert.**
+   `TickAlertFlashes` clears expired alerts *before* it repaints (`:3620-3625`),
+   so invalidating only the previews that *currently* hold an alert would skip
+   exactly the preview that just cleared and leave its last-painted border on
+   screen. Capture each alert's dirty rect before clearing it. The existing bare
+   `Invalidate()` is load-bearing for correctness here, not merely lazy.
+   Bounded invalidation is safe **on this form specifically**:
    the preview overlay is not layered (`CreateParams` at `:2883` sets only
    `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST`, with no
    `TransparencyKey`). The "partial invalidation leaves ghosts" finding recorded
@@ -128,13 +146,25 @@ per-key on both sides, so unknown keys are ignored in both directions.
 
 ## Testing
 
+The alert lifetime logic is **not** testable where it currently lives.
+`ActivePreviewAlert` (`:2814-2834`) is a pure data holder — a constructor and
+seven properties, no methods — and every behaviour worth covering (`SetAlert`,
+`ActiveAlert`, `ClearExpiredAlert`, and the severity guard) sits on
+`PreviewState`, a **private nested class** inside `TriffViewOverlayForm`
+(`:3808`, `:3824`, `:3843`). Internals being reachable from the test project is
+not the same thing as this logic being reachable.
+
+So the state machine moves onto an internal top-level type: arm, expire,
+acknowledge, and severity-replace become methods there, and `PreviewState`
+keeps only a reference to it alongside its own window and geometry concerns.
+This is the smallest change that makes the behaviour testable at all, and it
+shrinks a file that is already oversized.
+
 Tests go in `native/TriffView.Tests` (`net8.0-windows`, `ProjectReference` to
 `TriffView.csproj`, with `<InternalsVisibleTo Include="TriffView.Tests" />` at
-`native/TriffView.csproj:31`). `ActivePreviewAlert` and `TriffViewPreviewAlert`
-are already top-level `internal` types and are reachable from there directly.
-
-No source file is extracted and no `Compile Include` line is added. **CLAUDE.md's
-Testing section is out of date on this point** — it describes only the
+`native/TriffView.csproj:31`), so the extracted type carries no Windows-free
+constraint and needs no `Compile Include` line. **CLAUDE.md's Testing section is
+out of date on this point** — it describes only the
 linked-source `tests/TriffView.Tests` project and states that logic must be
 Windows-free to be testable. That is no longer the whole picture, and the doc
 should be corrected separately from this change.
@@ -145,11 +175,17 @@ Cases:
 - it clears when its client becomes the selected handle;
 - it does not arm when the target is already the selected handle;
 - `selectedHandle == nint.Zero` (outside EVE) does not clear anything;
-- a severity upgrade preserves persistence;
+- a lower-severity alert arriving *after* a persistent alert's nominal
+  `ExpiresUtc` neither replaces nor downgrades it;
+- a replacing higher-severity alert recomputes persistence from the toggle and
+  the current `selectedHandle` rather than inheriting it;
+- clearing an alert reports its dirty rect, so the repaint that follows erases
+  the border rather than leaving it painted;
 - with the toggle off, arming and expiry are byte-for-byte today's behaviour.
 
-`PreviewState` is a private nested class inside `TriffViewOverlayForm` and stays
-untestable; the logic worth covering lives on the two internal alert types.
+`PreviewState` itself stays a private nested class and stays untestable. It
+keeps only window and geometry concerns; the alert behaviour under test lives
+entirely on the extracted type.
 
 ## Accepted limitations
 
@@ -172,3 +208,17 @@ Windows-only, via the explicit-SDK invocation documented in CLAUDE.md for
 worktrees. Build plus the `native/TriffView.Tests` suite. Anything about the
 on-screen blink is a claim until it has been exercised on Windows, including on
 a 100% monitor rather than only the 200% primary.
+
+**A measured performance gate is required, not optional.** This change can leave
+the 80 ms overlay timer (`:2842`) armed indefinitely, which no previous version
+of this code allowed. Before the change is called done, sample TriffView with
+the external harness at `C:\dev\triffview-perf\` (`sample.ps1`) under three
+conditions — idle, one persistent alert, and several persistent alerts — and
+compare CPU time, GDI/USER handles, and `dwm.exe` CPU against the idle baseline.
+Use `Get-Counter '\Process(dwm)\% Processor Time'` for DWM; `TotalProcessorTime`
+silently reads zero for it. If the harness is gone, rebuild it from CLAUDE.md's
+"Measuring performance and resource use" section.
+
+The mixed-DPI arrangement is deliberately *not* part of the performance gate.
+That trap governs geometry and placement, and this change moves no rectangles.
+Testing on a 100% monitor is still required, for rendering rather than cost.
