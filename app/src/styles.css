@@ -602,16 +602,10 @@
 
 /* Same problem as the .triffview-theme-button override just above: must
    out-specify `.triffview-standalone-topbar span` (0,1,1), which otherwise
-   forces this caret to 11px and locks its color to --tv-muted even when the
-   button is hovered/expanded. */
+   forces this caret to 11px instead of 10px. */
 .triffview-standalone-topbar .triffview-theme-caret {
   font-size: 10px;
   color: var(--tv-muted);
-}
-
-.triffview-theme-button:hover .triffview-theme-caret,
-.triffview-theme-button[aria-expanded="true"] .triffview-theme-caret {
-  color: var(--tv-text-active);
 }
 
 .triffview-theme-listbox {
