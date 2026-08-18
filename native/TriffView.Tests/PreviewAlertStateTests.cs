@@ -204,3 +204,40 @@ public class PreviewAlertStateTests
         Assert.False(active.Persistent);
     }
 }
+
+public class PreviewAlertStatePhaseTests
+{
+    [Fact]
+    public void NonPersistentAlert_ProgressClampsAtOne()
+    {
+        var started = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var farPastExpiry = started.AddMilliseconds(50_000);
+
+        var progress = PreviewAlertState.AlertProgress(started, farPastExpiry, durationMs: 1000, persistent: false);
+
+        Assert.Equal(1.0, progress);
+    }
+
+    [Fact]
+    public void PersistentAlert_ProgressKeepsAdvancingPastDuration()
+    {
+        var started = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var wellPastNominalExpiry = started.AddMilliseconds(3500);
+
+        var progress = PreviewAlertState.AlertProgress(started, wellPastNominalExpiry, durationMs: 1000, persistent: true);
+
+        Assert.Equal(3.5, progress, precision: 6);
+    }
+
+    [Fact]
+    public void PersistentAlert_BeforeDuration_MatchesNonPersistent()
+    {
+        var started = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var midway = started.AddMilliseconds(400);
+
+        var persistentProgress = PreviewAlertState.AlertProgress(started, midway, durationMs: 1000, persistent: true);
+        var nonPersistentProgress = PreviewAlertState.AlertProgress(started, midway, durationMs: 1000, persistent: false);
+
+        Assert.Equal(nonPersistentProgress, persistentProgress, precision: 6);
+    }
+}

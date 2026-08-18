@@ -2814,6 +2814,8 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     private readonly TriffViewPreviewPositionMemory _positionMemory = new();
     private readonly Dictionary<int, TriffViewHotkeyCommand> _hotkeys = new();
     private readonly Forms.Timer _alertTimer = new() { Interval = 80 };
+    private bool _alertPaintSuppressed;
+    private readonly List<Rectangle> _deferredAlertRects = new();
     private readonly TriffViewLabelOverlayForm _labelOverlay = new();
     private string _hotkeySignature = "";
     private string _windowRegionSignature = "";
@@ -3601,8 +3603,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     private void DrawAlertBorder(Graphics graphics, Rectangle frame, ActivePreviewAlert alert)
     {
         var baseColor = ColorFromString(alert.Color, Color.FromArgb(255, 59, 59));
-        var elapsed = Math.Max(0, (DateTime.UtcNow - alert.StartedUtc).TotalMilliseconds);
-        var progress = Math.Min(1, elapsed / Math.Max(1, alert.DurationMs));
+        var progress = PreviewAlertState.AlertProgress(alert.StartedUtc, DateTime.UtcNow, alert.DurationMs, alert.Persistent);
         var wave = (Math.Sin(progress * alert.PulseCount * Math.PI * 2) + 1) / 2;
         var alpha = (int)Math.Max(90, Math.Min(255, 110 + wave * 145));
         using var path = RoundedRect(frame, 6);
@@ -3617,19 +3618,78 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     private void TickAlertFlashes()
     {
         var now = DateTime.UtcNow;
-        var removed = false;
+
+        // HideOnLostFocus parks the whole overlay at Opacity 0 (:2987, :3072) without hiding
+        // it, so DWM still composites nothing visible. Alerts stay armed and keep expiring on
+        // schedule underneath, but there is nothing on screen to repaint, so skip Invalidate
+        // entirely while suppressed and catch up with one full repaint the moment we return.
+        var paintSuppressed = Opacity <= 0;
+        var resuming = _alertPaintSuppressed && !paintSuppressed;
+        _alertPaintSuppressed = paintSuppressed;
+
+        // The tick clears expired alerts before it repaints, so a preview whose alert just
+        // expired must still be invalidated this tick even though state.Alerts.Active(now) is
+        // now null for it - otherwise its last-painted border is never erased. Capture each
+        // preview's dirty state (cleared-this-tick OR still-active) before moving on, and
+        // invalidate that rect, not the whole form.
+        //
+        // Bounded Invalidate(rect) is safe on THIS form specifically: TriffViewOverlayForm's
+        // CreateParams (TriffViewSubsystem.cs:2871) sets only WS_EX_TOOLWINDOW |
+        // WS_EX_NOACTIVATE | (optionally) WS_EX_TOPMOST - no WS_EX_LAYERED, no
+        // TransparencyKey - and MarkActiveClient (:3052) and SyncClientStates (:3090) already
+        // rely on bounded Invalidate(rect) on this same form today. The "partial invalidation
+        // leaves ghosts" comment near :3946 is about TriffViewLabelOverlayForm, a DIFFERENT,
+        // layered form (WS_EX_LAYERED + TransparencyKey) where the compositor needs the whole
+        // surface repainted. Do not apply that reasoning here.
+        var dirty = new List<Rectangle>();
         foreach (var state in _previews.Values)
         {
-            removed |= state.Alerts.ClearExpired(now);
-            if (state.Client.Handle == _selectedHandle)
+            var cleared = state.Alerts.ClearExpired(now);
+
+            // Acknowledgement. This line is the whole point of the feature: it is what stops a
+            // persistent alert when its client becomes the selected one. It was introduced by
+            // the arm-and-acknowledge task and MUST survive any future rewrite of this method -
+            // an earlier draft of this plan rewrote the tick and silently dropped it, which
+            // would have shipped a persistent alert that never clears.
+            if (state.Client.Handle == _selectedHandle && state.Alerts.Acknowledge())
             {
-                removed |= state.Alerts.Acknowledge();
+                cleared = true;
+            }
+
+            var stillActive = state.Alerts.Active(now) != null;
+            if (cleared || stillActive)
+            {
+                dirty.Add(state.FrameRect);
             }
         }
 
-        var anyActive = _previews.Values.Any(state => state.Alerts.Active(now) != null);
-        if (!anyActive) _alertTimer.Stop();
-        if (removed || anyActive) Invalidate();
+        // Rects that fell due while the overlay was invisible must not be thrown away - the
+        // border is still in the form's backing store and nothing else repaints it on the way
+        // back. Carry them until we are allowed to paint again.
+        _deferredAlertRects.AddRange(dirty);
+
+        if (!_previews.Values.Any(state => state.Alerts.Active(now) != null))
+        {
+            _alertTimer.Stop();
+        }
+
+        if (paintSuppressed) return;
+
+        if (resuming)
+        {
+            // One full repaint on return covers every deferred rect at once, including any
+            // whose preview has since moved or been destroyed.
+            _deferredAlertRects.Clear();
+            Invalidate();
+            return;
+        }
+
+        foreach (var rect in _deferredAlertRects)
+        {
+            Invalidate(ToClientRect(rect));
+        }
+
+        _deferredAlertRects.Clear();
     }
 
     private void UpdateAlertTimer()

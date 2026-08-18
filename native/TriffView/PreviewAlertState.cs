@@ -79,4 +79,14 @@ internal sealed class PreviewAlertState
         _alert = null;
         return true;
     }
+
+    // Pure phase maths shared by DrawAlertBorder. Non-persistent alerts clamp at 1 so the
+    // wave finishes exactly at DurationMs and holds there; persistent alerts free-run so the
+    // sine keeps pulsing at the same configured cadence indefinitely.
+    public static double AlertProgress(DateTime startedUtc, DateTime now, int durationMs, bool persistent)
+    {
+        var elapsed = Math.Max(0, (now - startedUtc).TotalMilliseconds);
+        var raw = elapsed / Math.Max(1, durationMs);
+        return persistent ? raw : Math.Min(1, raw);
+    }
 }
