@@ -2915,15 +2915,6 @@ button:disabled {
   align-self: flex-start;
 }
 
-/* Inside `.triff-combat-export-path` the summary sits under an `h3` in a box
-   that already has its own border/background, so drop the strip styling
-   rather than nest two boxes. */
-.triff-alert-summary--embedded {
-  border: none;
-  background: none;
-  padding: 0;
-}
-
 .triff-alert-summary strong,
 .triff-alert-event h4,
 .triff-alert-history-head h4 {
@@ -3156,7 +3147,6 @@ button:disabled {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
-  align-items: start;
 }
 
 /* The container is `.triff-combat-export`, the query target is its descendant
@@ -3198,6 +3188,31 @@ button:disabled {
 
 .triff-combat-export-path.is-detected h3 {
   color: var(--tv-accent);
+}
+
+/* Heading row for both panels: the h3 plus, on the "Last fight" panel only,
+   the Ready/None status pill. A shared min-height keeps both panels' headings
+   aligned even though only one of them has a second child. */
+.triff-combat-export-path-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 24px;
+}
+
+/* Replaces the old `.triff-alert-summary`/`--embedded` wrapper now that the
+   status pill has moved into the heading row above - this just needs the
+   text/button stacked, not the space-between row that pairing required. */
+.triff-combat-export-path-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.triff-combat-export-path-info {
+  color: var(--tv-muted);
+  font-size: 11px;
 }
 
 .triff-combat-export-quick {
@@ -3371,6 +3386,9 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  margin-top: auto;
+  border-top: 1px solid var(--tv-border-soft);
+  padding-top: 10px;
 }
 
 .triff-combat-export-path-actions button {
