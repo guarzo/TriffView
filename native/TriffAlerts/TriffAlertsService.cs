@@ -14,6 +14,7 @@ public sealed class TriffAlertsSettings
     public int DefaultsVersion { get; set; }
     public bool Enabled { get; set; }
     public bool PveMode { get; set; } = true;
+    public bool PersistUntilSelected { get; set; }
     public double MasterVolume { get; set; } = 0.75;
     public Dictionary<string, TriffAlertEventConfig> Events { get; set; } = CreateDefaultEvents();
 
@@ -65,6 +66,7 @@ public sealed class TriffAlertsSettings
             defaultsVersion = DefaultsVersion,
             enabled = Enabled,
             pveMode = PveMode,
+            persistUntilSelected = PersistUntilSelected,
             masterVolume = MasterVolume,
             events = Events.ToDictionary(
                 item => item.Key,

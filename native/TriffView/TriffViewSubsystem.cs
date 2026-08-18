@@ -605,6 +605,17 @@ internal sealed class TriffViewController : IDisposable
         _hasObservedForeground = true;
         _lastObservedForegroundWasEve = foregroundIsEve;
 
+        // Focus left EVE entirely. Clear the alert-acknowledgement signal immediately rather
+        // than waiting for the next periodic refresh to recompute it: this method is driven by
+        // an EVENT_SYSTEM_FOREGROUND WinEvent hook, so it observes the transition as it happens,
+        // whereas SetClients/SyncClientStates only catch up on the 700ms timer. Without this,
+        // an alert arriving inside that window for the client you just switched away from would
+        // read as "already selected" and flash-and-stop instead of persisting.
+        //
+        // Cleared before the enabled/visible checks below on purpose: a stale selected handle
+        // must not survive across the overlay being hidden or the feature being toggled off.
+        if (!foregroundIsEve) _overlay.ClearSelectedClient();
+
         if (!foregroundIsEve || !Settings.Enabled || !_overlay.Visible) return;
 
         _activeClientHandle = foreground;
@@ -1089,6 +1100,9 @@ internal sealed class TriffViewController : IDisposable
                 case "pveMode":
                     alerts.PveMode = value?.GetValue<bool>() == true;
                     break;
+                case "persistUntilSelected":
+                    alerts.PersistUntilSelected = value?.GetValue<bool>() == true;
+                    break;
                 case "masterVolume":
                     alerts.MasterVolume = ClampDouble(value, 0, 1, alerts.MasterVolume);
                     break;
@@ -1194,7 +1208,8 @@ internal sealed class TriffViewController : IDisposable
                         config.FlashColor,
                         config.FlashThickness,
                         config.FlashDurationMs,
-                        config.FlashPulseCount
+                        config.FlashPulseCount,
+                        Settings.Alerts.PersistUntilSelected
                     ));
                 }
 
@@ -2803,36 +2818,6 @@ internal sealed class TriffViewController : IDisposable
     }
 }
 
-internal sealed record TriffViewPreviewAlert(
-    int SeverityRank,
-    string Color,
-    int Thickness,
-    int DurationMs,
-    int PulseCount
-);
-
-internal sealed class ActivePreviewAlert
-{
-    public ActivePreviewAlert(int severityRank, string color, int thickness, int durationMs, int pulseCount, DateTime startedUtc, DateTime expiresUtc)
-    {
-        SeverityRank = severityRank;
-        Color = color;
-        Thickness = thickness;
-        DurationMs = durationMs;
-        PulseCount = pulseCount;
-        StartedUtc = startedUtc;
-        ExpiresUtc = expiresUtc;
-    }
-
-    public int SeverityRank { get; }
-    public string Color { get; }
-    public int Thickness { get; }
-    public int DurationMs { get; }
-    public int PulseCount { get; }
-    public DateTime StartedUtc { get; }
-    public DateTime ExpiresUtc { get; set; }
-}
-
 internal sealed class TriffViewOverlayForm : Forms.Form
 {
     private const int ResizeHitSize = 16;
@@ -2840,6 +2825,13 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     private readonly TriffViewPreviewPositionMemory _positionMemory = new();
     private readonly Dictionary<int, TriffViewHotkeyCommand> _hotkeys = new();
     private readonly Forms.Timer _alertTimer = new() { Interval = 80 };
+    private bool _alertPaintSuppressed;
+
+    // Set when a tick has dirty alert rects to paint but Opacity is 0, so nothing would be
+    // visible anyway. Consumed (and turned into one full Invalidate) by whichever call site
+    // actually restores Opacity from 0, since only that site knows visibility just changed;
+    // the timer alone cannot (see TickAlertFlashes).
+    private bool _alertRepaintOwed;
     private readonly TriffViewLabelOverlayForm _labelOverlay = new();
     private string _hotkeySignature = "";
     private string _windowRegionSignature = "";
@@ -2850,6 +2842,25 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     private Rectangle _mouseStartRect;
     private TriffViewProfile _profile = TriffViewProfile.CreateDefault("Default");
     private nint _foreground;
+
+    // The live OS foreground window handle, but ONLY when that window belongs to one of
+    // _clients — otherwise nint.Zero. Used solely to decide whether a persistent alert's
+    // target client is "already selected" (see ShowAlert/TickAlertFlashes).
+    //
+    // Deliberately NOT the same as _activeClientHandle (subsystem-class field, line 54):
+    // that one latches onto the last EVE client and keeps pointing at it while the user
+    // tabs away to Discord or a browser, because it drives "which preview to highlight."
+    // If an alert arrived while the user was in Discord and this were _activeClientHandle
+    // instead, it would read as "already selected" and silently never persist — exactly
+    // the bug this field exists to prevent. It is also not _foreground above, which
+    // MarkActiveClient sets to whatever handle the caller wants highlighted, not
+    // necessarily the real live foreground window. Keep all three separate.
+    //
+    // Kept current from two directions: the periodic refresh recomputes it in SetClients and
+    // SyncClientStates, and ObserveForegroundTransition clears it via ClearSelectedClient the
+    // moment the EVENT_SYSTEM_FOREGROUND hook reports focus leaving EVE. The second path is what
+    // makes "user is away from EVE" accurate immediately rather than up to one refresh late.
+    private nint _selectedHandle;
     private Rectangle _virtualDesktop;
     private IReadOnlyList<EveClientWindow> _clients = Array.Empty<EveClientWindow>();
     private bool? _appliedTopmost;
@@ -2940,6 +2951,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         _clients = clients;
         _profile = profile;
         _foreground = foreground;
+        _selectedHandle = clients.Any(c => c.Handle == foreground) ? foreground : nint.Zero;
         SizeToVirtualDesktop();
 
         var highlightHandle = activeHandle != nint.Zero ? activeHandle : foreground;
@@ -2995,10 +3007,23 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         }
 
         var shouldHideForLostFocus = profile.HideOnLostFocus && !suppressLostFocusHide && clients.All(client => client.Handle != foreground);
+        var wasHiddenForAlerts = Opacity <= 0;
         Opacity = shouldHideForLostFocus ? 0 : Math.Max(0.2, Math.Min(1, profile.Opacity));
         _suppressLabelOverlay = shouldHideForLostFocus;
         UpdateWindowRegion(shouldHideForLostFocus);
         RefreshLabelOverlay();
+        // Consume any alert repaint owed from TickAlertFlashes: this is one of the sites that
+        // actually restores Opacity from 0, so it knows visibility just came back. This method
+        // already Invalidates unconditionally below, so clearing the flag here is enough - no
+        // extra repaint needed. Also clear _alertPaintSuppressed so it stays coherent with
+        // _alertRepaintOwed - otherwise the next alert's first tick would see a stale
+        // "resuming" transition and issue a spurious full-form Invalidate() (harmless, since
+        // full covers bounded, but it defeats the point of this method existing).
+        if (wasHiddenForAlerts && Opacity > 0)
+        {
+            _alertRepaintOwed = false;
+            _alertPaintSuppressed = false;
+        }
         Invalidate();
     }
 
@@ -3024,10 +3049,39 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             );
     }
 
+    /// <summary>
+    /// Clears the "which client is selected" signal used for alert acknowledgement, because the
+    /// foreground window is no longer an EVE client at all.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately does NOT touch _activeClientHandle on the subsystem or _foreground here:
+    /// those drive which preview is highlighted, and that is supposed to keep pointing at the
+    /// last EVE client while the user is in Discord or a browser. Only the alert-acknowledgement
+    /// signal is cleared, so that an alert arriving while the user is away from EVE arms as
+    /// persistent rather than reading as "already selected".
+    ///
+    /// No repaint is needed: clearing this cannot start or stop a pulse, it only stops
+    /// TickAlertFlashes from matching a preview for acknowledgement.
+    /// </remarks>
+    public void ClearSelectedClient()
+    {
+        _selectedHandle = nint.Zero;
+    }
+
     public void MarkActiveClient(nint activeHandle)
     {
         if (activeHandle == nint.Zero) return;
         _foreground = activeHandle;
+        // Safe to assign directly here (no membership check, unlike SetClients/
+        // SyncClientStates): reached via ObserveForegroundTransition (foreground already
+        // confirmed EVE) and via TryActivateClient after ActivateWindow succeeds, both of
+        // which guarantee activeHandle is a client's own handle. Caveat on the latter path:
+        // ActivateWindow can report success before Windows actually switches focus (the
+        // bug fixed by commit 1315183 / PR #6), so an alert landing in that gap arms
+        // non-persistent; it self-corrects on the next 700ms refresh. Note the foreground
+        // WinEvent does NOT rescue this case: if focus never actually moved, no transition is
+        // reported, so there is nothing to observe. Accepted limitation, not a bug to fix here.
+        _selectedHandle = activeHandle;
         _clients = _clients
             .Select(client => client with { IsForeground = client.Handle == activeHandle })
             .ToArray();
@@ -3036,6 +3090,19 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         {
             Opacity = Math.Max(0.2, Math.Min(1, _profile.Opacity));
             _suppressLabelOverlay = false;
+
+            // Consume any alert repaint owed from TickAlertFlashes: this site fires immediately
+            // off the foreground WinEvent, ahead of the 700ms SetClients/SyncClientStates poll,
+            // so it is the one most likely to be the first to observe the transition on a
+            // typical alt-tab back into EVE. Placed BEFORE the HideActivePreview early return
+            // below - that path must not skip this, or a whole profile silently gets the
+            // slower ~700ms fallback instead.
+            if (_alertRepaintOwed)
+            {
+                _alertRepaintOwed = false;
+                _alertPaintSuppressed = false;
+                Invalidate();
+            }
         }
 
         if (_profile.HideActivePreview)
@@ -3065,6 +3132,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     {
         _clients = clients;
         _foreground = foreground;
+        _selectedHandle = clients.Any(c => c.Handle == foreground) ? foreground : nint.Zero;
 
         var shouldHideForLostFocus = _profile.HideOnLostFocus && clients.All(client => client.Handle != foreground);
         var lostFocusVisibilityChanged = _suppressLabelOverlay != shouldHideForLostFocus;
@@ -3072,6 +3140,17 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         {
             Opacity = shouldHideForLostFocus ? 0 : Math.Max(0.2, Math.Min(1, _profile.Opacity));
             _suppressLabelOverlay = shouldHideForLostFocus;
+
+            // Consume any alert repaint owed from TickAlertFlashes: this is one of the sites
+            // that actually restores Opacity from 0, so it knows visibility just came back.
+            // Unlike SetClients, this method does not always Invalidate, so a real full
+            // Invalidate() is needed here.
+            if (!shouldHideForLostFocus && _alertRepaintOwed)
+            {
+                _alertRepaintOwed = false;
+                _alertPaintSuppressed = false;
+                Invalidate();
+            }
         }
 
         if (_profile.HideActivePreview)
@@ -3147,7 +3226,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         foreach (var state in _previews.Values)
         {
             if (!MatchesAlertTarget(state, characterName)) continue;
-            state.SetAlert(alert, now);
+            state.Alerts.Arm(alert, now, targetIsSelected: state.Client.Handle == _selectedHandle);
             matched = true;
         }
 
@@ -3587,7 +3666,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             graphics.DrawString(text, labelFont, textBrush, textRect, format);
         }
 
-        var activeAlert = state.ActiveAlert(DateTime.UtcNow);
+        var activeAlert = state.Alerts.Active(DateTime.UtcNow);
         if (activeAlert != null)
         {
             DrawAlertBorder(graphics, frame, activeAlert);
@@ -3602,8 +3681,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     private void DrawAlertBorder(Graphics graphics, Rectangle frame, ActivePreviewAlert alert)
     {
         var baseColor = ColorFromString(alert.Color, Color.FromArgb(255, 59, 59));
-        var elapsed = Math.Max(0, (DateTime.UtcNow - alert.StartedUtc).TotalMilliseconds);
-        var progress = Math.Min(1, elapsed / Math.Max(1, alert.DurationMs));
+        var progress = PreviewAlertState.AlertProgress(alert.StartedUtc, DateTime.UtcNow, alert.DurationMs, alert.Persistent);
         var wave = (Math.Sin(progress * alert.PulseCount * Math.PI * 2) + 1) / 2;
         var alpha = (int)Math.Max(90, Math.Min(255, 110 + wave * 145));
         using var path = RoundedRect(frame, 6);
@@ -3618,20 +3696,101 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     private void TickAlertFlashes()
     {
         var now = DateTime.UtcNow;
-        var removed = false;
+
+        // HideOnLostFocus parks the whole overlay at Opacity 0 without hiding it, so DWM still
+        // composites nothing visible. Alerts stay armed and keep expiring on schedule
+        // underneath, but there is nothing on screen to repaint, so skip Invalidate entirely
+        // while suppressed. Do NOT accumulate a rect list here to flush "on resume" - this
+        // timer stops itself the moment no alert is left active (below), and that can happen
+        // on the very tick that would have set the resume flag, so a resume detected only
+        // inside this method can be permanently unreachable. Instead this tick just raises
+        // _alertRepaintOwed, and whichever call site actually restores Opacity from 0 is
+        // responsible for consuming it - see the field's own comment for why this timer cannot
+        // do that job alone.
+        var paintSuppressed = Opacity <= 0;
+        var resuming = _alertPaintSuppressed && !paintSuppressed;
+        _alertPaintSuppressed = paintSuppressed;
+
+        // The tick clears expired alerts before it repaints, so a preview whose alert just
+        // expired must still be invalidated this tick even though state.Alerts.Active(now) is
+        // now null for it - otherwise its last-painted border is never erased. Capture each
+        // preview's dirty state (cleared-this-tick OR still-active) before moving on, and
+        // invalidate that rect, not the whole form.
+        //
+        // Bounded Invalidate(rect) is safe on THIS form, but not because it is unlayered -
+        // it may in fact BE layered: WinForms' Opacity setter flips AllowTransparency on for
+        // any value below 1, and CreateParams then adds WS_EX_LAYERED on top of the
+        // WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (optionally) WS_EX_TOPMOST this form always
+        // sets. The profile's Opacity is user-configurable from 0.2-1.0 and HideOnLostFocus
+        // drives it to 0, so whenever opacity is below 1 this form IS WS_EX_LAYERED - just
+        // alpha-layered (LWA_ALPHA) rather than colour-keyed. The "partial invalidation
+        // leaves ghosts" comment elsewhere in this file is about TriffViewLabelOverlayForm,
+        // which is layered via a DIFFERENT mechanism - WS_EX_LAYERED + TransparencyKey
+        // (LWA_COLORKEY) - where the compositor needs the whole surface repainted. That
+        // failure mode has not been observed on the alpha-layered case, and MarkActiveClient
+        // and SyncClientStates already rely on bounded Invalidate(rect) on this same form
+        // today at whatever opacity the user has configured, without reported ghosting.
+        // VERIFIED on hardware 2026-08-17 at profile opacity 20% - the minimum the UI and the
+        // native clamp allow, so the most transparent (and most demanding) alpha-layered case
+        // reachable: persistent alerts cleared and previews moved with no ghosting. Bounded
+        // invalidation is therefore sound on this form at every configurable opacity.
+        var dirty = new List<Rectangle>();
         foreach (var state in _previews.Values)
         {
-            removed |= state.ClearExpiredAlert(now);
+            var cleared = state.Alerts.ClearExpired(now);
+
+            // Acknowledgement. This line is the whole point of the feature: it is what stops a
+            // persistent alert when its client becomes the selected one. It was introduced by
+            // the arm-and-acknowledge task and MUST survive any future rewrite of this method -
+            // an earlier draft of this plan rewrote the tick and silently dropped it, which
+            // would have shipped a persistent alert that never clears.
+            if (state.Client.Handle == _selectedHandle && state.Alerts.Acknowledge())
+            {
+                cleared = true;
+            }
+
+            var stillActive = state.Alerts.Active(now) != null;
+            if (cleared || stillActive)
+            {
+                dirty.Add(state.FrameRect);
+            }
         }
 
-        var anyActive = _previews.Values.Any(state => state.ActiveAlert(now) != null);
-        if (!anyActive) _alertTimer.Stop();
-        if (removed || anyActive) Invalidate();
+        if (!_previews.Values.Any(state => state.Alerts.Active(now) != null))
+        {
+            _alertTimer.Stop();
+        }
+
+        if (paintSuppressed)
+        {
+            // Nothing is visible to repaint, so don't - but remember that a repaint is owed
+            // for whenever Opacity comes back off 0. Not a rect list: a single flag, consumed
+            // as one full Invalidate() by the site that restores Opacity.
+            if (dirty.Count > 0) _alertRepaintOwed = true;
+            return;
+        }
+
+        if (resuming)
+        {
+            // Belt-and-braces: only reachable if the alert timer is still running when
+            // Opacity comes back (i.e. some alert is still active), since a stopped timer
+            // never ticks again to observe this transition. The common case - the last
+            // alert expiring while hidden, which also stops the timer - is handled by the
+            // Opacity-restore call sites consuming _alertRepaintOwed instead.
+            _alertRepaintOwed = false;
+            Invalidate();
+            return;
+        }
+
+        foreach (var rect in dirty)
+        {
+            Invalidate(ToClientRect(rect));
+        }
     }
 
     private void UpdateAlertTimer()
     {
-        var anyActive = _previews.Values.Any(state => state.ActiveAlert(DateTime.UtcNow) != null);
+        var anyActive = _previews.Values.Any(state => state.Alerts.Active(DateTime.UtcNow) != null);
         if (anyActive && !_alertTimer.Enabled) _alertTimer.Start();
         if (!anyActive && _alertTimer.Enabled) _alertTimer.Stop();
     }
@@ -3819,35 +3978,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         public Rectangle FrameRect { get; set; }
         public bool Active { get; set; }
         public bool Visible { get; set; }
-        private ActivePreviewAlert? Alert { get; set; }
-
-        public void SetAlert(TriffViewPreviewAlert alert, DateTime now)
-        {
-            if (Alert != null && Alert.ExpiresUtc > now && Alert.SeverityRank > alert.SeverityRank)
-            {
-                Alert.ExpiresUtc = now.AddMilliseconds(Math.Max(1, alert.DurationMs));
-                return;
-            }
-
-            Alert = new ActivePreviewAlert(
-                alert.SeverityRank,
-                alert.Color,
-                alert.Thickness,
-                alert.DurationMs,
-                alert.PulseCount,
-                now,
-                now.AddMilliseconds(Math.Max(1, alert.DurationMs))
-            );
-        }
-
-        public ActivePreviewAlert? ActiveAlert(DateTime now) => Alert != null && Alert.ExpiresUtc > now ? Alert : null;
-
-        public bool ClearExpiredAlert(DateTime now)
-        {
-            if (Alert == null || Alert.ExpiresUtc > now) return false;
-            Alert = null;
-            return true;
-        }
+        public PreviewAlertState Alerts { get; } = new();
     }
 
     private enum MouseMode
