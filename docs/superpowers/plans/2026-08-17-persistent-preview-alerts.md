@@ -1319,6 +1319,32 @@ Expected: both pass, with no test count *lower* than before the branch. Record b
 
 A worktree has no `native/Assets/overlay-dist.zip`. The native project builds fine without it because the `EmbeddedResource` is conditional, but the app then serves the "missing overlay" page instead of the real settings UI — which invalidates every runtime observation below, including the toggle itself.
 
+**Where you put the exe matters as much as how you build it.** `FindLooseOverlayDistFolder`
+(`native/MainWindow.xaml.cs:497-508`) walks **upward** from the exe's own directory looking for
+`app/dist/index.html`, and a loose folder it finds **takes precedence over the embedded bundle**
+(`:494`). So an exe placed anywhere at or under a checkout that has a built `app/dist` will silently
+load *that* UI instead of the one you just embedded.
+
+This failure is worse than the missing-bundle case because it is silent: a missing bundle shows an
+obvious "missing overlay" page, whereas a stale one shows a perfectly working app that simply does
+not have your feature in it — which reads as "the change did nothing." This actually happened during
+this branch's first test build: the exe was copied to the main checkout root, whose `app/dist` was
+weeks old, and the new toggle was absent from the settings panel entirely.
+
+Run the exe from a directory with **no** `app/dist` in any ancestor — e.g. a scratch folder like
+`C:\dev\triffview-alerts-test\` — and verify the ancestors first:
+
+```bash
+ls /mnt/c/dev/app/dist/index.html /mnt/c/app/dist/index.html 2>/dev/null || echo "clean"
+```
+
+Then confirm positively that the UI you loaded is the right one: open the alerts settings and check
+the new toggle is visible. If it is not, stop — nothing downstream is meaningful.
+
+Also **quit any running TriffView first, including from the system tray.** The app is single-instance
+via a named mutex (`native/App.xaml.cs:27`); a second copy shows "TriffView is already running" and
+exits, leaving you observing the old build.
+
 **Do not copy the zip from the main checkout.** That zip is built from `fork/main`'s UI,
 which has no persist toggle — every UI-dependent check below would then run against a build
 that cannot show the feature. The bundle must be built from *this worktree's* `app/`.
