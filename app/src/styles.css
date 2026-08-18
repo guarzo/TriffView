@@ -2921,6 +2921,15 @@ button:disabled {
   align-self: flex-start;
 }
 
+/* Inside `.triff-combat-export-path` the summary sits under an `h3` in a box
+   that already has its own border/background, so drop the strip styling
+   rather than nest two boxes. */
+.triff-alert-summary--embedded {
+  border: none;
+  background: none;
+  padding: 0;
+}
+
 .triff-alert-summary strong,
 .triff-alert-event h4,
 .triff-alert-history-head h4 {

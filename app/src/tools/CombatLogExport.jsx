@@ -165,30 +165,28 @@ function CombatLogExport({
         {webhookState.error ? <p className="triff-combat-export-error">{webhookState.error}</p> : null}
       </div>
 
-      <div className="triff-alert-summary">
-        <div>
-          <strong>Last fight</strong>
-          <span>
-            {lastFight
-              ? `${formatUtcWindow(lastFight.startUtc, lastFight.endUtc)}${
-                  lastFight.characters?.length ? ` - ${lastFight.characters.join(", ")}` : ""
-                }`
-              : "No fight detected yet. Alerts must be enabled, and only fights seen while TriffView has been running are detected - use a time range for anything older."}
-          </span>
-          {!lastFight && onOpenAlerts ? (
-            <button type="button" className="triff-alert-summary-action" onClick={onOpenAlerts}>
-              Open Alerts settings
-            </button>
-          ) : null}
-        </div>
-        <span className={lastFight ? "triff-alert-status is-on" : "triff-alert-status"}>
-          {lastFight ? "Ready" : "None"}
-        </span>
-      </div>
-
       <div className="triff-combat-export-paths">
         <div className="triff-combat-export-path">
           <h3>Last fight</h3>
+          <div className="triff-alert-summary triff-alert-summary--embedded">
+            <div>
+              <span>
+                {lastFight
+                  ? `${formatUtcWindow(lastFight.startUtc, lastFight.endUtc)}${
+                      lastFight.characters?.length ? ` - ${lastFight.characters.join(", ")}` : ""
+                    }`
+                  : "No fight detected yet. Alerts must be enabled, and only fights seen while TriffView has been running are detected - use a time range for anything older."}
+              </span>
+              {!lastFight && onOpenAlerts ? (
+                <button type="button" className="triff-alert-summary-action" onClick={onOpenAlerts}>
+                  Open Alerts settings
+                </button>
+              ) : null}
+            </div>
+            <span className={lastFight ? "triff-alert-status is-on" : "triff-alert-status"}>
+              {lastFight ? "Ready" : "None"}
+            </span>
+          </div>
           <p className="triffview-muted">Export the fight TriffAlerts most recently detected.</p>
           <div className="triff-combat-export-path-actions">
             <button type="button" disabled={!lastFight || runBusy} onClick={() => onExport(null)}>
