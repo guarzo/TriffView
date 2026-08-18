@@ -135,21 +135,82 @@ public class CombatLogExportTests
     }
 
     [Fact]
-    public void FileNameCarriesTheWindowAndPilotCount()
+    public void FileNameCarriesTheLeadPilotAndAnExtraCount()
     {
         var fight = CombatLogExport.DetectLastFight(NewestFirst(
             Alert("attack", "Alpha", Noon),
             Alert("attack", "Bravo", Noon.AddSeconds(10))));
 
-        Assert.Equal("triffview-fight-20260814-1200Z-2pilots.zip", CombatLogExport.SuggestFileName(fight!));
+        // Characters is already sorted ordinal-ignore-case ascending, so "Alpha"
+        // is the lead pilot named in the file.
+        Assert.Equal("triffview-Alpha+1-20260814-1200Z.zip", CombatLogExport.SuggestFileName(fight!));
     }
 
     [Fact]
-    public void FileNameStaysSingularForOnePilot()
+    public void FileNameHasNoExtraSuffixForOnePilot()
     {
         var fight = CombatLogExport.DetectLastFight(NewestFirst(Alert("attack", "Alpha", Noon)));
 
-        Assert.Equal("triffview-fight-20260814-1200Z-1pilot.zip", CombatLogExport.SuggestFileName(fight!));
+        Assert.Equal("triffview-Alpha-20260814-1200Z.zip", CombatLogExport.SuggestFileName(fight!));
+    }
+
+    [Fact]
+    public void FileNameFallsBackToTheGenericFormWithNoPilots()
+    {
+        var window = new CombatLogFightWindow { StartUtc = Noon };
+
+        Assert.Equal("triffview-fight-20260814-1200Z.zip", CombatLogExport.SuggestFileName(window));
+    }
+
+    [Fact]
+    public void FileNameSpacesBecomeHyphens()
+    {
+        var window = new CombatLogFightWindow { StartUtc = Noon, Characters = new[] { "Talon Vex" } };
+
+        Assert.Equal("triffview-Talon-Vex-20260814-1200Z.zip", CombatLogExport.SuggestFileName(window));
+    }
+
+    [Fact]
+    public void FileNameDropsApostrophesRatherThanReplacingThem()
+    {
+        var window = new CombatLogFightWindow { StartUtc = Noon, Characters = new[] { "O'Neill" } };
+
+        Assert.Equal("triffview-ONeill-20260814-1200Z.zip", CombatLogExport.SuggestFileName(window));
+    }
+
+    [Fact]
+    public void FileNameStripsMixedJunkAndCollapsesHyphens()
+    {
+        var window = new CombatLogFightWindow { StartUtc = Noon, Characters = new[] { "Ex!!  Cha--r*(acter" } };
+
+        // "!" and "*" are stripped, the two spaces and the runs of literal
+        // hyphens they create all collapse to one.
+        Assert.Equal("triffview-Ex-Cha-racter-20260814-1200Z.zip", CombatLogExport.SuggestFileName(window));
+    }
+
+    [Fact]
+    public void FileNameFallsBackWhenSanitizingLeavesNothing()
+    {
+        // A name that is entirely punctuation sanitizes to an empty slug, which
+        // must fall back to the generic form rather than produce "triffview--…".
+        var window = new CombatLogFightWindow { StartUtc = Noon, Characters = new[] { "''!!" } };
+
+        Assert.Equal("triffview-fight-20260814-1200Z.zip", CombatLogExport.SuggestFileName(window));
+    }
+
+    [Fact]
+    public void FileNameFromAnExportResultUsesTheResultsCharacters()
+    {
+        // The window overload and the result overload must agree on shape --
+        // only where the character list comes from differs, per SuggestFileName's
+        // own header comment about manual ranges.
+        var result = new CombatLogExportResult
+        {
+            StartUtc = Noon,
+            Characters = new[] { "Alpha", "Bravo", "Charlie" },
+        };
+
+        Assert.Equal("triffview-Alpha+2-20260814-1200Z.zip", CombatLogExport.SuggestFileName(result));
     }
 
     // ---- Character ids ----

@@ -1545,7 +1545,16 @@ internal sealed class TriffViewController : IDisposable
 
             var content = FormatCombatLogUploadContent(result);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(CombatLogUpload.UploadTimeoutSeconds));
-            var upload = await CombatLogUpload.UploadAsync(_combatLogUploadHttp, webhook, tempPath, content, cts.Token);
+            // The name Discord shows is derived from the export result, not the
+            // staged temp path: the temp path's name comes from SuggestFileName(window),
+            // which for a manual UTC range has no pilots yet (BuildCombatLogWindow
+            // builds it before any log is read) and stays deterministic on purpose --
+            // see CombatLogUploadTempDir's header comment. The export result always
+            // knows who was actually in the collected logs, so it's what the pilot
+            // name in the Discord filename comes from.
+            var uploadFileName = CombatLogExport.SuggestFileName(result);
+            var upload = await CombatLogUpload.UploadAsync(
+                _combatLogUploadHttp, webhook, tempPath, content, cts.Token, uploadFileName);
 
             // Same race ExportCombatLogs guards against: an upload can outlive a
             // shutdown, and posting to a disposed controller from the catch below
