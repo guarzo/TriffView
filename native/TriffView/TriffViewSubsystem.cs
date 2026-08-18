@@ -2824,6 +2824,19 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     private Rectangle _mouseStartRect;
     private TriffViewProfile _profile = TriffViewProfile.CreateDefault("Default");
     private nint _foreground;
+
+    // The live OS foreground window handle, but ONLY when that window belongs to one of
+    // _clients — otherwise nint.Zero. Used solely to decide whether a persistent alert's
+    // target client is "already selected" (see ShowAlert/TickAlertFlashes).
+    //
+    // Deliberately NOT the same as _activeClientHandle (subsystem-class field, line 54):
+    // that one latches onto the last EVE client and keeps pointing at it while the user
+    // tabs away to Discord or a browser, because it drives "which preview to highlight."
+    // If an alert arrived while the user was in Discord and this were _activeClientHandle
+    // instead, it would read as "already selected" and silently never persist — exactly
+    // the bug this field exists to prevent. It is also not _foreground above, which
+    // MarkActiveClient sets to whatever handle the caller wants highlighted, not
+    // necessarily the real live foreground window. Keep all three separate.
     private nint _selectedHandle;
     private Rectangle _virtualDesktop;
     private IReadOnlyList<EveClientWindow> _clients = Array.Empty<EveClientWindow>();
@@ -3004,6 +3017,10 @@ internal sealed class TriffViewOverlayForm : Forms.Form
     {
         if (activeHandle == nint.Zero) return;
         _foreground = activeHandle;
+        // Safe to assign directly here (unlike SetClients/SyncClientStates, which check
+        // membership in _clients first): this method is only ever invoked from
+        // ObserveForegroundTransition after it has confirmed the real foreground window
+        // is an EVE client, so activeHandle is already known-good.
         _selectedHandle = activeHandle;
         _clients = _clients
             .Select(client => client with { IsForeground = client.Handle == activeHandle })
