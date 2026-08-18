@@ -147,7 +147,7 @@ function CombatLogExport({
         ) : (
           <div className="triff-combat-export-webhook-summary">
             <span className="triff-alert-status is-on">Connected</span>
-            <p className="triff-combat-export-webhook-desc">Configured: {webhookState.description}</p>
+            <p className="triff-combat-export-webhook-desc">{webhookState.description}</p>
             <div className="triff-combat-export-webhook-actions">
               <button type="button" disabled={webhookBusy} onClick={onTestWebhook}>
                 Send test
