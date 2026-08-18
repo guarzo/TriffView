@@ -3693,9 +3693,11 @@ internal sealed class TriffViewOverlayForm : Forms.Form
         // (LWA_COLORKEY) - where the compositor needs the whole surface repainted. That
         // failure mode has not been observed on the alpha-layered case, and MarkActiveClient
         // and SyncClientStates already rely on bounded Invalidate(rect) on this same form
-        // today at whatever opacity the user has configured, without reported ghosting. Not
-        // yet verified on hardware specifically for alpha layering below 1.0 - if bounded
-        // invalidation ever turns out to ghost here too, this is the assumption to revisit.
+        // today at whatever opacity the user has configured, without reported ghosting.
+        // VERIFIED on hardware 2026-08-17 at profile opacity 20% - the minimum the UI and the
+        // native clamp allow, so the most transparent (and most demanding) alpha-layered case
+        // reachable: persistent alerts cleared and previews moved with no ghosting. Bounded
+        // invalidation is therefore sound on this form at every configurable opacity.
         var dirty = new List<Rectangle>();
         foreach (var state in _previews.Values)
         {

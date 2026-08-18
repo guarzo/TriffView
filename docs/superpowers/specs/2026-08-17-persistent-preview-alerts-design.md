@@ -118,8 +118,11 @@ Two changes:
    failure mode has not been observed on the alpha-layered case, and
    `MarkActiveClient` (`:3054`) and `SyncClientStates` (`:3091`) already rely on
    bounded `Invalidate(rect)` on this same form today at whatever opacity the
-   user has configured, without reported ghosting. Not yet verified on hardware
-   specifically for alpha layering below 1.0.
+   user has configured, without reported ghosting. **Verified on hardware
+   2026-08-17 at profile opacity 20%** — the minimum both the UI stepper and the
+   native clamp permit, and therefore the most transparent alpha-layered case a
+   user can reach: persistent alerts cleared and previews moved with no ghosting.
+   Bounded invalidation is sound on this form at every configurable opacity.
 2. Skip invalidation entirely while `HideOnLostFocus` has the form at
    `Opacity = 0` (`:2998`, `:3073`), and repaint once on return. The alert stays
    armed throughout; only the painting pauses.
