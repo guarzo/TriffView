@@ -495,12 +495,20 @@ public class TriffAlertsSettingsPersistUntilSelectedTests
     [Fact]
     public void RoundTripsThroughToState()
     {
+        // ToState() is declared as `object` and returns an anonymous type
+        // (TriffAlertsService.cs:60-75). Do NOT reach into it with `dynamic`: anonymous
+        // types are internal to their assembly, cross-assembly dynamic binding on one is
+        // at best fragile, and — because dynamic binding is deferred to runtime — a missing
+        // member would not fail the build, so the TDD red step would not mean what it says.
+        // Assert on the serialized JSON instead. That is also what actually crosses the
+        // WebView2 boundary to the settings UI, so it is the more faithful test.
         var settings = TriffAlertsSettings.CreateDefault();
         settings.PersistUntilSelected = true;
 
-        dynamic state = settings.ToState();
+        var json = JsonSerializer.Serialize(settings.ToState());
 
-        Assert.True((bool)state.persistUntilSelected);
+        using var document = JsonDocument.Parse(json);
+        Assert.True(document.RootElement.GetProperty("persistUntilSelected").GetBoolean());
     }
 
     [Fact]
@@ -562,7 +570,7 @@ public class TriffAlertsSettingsPersistUntilSelectedTests
 powershell.exe -NoProfile -Command "$env:DOTNET_CLI_HOME='C:\dev\TriffView\.dotnet-home'; $env:NUGET_PACKAGES='C:\dev\TriffView\.nuget'; $env:APPDATA='C:\dev\TriffView\.appdata'; $env:NUGET_HTTP_CACHE_PATH='C:\dev\TriffView\.nuget-cache'; $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'; & 'C:\dev\TriffView\.dotnet\dotnet.exe' test 'C:\dev\TriffView\.claude\worktrees\feat+persistent-preview-alerts\native\TriffView.Tests\TriffView.Tests.csproj' -c Release --filter "FullyQualifiedName~TriffAlertsSettingsPersistUntilSelectedTests""
 ```
 
-Expected failure: a compile error, not a runtime assertion failure — `TriffAlertsSettings.PersistUntilSelected` and the `persistUntilSelected` member on the anonymous `ToState()` result do not exist yet, so `DefaultsToFalse` and `RoundTripsThroughToState` fail to build. (`SettingsWrittenByAnOlderBuild...` and `UnknownKeyInAlertsJson...` would currently pass against the old shape by accident, which is why the first two tests matter — they pin the new member's existence and correct default.)
+Expected failure: `DefaultsToFalse` and `RoundTripsThroughToState` both fail to build with `CS1061: 'TriffAlertsSettings' does not contain a definition for 'PersistUntilSelected'` — the property assignment and the assertion both reference it directly. (The JSON assertion itself would only fail at runtime, which is exactly why the test sets the property rather than reaching into the anonymous type dynamically.) (`SettingsWrittenByAnOlderBuild...` and `UnknownKeyInAlertsJson...` would currently pass against the old shape by accident, which is why the first two tests matter — they pin the new member's existence and correct default.)
 
 - [ ] **Step 3: Add the setting to TriffAlertsSettings**
 
@@ -964,6 +972,7 @@ No code change in this step. Two of the spec's "Accepted limitations" touch exac
 
 - With `HideActivePreview` on, `SyncHiddenActivePreview` (line 3099) removes the `PreviewState` for whichever client is currently the highlight target, disposing its `Alerts` along with it. A persistent alert on that client is gone the moment it becomes selected — which happens to be the same client `_selectedHandle` would target for `Acknowledge()`, so the outcome (no lingering alert on the selected client) is correct even though it is reached by disposal rather than by `Acknowledge()` ever running.
 - A `PreviewState` is recreated whenever its `PreviewClientIdentity` changes (`SetClients`, line 2982; `SyncHiddenActivePreview`, line 3118), for example when a client goes from character-select to a named character. The new `PreviewState` gets a fresh `Alerts` with no armed alert, so any persistent alert in flight for the old identity is silently dropped. This is called out in the spec's "Accepted limitations" and is out of scope to fix here.
+- **`_selectedHandle` lags the foreground by up to 700 ms when you leave EVE entirely.** `ObserveForegroundTransition` returns early for a non-EVE foreground without notifying the overlay (`TriffViewSubsystem.cs:596-611`), so `_selectedHandle` is only cleared on the next periodic refresh through `SetClients`/`SyncClientStates` — and `_timer` runs at 700 ms (`TriffViewSubsystem.cs:107-110`). An alert that lands inside that window, targeting the client you *just* switched away from, arms as non-persistent and so flashes-and-stops instead of persisting. This is a deliberate accepted limitation, not an oversight: closing it means adding a foreground-change hook that fires for every non-EVE window activation, which is a materially larger change to the activation model than this feature warrants. The window is sub-second and the alert is still shown; only its persistence is lost. Do not "fix" this by making `_selectedHandle` fall back to `_activeClientHandle` — that reintroduces exactly the latching bug this field exists to avoid.
 
 - [ ] **Step 12: Commit**
 
@@ -1096,7 +1105,14 @@ Add a private field next to the other overlay-form fields (near `_alertTimer`, t
 
 ```csharp
     private bool _alertPaintSuppressed;
+    private readonly List<Rectangle> _deferredAlertRects = new();
 ```
+
+`_alertPaintSuppressed` tracks whether the previous tick was painted; `_deferredAlertRects`
+holds dirty rects that fell due while the overlay was invisible, so they are flushed on the
+way back instead of discarded. Without the second field, an alert that expires at Opacity 0
+leaves its last-painted border on screen: the tick returns before invalidating, and if that
+was the last active alert the timer then stops, so no later tick exists to fix it.
 
 No test for this step alone; it is exercised by Step 5.
 
@@ -1135,12 +1151,28 @@ Replace `native/TriffView/TriffViewSubsystem.cs:3618-3630`:
         foreach (var state in _previews.Values)
         {
             var cleared = state.Alerts.ClearExpired(now);
+
+            // Acknowledgement. This line is the whole point of the feature: it is what stops a
+            // persistent alert when its client becomes the selected one. It was introduced by
+            // the arm-and-acknowledge task and MUST survive any future rewrite of this method -
+            // an earlier draft of this plan rewrote the tick and silently dropped it, which
+            // would have shipped a persistent alert that never clears.
+            if (state.Client.Handle == _selectedHandle && state.Alerts.Acknowledge())
+            {
+                cleared = true;
+            }
+
             var stillActive = state.Alerts.Active(now) != null;
             if (cleared || stillActive)
             {
                 dirty.Add(state.FrameRect);
             }
         }
+
+        // Rects that fell due while the overlay was invisible must not be thrown away - the
+        // border is still in the form's backing store and nothing else repaints it on the way
+        // back. Carry them until we are allowed to paint again.
+        _deferredAlertRects.AddRange(dirty);
 
         if (!_previews.Values.Any(state => state.Alerts.Active(now) != null))
         {
@@ -1151,14 +1183,19 @@ Replace `native/TriffView/TriffViewSubsystem.cs:3618-3630`:
 
         if (resuming)
         {
+            // One full repaint on return covers every deferred rect at once, including any
+            // whose preview has since moved or been destroyed.
+            _deferredAlertRects.Clear();
             Invalidate();
             return;
         }
 
-        foreach (var rect in dirty)
+        foreach (var rect in _deferredAlertRects)
         {
             Invalidate(ToClientRect(rect));
         }
+
+        _deferredAlertRects.Clear();
     }
 ```
 
@@ -1244,15 +1281,31 @@ Expected: both pass, with no test count *lower* than before the branch. Record b
 
 A worktree has no `native/Assets/overlay-dist.zip`. The native project builds fine without it because the `EmbeddedResource` is conditional, but the app then serves the "missing overlay" page instead of the real settings UI — which invalidates every runtime observation below, including the toggle itself.
 
-Build the web UI in WSL, then copy the zip in and rebuild:
+**Do not copy the zip from the main checkout.** That zip is built from `fork/main`'s UI,
+which has no persist toggle — every UI-dependent check below would then run against a build
+that cannot show the feature. The bundle must be built from *this worktree's* `app/`.
+
+Build the web UI in WSL (npm is not on the Windows PATH here), zip `app/dist` the way
+`scripts/publish-release.ps1:236-245` does, and place it where the `EmbeddedResource` at
+`native/TriffView.csproj:37-41` expects it:
 
 ```bash
-cd app && npm install && npm run build
+cd /mnt/c/dev/TriffView/.claude/worktrees/feat+persistent-preview-alerts/app
+npm install
+npm run build
 ```
 
 ```bash
 cd /mnt/c/dev/TriffView/.claude/worktrees/feat+persistent-preview-alerts
-cp /mnt/c/dev/TriffView/native/Assets/overlay-dist.zip native/Assets/overlay-dist.zip
+rm -f native/Assets/overlay-dist.zip
+cd app/dist && zip -r ../../native/Assets/overlay-dist.zip . && cd ../..
+```
+
+Then rebuild native — embedding is evaluated at build time, so a zip dropped in after the
+last build is not in the DLL:
+
+```powershell
+powershell.exe -NoProfile -Command "$env:DOTNET_CLI_HOME='C:\dev\TriffView\.dotnet-home'; $env:NUGET_PACKAGES='C:\dev\TriffView\.nuget'; $env:APPDATA='C:\dev\TriffView\.appdata'; $env:NUGET_HTTP_CACHE_PATH='C:\dev\TriffView\.nuget-cache'; $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'; & 'C:\dev\TriffView\.dotnet\dotnet.exe' build 'C:\dev\TriffView\.claude\worktrees\feat+persistent-preview-alerts\native\TriffView.csproj' -c Release"
 ```
 
 Confirm it actually embedded — the DLL should roughly double in size, and:
@@ -1261,7 +1314,10 @@ Confirm it actually embedded — the DLL should roughly double in size, and:
 powershell.exe -NoProfile -Command "[Reflection.Assembly]::LoadFrom('C:\dev\TriffView\.claude\worktrees\feat+persistent-preview-alerts\native\bin\Release\net8.0-windows\TriffView.dll').GetManifestResourceNames()"
 ```
 
-Expected: the list contains `TriffView.Assets.overlay-dist.zip`.
+Expected: the list contains `TriffView.Assets.overlay-dist.zip`, and the DLL is roughly
+double its pre-embed size. Then confirm the bundle is the RIGHT one, not merely present:
+launch the app, open the alerts settings, and check the new toggle is visible. If it is not,
+you embedded a stale bundle and every remaining step in this task is invalid.
 
 - [ ] **Step 4: Exercise the behaviour by hand on Windows**
 
