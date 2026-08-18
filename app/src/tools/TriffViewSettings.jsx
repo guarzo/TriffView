@@ -1019,8 +1019,9 @@ function TriffViewGuide({
   );
 }
 
-function TriffViewSettings({ open = true }) {
+function TriffViewSettings({ open = true, initialSection = null, onInitialSectionApplied }) {
   const [state, setState] = useState(EMPTY_STATE);
+  const [stateReceived, setStateReceived] = useState(false);
   const [newProfileName, setNewProfileName] = useState("");
   const [confirmCloseClients, setConfirmCloseClients] = useState(false);
   const [recording, setRecording] = useState(null);
@@ -1089,6 +1090,24 @@ function TriffViewSettings({ open = true }) {
     setGuideStep(0);
     setActiveSection("guide");
   }, [open, state.guideCompleted]);
+
+  // Nudges the rail to a specific section on request (e.g. "Open Alerts
+  // settings" from the Combat Logs tab). Two guards, both load-bearing:
+  //
+  //   stateReceived - EMPTY_STATE.guideCompleted is `true`, so without this the
+  //     nudge would fire and be consumed on the first render, before native
+  //     state says whether onboarding is actually complete.
+  //   state.guideCompleted - applying a nudge underneath the guide would yank
+  //     the user out of onboarding before they chose to skip or finish.
+  //
+  // `activeSection` is deliberately absent from the dependency array: this must
+  // react only to a *new* nudge from the parent, never to the user's own later
+  // rail clicks.
+  useEffect(() => {
+    if (!initialSection || !stateReceived || !state.guideCompleted) return;
+    setActiveSection(initialSection);
+    onInitialSectionApplied?.();
+  }, [initialSection, stateReceived, state.guideCompleted]);
 
   function updateDirectHotkeys(characterName, gestures) {
     const next = { ...directHotkeys };
@@ -1256,6 +1275,7 @@ function TriffViewSettings({ open = true }) {
   useEffect(() => {
     const unsubscribe = onNativeMessage((message) => {
       if (message?.type === "triffview:state") {
+        setStateReceived(true);
         setState({
           ...EMPTY_STATE,
           ...message,

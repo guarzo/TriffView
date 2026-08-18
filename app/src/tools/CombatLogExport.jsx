@@ -65,6 +65,7 @@ function CombatLogExport({
   onTestWebhook,
   uploadState,
   onUpload,
+  onOpenAlerts,
 }) {
   const [webhookInput, setWebhookInput] = useState("");
   // Once a webhook is configured, the URL field and its explanation are just
@@ -174,6 +175,11 @@ function CombatLogExport({
                 }`
               : "No fight detected yet. Alerts must be enabled, and only fights seen while TriffView has been running are detected - use a time range for anything older."}
           </span>
+          {!lastFight && onOpenAlerts ? (
+            <button type="button" onClick={onOpenAlerts}>
+              Open Alerts settings
+            </button>
+          ) : null}
         </div>
         <span className={lastFight ? "triff-alert-status is-on" : "triff-alert-status"}>
           {lastFight ? "Ready" : "None"}

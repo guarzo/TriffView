@@ -257,6 +257,7 @@ function ThemePicker({ themes, activeTheme, onChange }) {
 
 export default function App() {
   const [activeTool, setActiveTool] = useState("triffview");
+  const [triffViewSection, setTriffViewSection] = useState(null);
   const combatLogs = useCombatLogs();
   const [themeId, setThemeId] = useState(readSavedTheme);
   const [updateInfo, setUpdateInfo] = useState(null);
@@ -350,6 +351,11 @@ export default function App() {
     };
   }, []);
 
+  function openAlertsInTriffView() {
+    setTriffViewSection("alerts");
+    setActiveTool("triffview");
+  }
+
   return (
     <main className="triffview-standalone-root hud-root" data-theme={activeTheme.id} data-theme-name={activeTheme.name} ref={rootRef}>
       <header className="triffview-standalone-topbar" data-hud-input-region="topbar">
@@ -382,8 +388,14 @@ export default function App() {
       </header>
 
       <section className="triffview-standalone-panel" data-hud-input-region="panel">
-        {activeTool === "triffview" ? <TriffViewSettings open /> : null}
-        {activeTool === "combat-logs" ? <CombatLogs combatLogs={combatLogs} /> : null}
+        {activeTool === "triffview" ? (
+          <TriffViewSettings
+            open
+            initialSection={triffViewSection}
+            onInitialSectionApplied={() => setTriffViewSection(null)}
+          />
+        ) : null}
+        {activeTool === "combat-logs" ? <CombatLogs combatLogs={combatLogs} onOpenAlerts={openAlertsInTriffView} /> : null}
         {activeTool === "eve-settings" ? (
           <Suspense fallback={<div className="triffview-standalone-loading">Loading EVE Settings...</div>}>
             <EveSettings />
