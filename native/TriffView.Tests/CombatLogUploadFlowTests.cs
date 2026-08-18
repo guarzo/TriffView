@@ -110,6 +110,55 @@ public class CombatLogUploadFlowTests
         }
     }
 
+    /// <summary>
+    /// The case SuggestFileName's window/result split exists for: a manual UTC
+    /// range builds a CombatLogFightWindow with no Characters (BuildCombatLogWindow
+    /// constructs it before any log is read), so the staged temp file is named
+    /// "triffview-fight-…" -- but the archive Discord actually receives must be
+    /// named from the export result, which does know the pilot.
+    /// </summary>
+    [Fact]
+    public void TheDiscordFileNameCarriesThePilotEvenForAManualTimeRange()
+    {
+        var gamelogsDir = CreateFixtureGamelogsDir();
+        try
+        {
+            var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            WriteFixtureGamelog(
+                gamelogsDir, "20260101000000_1_Pilot_One.txt", "Pilot One", start,
+                "[ 2026.01.01 00:00:05 ] (combat) hits you for 10 damage\r\n");
+
+            var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NoContent));
+            var messages = new ConcurrentQueue<string>();
+            var credentials = new MemoryCredentials((TriffViewController.CombatLogWebhookCredentialTarget, "https://discord.com/api/webhooks/1/tok"));
+            using var controller = Controller(credentials, messages, gamelogsPath: gamelogsDir, handler: handler);
+
+            controller.HandleWebMessage(
+                "triffview:upload-combat-logs",
+                JsonNode.Parse($$"""{"fromUtc":"{{start:O}}","toUtc":"{{start.AddMinutes(1):O}}"}""")!.AsObject());
+
+            Assert.True(SpinWait.SpinUntil(
+                () => messages.Any(json => json.Contains("\"type\":\"triffview:combat-log-upload\"", StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(10)));
+
+            // The multipart body's Content-Disposition line names the file that
+            // was actually posted -- read as raw bytes rather than parsed, the
+            // same way this suite already inspects LastRequestBytes elsewhere.
+            // Unquoted rather than quoted: MultipartFormDataContent only quotes a
+            // filename when it holds characters a bare token can't (see
+            // CombatLogUploadStubServerTests.ExtractName's own comment on the
+            // same quirk for part names), and this sanitized filename never does.
+            var bodyText = Encoding.UTF8.GetString(handler.LastRequestBytes ?? Array.Empty<byte>());
+            Assert.Contains(
+                "filename=triffview-Pilot-One-20260101-0000Z.zip",
+                bodyText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(gamelogsDir, recursive: true);
+        }
+    }
+
     [Fact]
     public void UploadCombatLogsReportsDroppedFilesOnASuccessfulUpload()
     {

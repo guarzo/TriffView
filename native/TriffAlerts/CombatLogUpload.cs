@@ -194,7 +194,8 @@ public static class CombatLogUpload
     public const int UploadTimeoutSeconds = 120;
 
     public static async Task<CombatLogUploadResult> UploadAsync(
-        HttpClient http, Uri webhook, string zipPath, string content, CancellationToken ct)
+        HttpClient http, Uri webhook, string zipPath, string content, CancellationToken ct,
+        string? fileName = null)
     {
         var zipBytes = new FileInfo(zipPath).Length;
 
@@ -212,7 +213,10 @@ public static class CombatLogUpload
             await using var fileStream = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read);
             var fileContent = new StreamContent(fileStream);
             fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/zip");
-            form.Add(fileContent, "files[0]", Path.GetFileName(zipPath));
+            // The name Discord shows need not match the staged file on disk --
+            // see TriffViewSubsystem.UploadCombatLogs, which passes the name
+            // derived from the actual export result rather than the temp path.
+            form.Add(fileContent, "files[0]", fileName ?? Path.GetFileName(zipPath));
 
             using var response = await http.PostAsync(webhook, form, ct);
             return await BuildResultAsync(response, zipBytes, webhook, "Uploaded to Discord.", ct);

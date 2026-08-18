@@ -252,12 +252,69 @@ public static class CombatLogExport
     }
 
     /// <summary>Self-describing name, since these land in a Discord channel among many.</summary>
-    public static string SuggestFileName(CombatLogFightWindow window)
+    public static string SuggestFileName(CombatLogFightWindow window) =>
+        SuggestFileName(window.StartUtc, window.Characters);
+
+    /// <summary>
+    /// Same shape, from an export result rather than the window that requested
+    /// it. The two diverge for a manual UTC range: <see cref="CombatLogFightWindow"/>
+    /// for that source carries no characters (BuildCombatLogWindow builds it
+    /// before any log has been read), while <see cref="CombatLogExportResult"/>
+    /// always knows who was actually in the collected logs. Callers that need
+    /// the real pilot in the name -- the Discord upload filename -- must use
+    /// this overload rather than the window's.
+    /// </summary>
+    public static string SuggestFileName(CombatLogExportResult result) =>
+        SuggestFileName(result.StartUtc, result.Characters);
+
+    /// <summary>
+    /// Named after the lead pilot rather than a bare pilot count, so the name
+    /// Discord shows in a channel full of archives says whose fight it was.
+    /// <paramref name="characters"/> is taken as already sorted (both producers
+    /// sort ordinal-ignore-case ascending) -- this only ever reads its first
+    /// entry, never re-sorts.
+    /// </summary>
+    private static string SuggestFileName(DateTime startUtc, IReadOnlyList<string> characters)
     {
-        var pilots = window.Characters.Count;
-        var suffix = pilots > 0 ? $"-{pilots}pilot{(pilots == 1 ? "" : "s")}" : "";
-        return $"triffview-fight-{window.StartUtc:yyyyMMdd-HHmm}Z{suffix}.zip";
+        var timestamp = $"{startUtc:yyyyMMdd-HHmm}Z";
+        var lead = characters.FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
+        var slug = lead != null ? SanitizePilotNameForFileName(lead) : null;
+        if (string.IsNullOrEmpty(slug))
+        {
+            // No resolvable pilot -- the old generic name, minus the pilot-count
+            // suffix it used to carry (that suffix is what the pilot name now
+            // replaces).
+            return $"triffview-fight-{timestamp}.zip";
+        }
+
+        var extra = characters.Count - 1;
+        var suffix = extra > 0 ? $"+{extra}" : "";
+        return $"triffview-{slug}{suffix}-{timestamp}.zip";
     }
+
+    /// <summary>
+    /// EVE character names are letters, digits, spaces, hyphens and apostrophes,
+    /// up to ~24 characters. Spaces become hyphens for readability in a
+    /// filename; apostrophes are dropped rather than replaced, since
+    /// "O'Neill" reading as "ONeill" is closer to the original than "O-Neill"
+    /// would be. Anything else unexpected (a future character-set change, a
+    /// stray control character) is stripped rather than trusted, and runs of
+    /// hyphens collapse to one so an all-punctuation name does not leave a
+    /// string of them in the file name.
+    /// </summary>
+    private static string SanitizePilotNameForFileName(string name)
+    {
+        var spaced = name.Replace(' ', '-').Replace("'", "");
+        var stripped = NonFileNameCharsRegex.Replace(spaced, "");
+        var collapsed = RepeatedHyphenRegex.Replace(stripped, "-");
+        return collapsed.Trim('-');
+    }
+
+    private static readonly Regex NonFileNameCharsRegex = new(
+        @"[^A-Za-z0-9-]", RegexOptions.Compiled);
+
+    private static readonly Regex RepeatedHyphenRegex = new(
+        @"-{2,}", RegexOptions.Compiled);
 
     /// <summary>
     /// Every log whose session overlaps the window. Deliberately a fresh
