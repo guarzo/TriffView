@@ -5,6 +5,8 @@ import dingSoundUrl from "./assets/sounds/ding.ogg";
 import sirenSoundUrl from "./assets/sounds/siren.ogg";
 import woopSoundUrl from "./assets/sounds/woop.ogg";
 import TriffViewSettings from "./tools/TriffViewSettings.jsx";
+import CombatLogs from "./tools/CombatLogs.jsx";
+import { useCombatLogs } from "./tools/useCombatLogs.js";
 
 const EveSettings = React.lazy(() => import("./tools/EveSettings.tsx"));
 const TriffFleets = React.lazy(() => import("./tools/TriffFleets.tsx"));
@@ -12,6 +14,7 @@ const TriffSkills = React.lazy(() => import("./tools/TriffSkills.tsx"));
 
 const NAV_ITEMS = [
   { id: "triffview", label: "TriffView" },
+  { id: "combat-logs", label: "Combat Logs" },
   { id: "eve-settings", label: "EVE Settings" },
   { id: "fleet-manager", label: "Fleet Manager" },
   { id: "skill-planner", label: "Skill Planner" },
@@ -118,8 +121,143 @@ function UpdateNotice({ update, onDismiss, onIgnore }) {
   );
 }
 
+function ThemePicker({ themes, activeTheme, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [highlightedId, setHighlightedId] = useState(activeTheme.id);
+  const buttonRef = useRef(null);
+  const listRef = useRef(null);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    setHighlightedId(activeTheme.id);
+
+    function onDocPointerDown(event) {
+      if (rootRef.current && !rootRef.current.contains(event.target)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", onDocPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onDocPointerDown, true);
+  }, [open, activeTheme.id]);
+
+  useEffect(() => {
+    if (open) listRef.current?.focus();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const node = listRef.current?.querySelector(`[data-theme-id="${highlightedId}"]`);
+    node?.scrollIntoView({ block: "nearest" });
+  }, [open, highlightedId]);
+
+  function closeAndReturnFocus() {
+    setOpen(false);
+    buttonRef.current?.focus();
+  }
+
+  function moveHighlight(delta) {
+    const ids = themes.map((theme) => theme.id);
+    const index = ids.indexOf(highlightedId);
+    const next = (index + delta + ids.length) % ids.length;
+    setHighlightedId(ids[next]);
+  }
+
+  function onButtonKeyDown(event) {
+    if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setOpen(true);
+    }
+  }
+
+  function onListKeyDown(event) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveHighlight(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveHighlight(-1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setHighlightedId(themes[0].id);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      setHighlightedId(themes[themes.length - 1].id);
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onChange(highlightedId);
+      closeAndReturnFocus();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeAndReturnFocus();
+    } else if (event.key === "Tab") {
+      setOpen(false);
+    }
+  }
+
+  return (
+    <div className="triffview-theme-picker" ref={rootRef}>
+      <button
+        type="button"
+        ref={buttonRef}
+        className="triffview-theme-button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`GUI theme: ${activeTheme.name}`}
+        onClick={() => setOpen((value) => !value)}
+        onKeyDown={onButtonKeyDown}
+      >
+        <span className="triffview-theme-swatches" aria-hidden="true">
+          {activeTheme.swatches.map((color) => (
+            <i key={color} style={{ backgroundColor: color }} />
+          ))}
+        </span>
+        <span className="triffview-theme-caret" aria-hidden="true">
+          ▾
+        </span>
+      </button>
+      {open ? (
+        <ul
+          className="triffview-theme-listbox"
+          role="listbox"
+          ref={listRef}
+          aria-label="GUI theme"
+          aria-activedescendant={`triffview-theme-option-${highlightedId}`}
+          tabIndex={-1}
+          onKeyDown={onListKeyDown}
+        >
+          {themes.map((theme) => (
+            <li
+              key={theme.id}
+              id={`triffview-theme-option-${theme.id}`}
+              data-theme-id={theme.id}
+              role="option"
+              aria-selected={theme.id === activeTheme.id}
+              className={theme.id === highlightedId ? "is-highlighted" : ""}
+              onMouseEnter={() => setHighlightedId(theme.id)}
+              onClick={() => {
+                onChange(theme.id);
+                closeAndReturnFocus();
+              }}
+            >
+              <span className="triffview-theme-swatches" aria-hidden="true">
+                {theme.swatches.map((color) => (
+                  <i key={color} style={{ backgroundColor: color }} />
+                ))}
+              </span>
+              <span>{theme.name}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 export default function App() {
   const [activeTool, setActiveTool] = useState("triffview");
+  const [triffViewSection, setTriffViewSection] = useState(null);
+  const combatLogs = useCombatLogs();
   const [themeId, setThemeId] = useState(readSavedTheme);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState("");
@@ -212,31 +350,17 @@ export default function App() {
     };
   }, []);
 
+  function openAlertsInTriffView() {
+    setTriffViewSection("alerts");
+    setActiveTool("triffview");
+  }
+
   return (
     <main className="triffview-standalone-root hud-root" data-theme={activeTheme.id} data-theme-name={activeTheme.name} ref={rootRef}>
       <header className="triffview-standalone-topbar" data-hud-input-region="topbar">
         <div className="triffview-brand-block">
           <strong>TriffView</strong>
-          <span>Previews, fleets, and EVE settings</span>
-          <label className="triffview-theme-picker">
-            <span className="triffview-theme-swatches" aria-hidden="true">
-              {activeTheme.swatches.map((color) => (
-                <i key={color} style={{ backgroundColor: color }} />
-              ))}
-            </span>
-            <select
-              className="triffview-theme-select"
-              value={activeTheme.id}
-              onChange={(event) => setThemeId(event.target.value)}
-              aria-label="GUI theme"
-            >
-              {GUI_THEMES.map((theme) => (
-                <option key={theme.id} value={theme.id}>
-                  {theme.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <ThemePicker themes={GUI_THEMES} activeTheme={activeTheme} onChange={setThemeId} />
         </div>
         {showUpdateNotice ? (
           <UpdateNotice
@@ -263,7 +387,14 @@ export default function App() {
       </header>
 
       <section className="triffview-standalone-panel" data-hud-input-region="panel">
-        {activeTool === "triffview" ? <TriffViewSettings open /> : null}
+        {activeTool === "triffview" ? (
+          <TriffViewSettings
+            open
+            initialSection={triffViewSection}
+            onInitialSectionApplied={() => setTriffViewSection(null)}
+          />
+        ) : null}
+        {activeTool === "combat-logs" ? <CombatLogs combatLogs={combatLogs} onOpenAlerts={openAlertsInTriffView} /> : null}
         {activeTool === "eve-settings" ? (
           <Suspense fallback={<div className="triffview-standalone-loading">Loading EVE Settings...</div>}>
             <EveSettings />

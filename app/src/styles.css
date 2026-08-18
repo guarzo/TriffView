@@ -540,10 +540,10 @@
 }
 
 .triffview-theme-picker {
+  position: relative;
   display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: 6px;
 }
 
 .triffview-theme-swatches {
@@ -561,25 +561,84 @@
   border: 1px solid rgba(var(--tv-white-rgb), 0.12);
 }
 
-.triffview-theme-select {
-  width: 178px;
+.triffview-theme-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   height: 28px;
-  min-width: 0;
   border: 1px solid var(--tv-border);
   border-radius: 0;
   background: var(--tv-control-bg-alt);
   color: var(--tv-text);
   padding: 0 8px;
   font: inherit;
-  font-size: 13px;
-  font-weight: 800;
-  outline: none;
+  cursor: pointer;
 }
 
-.triffview-theme-select:hover,
-.triffview-theme-select:focus {
+/* MUST out-specify `.triffview-standalone-topbar button { min-width: 112px }`
+   (styles.css:643-651), which is a (0,1,1) selector and would otherwise force
+   this "compact" control to 112px and wipe out the width saving this whole
+   task exists for. This selector is (0,2,0). */
+.triffview-standalone-topbar .triffview-theme-button {
+  min-width: 0;
+}
+
+.triffview-theme-button:hover,
+.triffview-theme-button[aria-expanded="true"] {
   border-color: var(--tv-accent);
   background: var(--tv-control-active-bg);
+  color: var(--tv-text-active);
+}
+
+.triffview-theme-button:focus-visible {
+  outline: 2px solid var(--tv-accent);
+  outline-offset: 1px;
+}
+
+.triffview-theme-caret {
+  font-size: 10px;
+  color: var(--tv-muted);
+}
+
+/* Same problem as the .triffview-theme-button override just above: must
+   out-specify `.triffview-standalone-topbar span` (0,1,1), which otherwise
+   forces this caret to 11px instead of 10px. */
+.triffview-standalone-topbar .triffview-theme-caret {
+  font-size: 10px;
+  color: var(--tv-muted);
+}
+
+.triffview-theme-listbox {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 100000;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  min-width: 200px;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--tv-accent);
+  background: var(--tv-bg);
+  box-shadow:
+    0 0 0 1px rgba(var(--tv-accent-rgb), 0.2),
+    0 10px 28px rgba(var(--tv-shadow-rgb), 0.72);
+}
+
+.triffview-theme-listbox li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--tv-text);
+  cursor: pointer;
+}
+
+.triffview-theme-listbox li.is-highlighted,
+.triffview-theme-listbox li:hover {
+  background: var(--tv-accent-bg);
   color: var(--tv-text-active);
 }
 
@@ -2852,6 +2911,10 @@ button:disabled {
   gap: 3px;
 }
 
+.triff-alert-summary-action {
+  align-self: flex-start;
+}
+
 .triff-alert-summary strong,
 .triff-alert-event h4,
 .triff-alert-history-head h4 {
@@ -3063,6 +3126,16 @@ button:disabled {
   border-left-color: var(--tv-accent);
 }
 
+/* Combat Logs has no side rail (unlike `.triffview-settings-shell` tabs), so its
+   `.triffview-section-content` is ~214px wider than the layout below was designed
+   for. Cap it to the same usable column other tabs get, matching the precedent
+   set by `.triffview-guide` (the app's only other railless, full-width context).
+   904px here (a padded `.triffview-section-content`, padding: 18px 22px) yields
+   the same 860px content width that `.triffview-guide` caps itself at directly. */
+.triffview-combat-logs-content {
+  max-width: 904px;
+}
+
 .triff-combat-export {
   container-type: inline-size;
   display: flex;
@@ -3074,7 +3147,6 @@ button:disabled {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
-  align-items: start;
 }
 
 /* The container is `.triff-combat-export`, the query target is its descendant
@@ -3089,9 +3161,22 @@ button:disabled {
 .triff-combat-export-path {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   border: 1px solid var(--tv-border-soft);
-  padding: 12px;
+  border-left: 2px solid var(--tv-border-soft);
+  padding: 10px 12px;
+}
+
+/* "Last fight" is populated automatically by TriffAlerts; "Time range" is
+   filled in by hand. The accent/neutral left borders below give each panel a
+   distinct identity that matches which one it is, echoing the accent used for
+   the "Ready" status pill and `.triff-alert-event.is-info`. */
+.triff-combat-export-path.is-detected {
+  border-left-color: var(--tv-accent);
+}
+
+.triff-combat-export-path.is-manual {
+  border-left-color: var(--tv-border-strong);
 }
 
 .triff-combat-export-path h3 {
@@ -3099,6 +3184,35 @@ button:disabled {
   color: var(--tv-text-strong);
   font-size: 13px;
   font-weight: 700;
+}
+
+.triff-combat-export-path.is-detected h3 {
+  color: var(--tv-accent);
+}
+
+/* Heading row for both panels: the h3 plus, on the "Last fight" panel only,
+   the Ready/None status pill. A shared min-height keeps both panels' headings
+   aligned even though only one of them has a second child. */
+.triff-combat-export-path-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 24px;
+}
+
+/* Replaces the old `.triff-alert-summary`/`--embedded` wrapper now that the
+   status pill has moved into the heading row above - this just needs the
+   text/button stacked, not the space-between row that pairing required. */
+.triff-combat-export-path-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.triff-combat-export-path-info {
+  color: var(--tv-muted);
+  font-size: 11px;
 }
 
 .triff-combat-export-quick {
@@ -3113,11 +3227,46 @@ button:disabled {
   font-size: 11px;
 }
 
+.triff-combat-export-quick button {
+  min-height: 28px;
+  border: 1px solid var(--tv-border);
+  border-radius: 0;
+  background: var(--tv-control-bg);
+  color: var(--tv-text);
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.triff-combat-export-quick button:hover:not(:disabled) {
+  border-color: var(--tv-accent);
+  color: var(--tv-text-strong);
+}
+
+.triff-combat-export-quick button:disabled {
+  cursor: not-allowed;
+  color: var(--tv-disabled);
+}
+
 .triff-combat-export-range {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 8px;
   align-items: end;
+}
+
+/* The From/To boxes only ever hold a short "YYYY-MM-DD HH:MM" string, so the
+   shared `.triffview-field` padding/height (sized for arbitrary settings
+   fields) reads as oversized here. Scoped override, not a change to the
+   shared rule. */
+.triff-combat-export-range .triffview-field {
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+.triff-combat-export-range .triffview-field input {
+  height: 26px;
+  padding: 0 6px;
 }
 
 .triff-combat-export-status {
@@ -3148,7 +3297,21 @@ button:disabled {
   flex-direction: column;
   gap: 8px;
   border: 1px solid var(--tv-border-soft);
-  padding: 12px;
+  padding: 10px 12px;
+}
+
+/* The configured state (the common one, once a webhook is saved) collapses to
+   a single row - see `.triff-combat-export-webhook-summary` below - so the
+   panel itself only needs enough padding to frame that row, not a full form. */
+.triff-combat-export-webhook.is-configured {
+  padding: 8px 12px;
+}
+
+.triff-combat-export-webhook-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .triff-combat-export-webhook h3 {
@@ -3156,6 +3319,32 @@ button:disabled {
   color: var(--tv-text-strong);
   font-size: 13px;
   font-weight: 700;
+}
+
+.triff-combat-export-webhook-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.triff-combat-export-webhook-desc {
+  flex: 1 1 200px;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--tv-text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triff-combat-export-webhook-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .triff-combat-export-webhook-row {
@@ -3169,10 +3358,68 @@ button:disabled {
   flex: 1 1 260px;
 }
 
+.triff-combat-export-webhook-row button,
+.triff-combat-export-webhook-actions button {
+  min-height: 30px;
+  border: 1px solid var(--tv-border);
+  border-radius: 0;
+  background: var(--tv-control-bg);
+  color: var(--tv-text);
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.triff-combat-export-webhook-row button:hover:not(:disabled),
+.triff-combat-export-webhook-actions button:hover:not(:disabled) {
+  border-color: var(--tv-accent);
+  color: var(--tv-text-strong);
+}
+
+.triff-combat-export-webhook-row button:disabled,
+.triff-combat-export-webhook-actions button:disabled {
+  cursor: not-allowed;
+  color: var(--tv-disabled);
+}
+
 .triff-combat-export-path-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  margin-top: auto;
+  border-top: 1px solid var(--tv-border-soft);
+  padding-top: 10px;
+}
+
+.triff-combat-export-path-actions button {
+  min-height: 30px;
+  border: 1px solid var(--tv-border);
+  border-radius: 0;
+  background: var(--tv-control-bg);
+  color: var(--tv-text);
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.triff-combat-export-path-actions button:hover:not(:disabled) {
+  border-color: var(--tv-accent);
+  color: var(--tv-text-strong);
+}
+
+.triff-combat-export-path-actions button:disabled {
+  cursor: not-allowed;
+  color: var(--tv-disabled);
+}
+
+/* `.primary-action` is the app's existing accent-toned button idiom (see
+   `.triffview-actions .primary-action`, `.triffview-nav-actions
+   .primary-action`); Export/Upload are this tab's primary actions per panel,
+   so they get it while Quick range, Send test, Replace, Clear and Save stay
+   the plain secondary look above. */
+.triff-combat-export-path-actions .primary-action {
+  border-color: var(--tv-accent);
+  background: var(--tv-accent-bg);
 }
 
 .triff-alert-history-row strong,

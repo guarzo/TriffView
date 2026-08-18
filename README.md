@@ -65,13 +65,13 @@ TriffAlerts uses EVE log files only. It does not read memory, hook the EVE clien
 
 ### Combat log export
 
-The **Combat log export** panel can package the game logs covering a fight into a single zip, ready to upload to Discord for [eve-intel](https://github.com/guarzo/eve-intel) to build an after-action report from.
+The **Combat Logs** tab can package the game logs covering a fight into a single zip, ready to upload to Discord for [eve-intel](https://github.com/guarzo/eve-intel) to build an after-action report from.
 
-Because TriffAlerts is already watching for incoming damage and warp scrambles, it knows when your last fight was: hit **Export last fight** and it collects every character's log covering that window, up to 64 files — if more match, the newest are kept and the panel reports how many were left out. Fights from before TriffView was started are not in the alert history, so a UTC time range is there for those.
+Because TriffAlerts is already watching for incoming damage and warp scrambles, it knows when your last fight was: hit **Export last fight** and it collects every character's log covering that window, up to 64 files — if more match, the newest are kept and the tab reports how many were left out. Fights from before TriffView was started are not in the alert history, so a UTC time range is there for those.
 
 Logs are copied exactly as EVE wrote them, one file per character session, and only from the Gamelogs folder. The zip also carries a small manifest naming the characters it covers and the time range it spans. Chat logs are never included.
 
-The panel can also send that zip straight to Discord instead of saving it to disk: paste a webhook URL once, under Discord destination, and an **Upload to Discord** button appears next to each export option. The zip itself doesn't change — it's the same game logs and manifest described above — it just leaves the machine over that webhook instead of landing in a folder, arriving in the Discord channel the webhook points at. The webhook URL is stored in Windows Credential Manager, the same store TriffSkills and TriffFleets already use for EVE tokens, not in the settings file, so it never ends up in a settings backup or a diagnostics log.
+The tab can also send that zip straight to Discord instead of saving it to disk: paste a webhook URL once, under Discord destination, and an **Upload to Discord** button appears next to each export option. The zip itself doesn't change — it's the same game logs and manifest described above — it just leaves the machine over that webhook instead of landing in a folder, arriving in the Discord channel the webhook points at. The webhook URL is stored in Windows Credential Manager, the same store TriffSkills and TriffFleets already use for EVE tokens, not in the settings file, so it never ends up in a settings backup or a diagnostics log.
 
 ## Low Resource By Design
 

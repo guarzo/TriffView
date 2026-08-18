@@ -262,6 +262,7 @@ public partial class MainWindow : Window
         var openEveSettingsItem = new Forms.ToolStripMenuItem("Open EVE Settings", null, (_, _) => OpenTool("eve-settings"));
         var openFleetManagerItem = new Forms.ToolStripMenuItem("Open Fleet Manager", null, (_, _) => OpenTool("fleet-manager"));
         var openSkillPlannerItem = new Forms.ToolStripMenuItem("Open Skill Planner", null, (_, _) => OpenTool("skill-planner"));
+        var openCombatLogsItem = new Forms.ToolStripMenuItem("Open Combat Logs", null, (_, _) => OpenTool("combat-logs"));
         var savePreviewItem = new Forms.ToolStripMenuItem("Save preview positions", null, (_, _) => PostTriffViewNativeCommand("save-preview-layout"));
         var saveClientsItem = new Forms.ToolStripMenuItem("Save EVE client positions", null, (_, _) => PostTriffViewNativeCommand("save-client-layouts"));
         var restoreClientsItem = new Forms.ToolStripMenuItem("Restore EVE client positions", null, (_, _) => PostTriffViewNativeCommand("restore-client-layouts"));
@@ -278,6 +279,7 @@ public partial class MainWindow : Window
         };
         menu.Items.Add(_showHideItem);
         menu.Items.Add(openTriffViewItem);
+        menu.Items.Add(openCombatLogsItem);
         menu.Items.Add(openEveSettingsItem);
         menu.Items.Add(openFleetManagerItem);
         menu.Items.Add(openSkillPlannerItem);
