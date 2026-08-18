@@ -5,6 +5,8 @@ import dingSoundUrl from "./assets/sounds/ding.ogg";
 import sirenSoundUrl from "./assets/sounds/siren.ogg";
 import woopSoundUrl from "./assets/sounds/woop.ogg";
 import TriffViewSettings from "./tools/TriffViewSettings.jsx";
+import CombatLogs from "./tools/CombatLogs.jsx";
+import { useCombatLogs } from "./tools/useCombatLogs.js";
 
 const EveSettings = React.lazy(() => import("./tools/EveSettings.tsx"));
 const TriffFleets = React.lazy(() => import("./tools/TriffFleets.tsx"));
@@ -12,6 +14,7 @@ const TriffSkills = React.lazy(() => import("./tools/TriffSkills.tsx"));
 
 const NAV_ITEMS = [
   { id: "triffview", label: "TriffView" },
+  { id: "combat-logs", label: "Combat Logs" },
   { id: "eve-settings", label: "EVE Settings" },
   { id: "fleet-manager", label: "Fleet Manager" },
   { id: "skill-planner", label: "Skill Planner" },
@@ -120,6 +123,7 @@ function UpdateNotice({ update, onDismiss, onIgnore }) {
 
 export default function App() {
   const [activeTool, setActiveTool] = useState("triffview");
+  const combatLogs = useCombatLogs();
   const [themeId, setThemeId] = useState(readSavedTheme);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState("");
@@ -264,6 +268,7 @@ export default function App() {
 
       <section className="triffview-standalone-panel" data-hud-input-region="panel">
         {activeTool === "triffview" ? <TriffViewSettings open /> : null}
+        {activeTool === "combat-logs" ? <CombatLogs combatLogs={combatLogs} /> : null}
         {activeTool === "eve-settings" ? (
           <Suspense fallback={<div className="triffview-standalone-loading">Loading EVE Settings...</div>}>
             <EveSettings />

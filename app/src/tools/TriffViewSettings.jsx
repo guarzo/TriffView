@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Pencil } from "lucide-react";
 import { clearHudTextFocus, onNativeMessage, postNative } from "../nativeBridge.js";
 import Field from "./Field.jsx";
-import CombatLogExport from "./CombatLogExport.jsx";
 
 const EMPTY_STATE = {
   enabled: false,
@@ -1031,25 +1030,11 @@ function TriffViewSettings({ open = true }) {
   const [editingProfileName, setEditingProfileName] = useState(false);
   const [profileNameDraft, setProfileNameDraft] = useState("");
   const [expandedAlerts, setExpandedAlerts] = useState({});
-  const [combatLogExport, setCombatLogExport] = useState({ result: null, error: "", busy: false });
-  const [combatLogRange, setCombatLogRange] = useState({ from: "", to: "" });
-  const [combatLogWebhook, setCombatLogWebhook] = useState({
-    configured: false,
-    description: "",
-    testResult: null,
-    error: "",
-  });
-  // 'save' | 'clear' | 'test' | null - which webhook action is in flight, so the
-  // three buttons share one busy flag but CombatLogExport can still tell a
-  // successful *save* apart from a successful clear or test.
-  const [combatLogWebhookAction, setCombatLogWebhookAction] = useState(null);
-  const [combatLogUpload, setCombatLogUpload] = useState({ result: null, error: "", busy: false });
   const guidePromptedRef = useRef(false);
   const profile = state.profile || {};
   const clients = Array.isArray(state.clients) ? state.clients : [];
   const alerts = useMemo(() => normalizeAlertsState(state.alerts), [state.alerts]);
   const alertHistory = Array.isArray(state.alertHistory) ? state.alertHistory : [];
-  const lastFight = state.lastFight || null;
   const failures = Array.isArray(state.hotkeyFailures) ? state.hotkeyFailures : [];
   const previewLabels = useMemo(
     () => (profile.previewLabels && typeof profile.previewLabels === "object" && !Array.isArray(profile.previewLabels) ? profile.previewLabels : {}),
@@ -1085,7 +1070,6 @@ function TriffViewSettings({ open = true }) {
     ["layout", "Preview layout"],
     ["colors", "Color settings"],
     ["alerts", "Alerts"],
-    ["combat-logs", "Combat log export"],
     ["hotkeys", "Character Hotkeys"],
     ["cycles", "Cycle Groups and Hotkeys"],
     ["clients", "Client management"],
@@ -1218,36 +1202,6 @@ function TriffViewSettings({ open = true }) {
     }));
   }
 
-  // Omitting the range tells the native side to use the last detected fight.
-  function exportCombatLogs(range) {
-    setCombatLogExport({ result: null, error: "", busy: true });
-    send("triffview:export-combat-logs", range ? { fromUtc: range.from, toUtc: range.to } : {});
-  }
-
-  // Same "omit the range for the last fight" convention as exportCombatLogs.
-  function uploadCombatLogs(range) {
-    setCombatLogUpload({ result: null, error: "", busy: true });
-    send("triffview:upload-combat-logs", range ? { fromUtc: range.from, toUtc: range.to } : {});
-  }
-
-  function saveCombatLogWebhook(url) {
-    setCombatLogWebhookAction("save");
-    setCombatLogWebhook((current) => ({ ...current, error: "" }));
-    send("triffview:set-combat-log-webhook", { url });
-  }
-
-  function clearCombatLogWebhook() {
-    setCombatLogWebhookAction("clear");
-    setCombatLogWebhook((current) => ({ ...current, error: "" }));
-    send("triffview:clear-combat-log-webhook");
-  }
-
-  function testCombatLogWebhook() {
-    setCombatLogWebhookAction("test");
-    setCombatLogWebhook((current) => ({ ...current, error: "" }));
-    send("triffview:test-combat-log-webhook");
-  }
-
 
   useEffect(() => {
     if (!recording) return undefined;
@@ -1312,63 +1266,6 @@ function TriffViewSettings({ open = true }) {
           lastFight: message.lastFight || null,
           profiles: Array.isArray(message.profiles) && message.profiles.length ? message.profiles : EMPTY_STATE.profiles,
         });
-        // configured/description are refreshed on every periodic state post;
-        // testResult is left alone so a "Send test" outcome isn't wiped out by
-        // the next routine post before the user has read it.
-        const webhook = message.combatLogWebhook || {};
-        setCombatLogWebhook((current) => ({
-          ...current,
-          configured: Boolean(webhook.configured),
-          description: webhook.description || "",
-        }));
-      }
-
-      if (message?.type === "triffview:combat-log-export") {
-        setCombatLogExport({ result: message.result || null, error: "", busy: false });
-      }
-
-      if (message?.type === "triffview:error" && message.action === "export-combat-logs") {
-        setCombatLogExport({ result: null, error: message.message || "Export failed.", busy: false });
-      }
-
-      if (message?.type === "triffview:combat-log-webhook") {
-        setCombatLogWebhook({
-          configured: Boolean(message.configured),
-          description: message.description || "",
-          testResult: message.testResult || null,
-          error: "",
-        });
-        setCombatLogWebhookAction(null);
-      }
-
-      if (
-        message?.type === "triffview:error"
-        && [
-          "set-combat-log-webhook",
-          "clear-combat-log-webhook",
-          "test-combat-log-webhook",
-        ].includes(message.action)
-      ) {
-        setCombatLogWebhook((current) => ({
-          ...current,
-          error: message.message || "Webhook action failed.",
-        }));
-        setCombatLogWebhookAction(null);
-      }
-
-      if (message?.type === "triffview:combat-log-upload") {
-        // No cancelled branch: the upload path has no dialog and no user-facing
-        // cancel, so the native side never sends one. A timeout arrives here as
-        // a result with succeeded === false.
-        setCombatLogUpload({
-          result: message.result || null,
-          error: "",
-          busy: false,
-        });
-      }
-
-      if (message?.type === "triffview:error" && message.action === "upload-combat-logs") {
-        setCombatLogUpload({ result: null, error: message.message || "Upload failed.", busy: false });
       }
     });
 
@@ -1878,24 +1775,6 @@ function TriffViewSettings({ open = true }) {
             unit="%"
             value={Math.round((alerts.masterVolume ?? 0.75) * 100)}
             onCommit={(value) => patchAlerts({ masterVolume: value / 100 })}
-          />
-        </div>
-        ) : null}
-
-        {activeSection === "combat-logs" ? (
-        <div className="triffview-panel">
-          <CombatLogExport
-            lastFight={lastFight}
-            exportState={combatLogExport}
-            range={combatLogRange}
-            onRangeChange={setCombatLogRange}
-            onExport={exportCombatLogs}
-            webhookState={{ ...combatLogWebhook, action: combatLogWebhookAction }}
-            onSaveWebhook={saveCombatLogWebhook}
-            onClearWebhook={clearCombatLogWebhook}
-            onTestWebhook={testCombatLogWebhook}
-            uploadState={combatLogUpload}
-            onUpload={uploadCombatLogs}
           />
         </div>
         ) : null}
