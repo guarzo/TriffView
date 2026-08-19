@@ -35,6 +35,12 @@
     <Compile Include="..\..\native\TriffViewUpdateChecker.cs" Link="TriffViewUpdateChecker.cs" />
   </ItemGroup>
 
+  <!-- SplashFeatures.cs is pure BCL math (Math, Array, Span) with no Windows-only
+       dependencies, so it links the same way as the groups above. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAudio\SplashFeatures.cs" Link="SplashFeatures.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
