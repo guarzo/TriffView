@@ -51,6 +51,27 @@ public sealed class SplashDetector
     }
 
     /// <summary>
+    /// Scores an already-built patch (see <see cref="SplashFeatures.BuildPatch"/>) directly,
+    /// without computing bands at all. For a caller maintaining its own rolling spectrogram
+    /// (<see cref="RollingBandBuffer"/>) and building one patch per tick from it - recomputing
+    /// <see cref="SplashFeatures.ComputeBands"/> over a whole buffer on every call, the way the
+    /// two overloads above do, is the wrong shape for that caller: it repeats work its rolling
+    /// buffer already did incrementally.
+    /// </summary>
+    public double ScorePatch(float[] patch)
+    {
+        var best = double.NegativeInfinity;
+        foreach (var template in _templates)
+        {
+            var dot = Dot(patch, template.Patch);
+            if (dot > best)
+                best = dot;
+        }
+
+        return best;
+    }
+
+    /// <summary>
     /// Evaluates every 250 ms across the whole buffer and returns up to <paramref name="maxResults"/>
     /// candidates, highest score first, each at least <paramref name="minSeparationSeconds"/> apart.
     /// Deliberately applies no threshold: this feeds the template-capture UI, whose purpose is to

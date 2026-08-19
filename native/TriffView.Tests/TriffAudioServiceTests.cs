@@ -1,13 +1,34 @@
+using System;
+using System.IO;
 using System.Threading;
 using TriffView.Audio;
 using Xunit;
 
-public class TriffAudioServiceTests
+public class TriffAudioServiceTests : IDisposable
 {
+    // Every test gets its own throwaway directory rather than the real
+    // %APPDATA%\TriffHud\SplashTemplates default, so a test run never reads (or races with)
+    // whatever user templates happen to be saved on the machine running the tests.
+    private readonly string _templateDirectory = Path.Combine(Path.GetTempPath(), "TriffAudioServiceTests-" + Guid.NewGuid().ToString("N"));
+    private readonly Xunit.Abstractions.ITestOutputHelper _output;
+
+    public TriffAudioServiceTests(Xunit.Abstractions.ITestOutputHelper output)
+    {
+        _output = output;
+    }
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_templateDirectory))
+            Directory.Delete(_templateDirectory, recursive: true);
+    }
+
+    private TriffAudioService CreateService() => new(_templateDirectory);
+
     [Fact]
     public void ReportsOffForEveryClientWhenDisabled()
     {
-        using var svc = new TriffAudioService();
+        using var svc = CreateService();
         svc.UpdateSettings(enabled: false, threshold: 0.35);
         svc.SetClients(new[] { (1234u, "Pilot") });
         Assert.All(svc.Statuses, s => Assert.Equal("off", s.Status));
@@ -16,7 +37,7 @@ public class TriffAudioServiceTests
     [Fact]
     public void DroppingAClientRemovesItsStatus()
     {
-        using var svc = new TriffAudioService();
+        using var svc = CreateService();
         svc.UpdateSettings(enabled: true, threshold: 0.35);
         svc.SetClients(new[] { (1234u, "Pilot"), (5678u, "Other") });
         Assert.Equal(2, svc.Statuses.Count);
@@ -27,7 +48,7 @@ public class TriffAudioServiceTests
     [Fact]
     public void NeverAlertsForAClientWithNoCharacterName()
     {
-        using var svc = new TriffAudioService();
+        using var svc = CreateService();
         svc.UpdateSettings(enabled: true, threshold: 0.35);
         var raised = 0;
         svc.SplashDetected += (_, _) => raised++;
@@ -43,7 +64,7 @@ public class TriffAudioServiceTests
     [Fact]
     public void AlertsForAClientWithACharacterNameAboveThreshold()
     {
-        using var svc = new TriffAudioService();
+        using var svc = CreateService();
         svc.UpdateSettings(enabled: true, threshold: 0.35);
         (string CharacterName, double Score)? seen = null;
         svc.SplashDetected += (_, detection) => seen = detection;
@@ -65,7 +86,7 @@ public class TriffAudioServiceTests
     [Fact]
     public void ScoreBelowThresholdDoesNotAlert()
     {
-        using var svc = new TriffAudioService();
+        using var svc = CreateService();
         svc.UpdateSettings(enabled: true, threshold: 0.35);
         var raised = 0;
         svc.SplashDetected += (_, _) => raised++;
@@ -80,7 +101,7 @@ public class TriffAudioServiceTests
     [Fact]
     public void ForceDetectionPassIsANoOpForAnUnknownProcessId()
     {
-        using var svc = new TriffAudioService();
+        using var svc = CreateService();
         svc.UpdateSettings(enabled: true, threshold: 0.35);
         var raised = 0;
         svc.SplashDetected += (_, _) => raised++;
@@ -95,7 +116,7 @@ public class TriffAudioServiceTests
     [Fact]
     public void StatusesAreEmptyBeforeAnyClientIsSet()
     {
-        using var svc = new TriffAudioService();
+        using var svc = CreateService();
         svc.UpdateSettings(enabled: true, threshold: 0.35);
         Assert.Empty(svc.Statuses);
     }
@@ -103,10 +124,68 @@ public class TriffAudioServiceTests
     [Fact]
     public void DisposeIsIdempotentAndDoesNotThrow()
     {
-        var svc = new TriffAudioService();
+        var svc = CreateService();
         svc.UpdateSettings(enabled: true, threshold: 0.35);
         svc.SetClients(new[] { (1234u, "Pilot") });
         svc.Dispose();
         svc.Dispose();
+    }
+
+    // --- Measured tick duration -------------------------------------------------------------
+    //
+    // These are not correctness tests (nothing here asserts on the score); they exist to
+    // produce a real measured number for "how long does one detection tick take", per the
+    // Task 8 review's explicit request for a measured rather than estimated figure. Each client
+    // is warmed up with FeedSamplesForTests to the full 30 s context window - the same
+    // RollingBandBuffer.Append path OnSamples uses for real captured audio - then
+    // RunDetectionPassForTests times one full pass over every warmed-up client.
+
+    private const int WarmUpSamples = SplashFeatures.ContextFrames * SplashFeatures.HopSize + SplashFeatures.FftSize;
+
+    private static void WarmUp(TriffAudioService svc, uint processId, int seed)
+    {
+        var rng = new Random(seed);
+        var samples = new float[WarmUpSamples];
+        for (var i = 0; i < samples.Length; i++)
+            samples[i] = (float)(rng.NextDouble() - 0.5) * 0.2f;
+        svc.FeedSamplesForTests(processId, samples);
+    }
+
+    [Fact]
+    public void MeasuresOneDetectionTickForOneWarmedUpClient()
+    {
+        using var svc = CreateService();
+        svc.UpdateSettings(enabled: true, threshold: 0.35);
+        svc.SetClients(new[] { (1234u, "Pilot") });
+        WarmUp(svc, 1234u, seed: 1);
+
+        // First pass also computes the once-per-second context stats (median/MAD); run it once
+        // unmeasured so the timed pass reflects the common case where they are still fresh.
+        svc.RunDetectionPassForTests();
+        var elapsed = svc.RunDetectionPassForTests();
+
+        _output.WriteLine($"MEASURED one-client tick: {elapsed.TotalMilliseconds:F3} ms");
+        Assert.True(elapsed < TimeSpan.FromMilliseconds(250), $"one-client tick took {elapsed.TotalMilliseconds:F2} ms, exceeding the 250 ms tick budget");
+    }
+
+    [Fact]
+    public void MeasuresOneDetectionTickForSixWarmedUpClients()
+    {
+        using var svc = CreateService();
+        svc.UpdateSettings(enabled: true, threshold: 0.35);
+
+        var clients = new (uint ProcessId, string CharacterName)[6];
+        for (var i = 0; i < clients.Length; i++)
+            clients[i] = ((uint)(1000 + i), $"Pilot{i}");
+        svc.SetClients(clients);
+
+        for (var i = 0; i < clients.Length; i++)
+            WarmUp(svc, clients[i].ProcessId, seed: i + 1);
+
+        svc.RunDetectionPassForTests();
+        var elapsed = svc.RunDetectionPassForTests();
+
+        _output.WriteLine($"MEASURED six-client tick: {elapsed.TotalMilliseconds:F3} ms");
+        Assert.True(elapsed < TimeSpan.FromMilliseconds(250), $"six-client tick took {elapsed.TotalMilliseconds:F2} ms, exceeding the 250 ms tick budget");
     }
 }

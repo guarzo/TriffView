@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -10,23 +11,33 @@ namespace TriffView.Audio;
 internal sealed record AudioClientStatus(uint ProcessId, string CharacterName, string Status);
 
 /// <summary>
-/// Owns one <see cref="WasapiProcessCapture"/> and one <see cref="AudioRingBuffer"/> per EVE
-/// process, and a single shared 4 Hz timer that scores every client's trailing audio against
-/// <see cref="SplashTemplateStore"/>'s templates via <see cref="SplashDetector"/>.
+/// Owns one <see cref="WasapiProcessCapture"/>, one <see cref="AudioRingBuffer"/> (raw audio,
+/// for the template-capture UI) and one <see cref="RollingBandBuffer"/> (incrementally-built
+/// spectrogram, for live scoring) per EVE process, plus a single shared 4 Hz timer that scores
+/// every client's newest 2 s window against <see cref="SplashTemplateStore"/>'s templates.
+///
+/// A first cut of this class scored each client by handing its whole 30 s ring to
+/// <see cref="SplashDetector.Score(ReadOnlySpan{float})"/> once per tick. That call recomputes
+/// <see cref="SplashFeatures.ComputeBands"/> - ~5,600 FFTs - over the entire buffer every time,
+/// four times a second, per client; six clients could not keep up, and the scan-every-window
+/// behaviour behind it made a single splash re-qualify against the alert threshold for the
+/// whole 30 s it stayed in the ring, well past the alert's own cooldown. <see cref="OnSamples"/>
+/// now feeds each hop's worth of audio straight into a <see cref="RollingBandBuffer"/> as it
+/// arrives, and the tick below builds and scores exactly one patch - the newest window - per
+/// client, via <see cref="SplashDetector.ScorePatch"/>.
 ///
 /// Windows-only (it owns <see cref="WasapiProcessCapture"/> instances), so unlike the rest of
 /// TriffAudio this does not link into the cross-platform test project; its tests live in
 /// native/TriffView.Tests instead, exercising everything that does not need real audio via
-/// <see cref="ForceDetectionPassForTests"/>.
+/// <see cref="ForceDetectionPassForTests"/> and <see cref="FeedSamplesForTests"/>.
 /// </summary>
 internal sealed class TriffAudioService : IDisposable
 {
     /// <summary>
     /// Exactly <see cref="SplashFeatures.ContextFrames"/> worth of samples (30.0 s). Doubles as
-    /// both the ring buffer's capacity and the warm-up threshold: a buffer this full gives
-    /// <see cref="SplashDetector.Score(ReadOnlySpan{float})"/> a properly populated rolling
-    /// context to z-score against. Below it, splash and non-splash scores do not separate
-    /// (measured: 3 s of context put both classes in the 0.22-0.24 band) so no alert may fire.
+    /// both the raw ring buffer's capacity and (via <see cref="RollingBandBuffer.TotalFrames"/>)
+    /// the warm-up threshold: below it, splash and non-splash scores do not separate (measured:
+    /// 3 s of context put both classes in the 0.22-0.24 band), so no alert may fire.
     /// </summary>
     private const int RingCapacitySamples = SplashFeatures.ContextFrames * SplashFeatures.HopSize;
 
@@ -34,10 +45,25 @@ internal sealed class TriffAudioService : IDisposable
     private static readonly TimeSpan SilentIdleWindow = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan DetectionInterval = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>
+    /// The rolling context median/MAD (a 32 x ContextFrames median sort, twice) is the one
+    /// remaining expensive piece of a tick; the statistics are stable over a second by
+    /// construction; recomputed at most this often per client and reused between ticks.
+    /// </summary>
+    private static readonly TimeSpan ContextStatsRefreshInterval = TimeSpan.FromSeconds(1);
+
+    /// <summary>Backoff after a failed capture start: 1, 2, 4, 8, 15, 30 s, then holds at 30 s.
+    /// Without this, a permanently-broken client retried every ~700 ms (the caller's typical
+    /// SetClients cadence) forever, each attempt costing up to 5 s and a diagnostics-log line.</summary>
+    private static readonly TimeSpan[] RetryBackoffSteps =
+    {
+        TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4),
+        TimeSpan.FromSeconds(8), TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30),
+    };
+
     private readonly object _gate = new();
     private readonly Dictionary<uint, ClientSession> _sessions = new();
     private readonly SplashTemplateStore _templateStore;
-    private readonly SplashDetector _detector;
     private readonly System.Threading.Timer _detectionTimer;
     private readonly ConcurrentQueue<(string CharacterName, double Score)> _pendingDetections = new();
 
@@ -54,7 +80,6 @@ internal sealed class TriffAudioService : IDisposable
             : userTemplateDirectory;
 
         _templateStore = new SplashTemplateStore(directory);
-        _detector = new SplashDetector(_templateStore.Templates);
 
         // Runs from the moment the service exists rather than only once enabled: the tick
         // itself no-ops while disabled, and starting it unconditionally means UpdateSettings
@@ -87,6 +112,8 @@ internal sealed class TriffAudioService : IDisposable
 
         lock (_gate)
         {
+            if (_disposed) return; // nothing started here would ever be torn down again
+
             var wanted = new Dictionary<uint, string>();
             foreach (var client in clients)
                 wanted[client.ProcessId] = client.CharacterName ?? "";
@@ -98,12 +125,13 @@ internal sealed class TriffAudioService : IDisposable
                 _sessions.Remove(pid);
             }
 
+            var now = DateTime.UtcNow;
             foreach (var (pid, name) in wanted)
             {
                 if (_sessions.TryGetValue(pid, out var existing))
                 {
                     existing.CharacterName = name;
-                    if (existing.Capture is null && !existing.StartInProgress)
+                    if (existing.Capture is null && !existing.StartInProgress && now >= existing.NextRetryUtc)
                     {
                         existing.StartInProgress = true;
                         toStart.Add(existing);
@@ -121,11 +149,12 @@ internal sealed class TriffAudioService : IDisposable
         foreach (var session in toDispose)
             session.Dispose();
 
-        // Start() blocks on WASAPI activation (up to 5 s on failure), so it must run outside
-        // the gate - holding it here would stall Statuses/SetClients for every other client
-        // for as long as the slowest activation takes.
+        // Start() blocks on WASAPI activation (up to 5 s on failure), so every attempt is queued
+        // onto the thread pool rather than run inline: a caller driving this from a UI-thread
+        // timer (as TriffViewSubsystem's periodic refresh does) would otherwise freeze for as
+        // long as the slowest activation among however many clients just appeared.
         foreach (var session in toStart)
-            StartCapture(session);
+            ThreadPool.UnsafeQueueUserWorkItem(s => StartCapture(s), session, preferLocal: false);
     }
 
     public IReadOnlyList<AudioClientStatus> Statuses
@@ -144,18 +173,22 @@ internal sealed class TriffAudioService : IDisposable
     }
 
     /// <summary>
-    /// Ranks every 250 ms window across a client's currently buffered audio with no threshold
-    /// applied, for the template-capture UI (Task 10) to offer as candidates - including ones
-    /// the live detector currently scores below threshold and would never alert on.
+    /// Ranks every 250 ms window across a client's currently buffered raw audio with no
+    /// threshold applied, for the template-capture UI (Task 10) to offer as candidates -
+    /// including ones the live detector currently scores below threshold and would never alert
+    /// on. This is a full <see cref="SplashFeatures.ComputeBands"/> pass over up to 30 s of
+    /// audio (unlike the live detection tick, which never recomputes bands from scratch) - call
+    /// it from a background thread, never the dispatcher.
     /// </summary>
     public IReadOnlyList<(double Score, double OffsetSeconds, float[] Samples)> CaptureCandidates(uint processId, int maxResults)
     {
-        var buffer = ReadBuffer(processId, out var count);
+        var buffer = ReadRawBuffer(processId, out var count);
         if (count == 0)
             return Array.Empty<(double, double, float[])>();
 
         var windowSampleCount = SplashFeatures.WindowFrames * SplashFeatures.HopSize;
-        var ranked = _detector.RankWindows(buffer.AsSpan(0, count), maxResults, minSeparationSeconds: SplashFeatures.WindowFrames * (double)SplashFeatures.HopSize / SplashFeatures.SampleRate);
+        var detector = SnapshotDetector();
+        var ranked = detector.RankWindows(buffer.AsSpan(0, count), maxResults, minSeparationSeconds: SplashFeatures.WindowFrames * (double)SplashFeatures.HopSize / SplashFeatures.SampleRate);
 
         var results = new List<(double, double, float[])>(ranked.Count);
         foreach (var (score, offsetSeconds) in ranked)
@@ -172,13 +205,15 @@ internal sealed class TriffAudioService : IDisposable
     }
 
     /// <summary>
-    /// Context stats (median/MAD) over a client's currently buffered audio, for the
+    /// Context stats (median/MAD) over a client's currently buffered raw audio, for the
     /// template-capture UI to persist alongside a newly saved template. False if the client is
-    /// unknown or nothing has been captured yet.
+    /// unknown or nothing has been captured yet. A full <see cref="SplashFeatures.ComputeBands"/>
+    /// pass, like <see cref="CaptureCandidates"/> - call it from a background thread, never the
+    /// dispatcher.
     /// </summary>
     public bool TryGetContextStats(uint processId, out float[] median, out float[] mad)
     {
-        var buffer = ReadBuffer(processId, out var count);
+        var buffer = ReadRawBuffer(processId, out var count);
         if (count == 0)
         {
             median = Array.Empty<float>();
@@ -207,6 +242,36 @@ internal sealed class TriffAudioService : IDisposable
             EvaluateDetection(session, score);
     }
 
+    /// <summary>
+    /// Test-only hook. Feeds synthetic samples directly into a client's raw ring and rolling
+    /// band buffer, the same two places <see cref="OnSamples"/> writes real captured audio -
+    /// letting a test warm a session up (and time a real detection tick against it) without a
+    /// live WASAPI capture, which <see cref="SetClients"/> alone cannot provide in a test
+    /// environment.
+    /// </summary>
+    internal void FeedSamplesForTests(uint processId, float[] samples)
+    {
+        ClientSession? session;
+        lock (_gate)
+            _sessions.TryGetValue(processId, out session);
+
+        session?.Ring.Write(samples);
+        session?.BandBuffer.Append(samples);
+    }
+
+    /// <summary>
+    /// Test-only hook. Runs one detection pass synchronously (bypassing the timer and its
+    /// re-entrancy guard) and returns how long it took - the number this design most needed
+    /// measured rather than estimated from the algorithm's shape.
+    /// </summary>
+    internal TimeSpan RunDetectionPassForTests()
+    {
+        var stopwatch = Stopwatch.StartNew();
+        RunDetectionPass();
+        stopwatch.Stop();
+        return stopwatch.Elapsed;
+    }
+
     public void Dispose()
     {
         lock (_gate)
@@ -232,58 +297,88 @@ internal sealed class TriffAudioService : IDisposable
 
     private void OnDetectionTick(object? state)
     {
-        // A Timer with a fixed period can fire again before a slow tick (many clients, each a
-        // full 30 s FFT) finishes; without this guard, overlapping ticks could race on the same
-        // session's capture teardown.
+        // A Timer with a fixed period can fire again before a slow tick finishes; without this
+        // guard, overlapping ticks could race on the same session's capture teardown.
         if (Interlocked.CompareExchange(ref _detectionTickInProgress, 1, 0) != 0) return;
 
         try
         {
-            bool enabled;
-            lock (_gate) enabled = _enabled;
-            if (!enabled) return;
-
-            var toScore = new List<(ClientSession Session, float[] Buffer)>();
-
-            lock (_gate)
-            {
-                var now = DateTime.UtcNow;
-                foreach (var session in _sessions.Values)
-                {
-                    if (session.Capture is null) continue; // already down; SetClients will retry it
-
-                    if (ComputeStatus(session, enabled: true, now) == "unavailable")
-                    {
-                        // Tear down now rather than wait for SetClients to notice: the next
-                        // SetClients call sees Capture == null and starts a fresh session,
-                        // which is also what resets warm-up for a stream that died and came back.
-                        session.Capture.Dispose();
-                        session.Capture = null;
-                        continue;
-                    }
-
-                    if (session.Ring.TotalWritten < RingCapacitySamples) continue; // still warming up
-
-                    var buffer = new float[RingCapacitySamples];
-                    session.Ring.Read(buffer);
-                    toScore.Add((session, buffer));
-                }
-            }
-
-            // Scoring runs a full ComputeBands pass per client (one call, not one per candidate
-            // window - RankWindows/ScoreCore reuse the same computed bands internally), so it
-            // must happen outside the gate to avoid blocking Statuses/SetClients for its duration.
-            foreach (var (session, buffer) in toScore)
-            {
-                var score = _detector.Score(buffer);
-                EvaluateDetection(session, score);
-            }
+            RunDetectionPass();
+        }
+        catch (Exception ex)
+        {
+            // A System.Threading.Timer callback that throws takes the whole process down with
+            // it. Nothing this loop does is worth that - log and wait for the next tick.
+            TriffViewDiagnostics.Log("audio-detection", $"detection tick failed: {ex}");
         }
         finally
         {
             Interlocked.Exchange(ref _detectionTickInProgress, 0);
         }
     }
+
+    private void RunDetectionPass()
+    {
+        bool enabled;
+        lock (_gate) enabled = _enabled;
+        if (!enabled) return;
+
+        var now = DateTime.UtcNow;
+        var toScore = new List<ClientSession>();
+
+        lock (_gate)
+        {
+            foreach (var session in _sessions.Values)
+            {
+                if (session.Capture is null) continue; // already down; SetClients will retry it
+
+                if (ComputeStatus(session, enabled: true, now) == "unavailable")
+                {
+                    // Tear down now rather than wait for SetClients to notice: the next
+                    // SetClients call sees Capture == null and starts a fresh session, which is
+                    // also what resets warm-up for a stream that died and came back.
+                    session.Capture.Dispose();
+                    session.Capture = null;
+                    continue;
+                }
+
+                if (session.BandBuffer.TotalFrames < SplashFeatures.ContextFrames) continue; // still warming up
+
+                toScore.Add(session);
+            }
+        }
+
+        if (toScore.Count == 0) return;
+
+        // A snapshot of the template list, not the live one _templateStore.Templates hands
+        // back: SplashTemplateStore.Save calls Reload, which clears and repopulates that same
+        // List<SplashTemplate> in place. Scoring against the live list while a template-capture
+        // save (Task 10) lands mid-tick throws "Collection was modified".
+        var detector = SnapshotDetector();
+
+        foreach (var session in toScore)
+        {
+            var bandBuffer = session.BandBuffer;
+
+            if (session.ContextMedian is null || now - session.ContextStatsComputedUtc >= ContextStatsRefreshInterval)
+            {
+                var contextBands = bandBuffer.ReadRecent(SplashFeatures.ContextFrames);
+                SplashFeatures.ComputeContextStats(contextBands, contextBands.GetLength(1), out var median, out var mad);
+                session.ContextMedian = median;
+                session.ContextMad = mad;
+                session.ContextStatsComputedUtc = now;
+            }
+
+            var windowBands = bandBuffer.ReadRecent(SplashFeatures.WindowFrames);
+            if (windowBands.GetLength(1) < SplashFeatures.WindowFrames) continue; // shouldn't happen once warmed up; be safe anyway
+
+            var patch = SplashFeatures.BuildPatch(windowBands, 0, session.ContextMedian, session.ContextMad!);
+            var score = detector.ScorePatch(patch);
+            EvaluateDetection(session, score);
+        }
+    }
+
+    private SplashDetector SnapshotDetector() => new(_templateStore.Templates.ToArray());
 
     /// <summary>
     /// The decision made once a score exists, whether it came from the real tick above or
@@ -333,52 +428,85 @@ internal sealed class TriffAudioService : IDisposable
 
     private void StartCapture(ClientSession session)
     {
-        // A fresh ring buffer, not a reused one: a client whose stream died and is only now
-        // being restarted must re-earn its 30 s of warm-up rather than inherit whatever stale
-        // audio (or lack of it) the old ring held.
-        lock (_gate)
-            session.Ring = new AudioRingBuffer(RingCapacitySamples);
+        // Fresh buffers, not reused ones: a client whose stream died and is only now being
+        // restarted must re-earn its 30 s of warm-up rather than inherit whatever stale audio
+        // (or lack of it) the old buffers held. Captured locally rather than resolved through
+        // `session.Ring`/`session.BandBuffer` inside the capture callback below, so the
+        // callback always writes to the buffers this particular capture attempt created.
+        var ring = new AudioRingBuffer(RingCapacitySamples);
+        var bandBuffer = new RollingBandBuffer(SplashFeatures.ContextFrames);
 
-        var capture = new WasapiProcessCapture(session.ProcessId, samples => OnSamples(session, samples));
+        lock (_gate)
+        {
+            session.Ring = ring;
+            session.BandBuffer = bandBuffer;
+            session.ContextMedian = null;
+            session.ContextMad = null;
+            session.ContextStatsComputedUtc = DateTime.MinValue;
+        }
+
+        var capture = new WasapiProcessCapture(session.ProcessId, samples => OnSamples(session, ring, bandBuffer, samples));
         var ok = capture.Start(out var error);
 
+        var keep = false;
         lock (_gate)
         {
             session.StartInProgress = false;
 
-            if (!_sessions.TryGetValue(session.ProcessId, out var current) || !ReferenceEquals(current, session))
-            {
-                // Superseded (removed by a later SetClients) while Start() was blocking; discard.
-                if (ok) capture.Dispose();
-                return;
-            }
-
-            if (ok)
+            var stillCurrent = _sessions.TryGetValue(session.ProcessId, out var current) && ReferenceEquals(current, session);
+            if (stillCurrent && ok)
             {
                 session.Capture = capture;
                 session.StartedUtc = DateTime.UtcNow;
                 session.LastNonZeroUtc = session.StartedUtc;
+                session.FailedAttempts = 0;
+                session.NextRetryUtc = DateTime.MinValue;
+                keep = true;
             }
-            else
+            else if (stillCurrent) // !ok
             {
                 session.Capture = null;
-                TriffViewDiagnostics.Log("audio-capture", $"pid {session.ProcessId}: {error}");
+                session.FailedAttempts++;
+                session.NextRetryUtc = DateTime.UtcNow + RetryBackoff(session.FailedAttempts - 1);
+
+                // Log the transition into failing, not every attempt: a permanently-broken
+                // client would otherwise churn the 2 MB diagnostics log at the retry cadence,
+                // destroying its value for the geometry investigations it exists for.
+                if (session.FailedAttempts == 1)
+                    TriffViewDiagnostics.Log("audio-capture", $"pid {session.ProcessId}: {error}");
             }
+            // else: superseded (removed by a later SetClients) while Start() was blocking;
+            // nothing on the session to update, just discard the capture below.
         }
+
+        // Dispose outside the lock (unconditionally, whether Start failed or the attempt was
+        // superseded): WasapiProcessCapture.Start can fail partway through - after activating
+        // and initializing the audio client but before Start() itself succeeds - leaving a live
+        // audio client and two Win32 event handles behind if nothing releases them, and Dispose
+        // can block up to 2 s joining a capture thread that may not even exist yet.
+        if (!keep)
+            capture.Dispose();
     }
 
-    private void OnSamples(ClientSession session, ReadOnlySpan<float> samples)
+    private static TimeSpan RetryBackoff(int failedAttempts)
     {
-        session.Ring.Write(samples);
+        var index = Math.Clamp(failedAttempts, 0, RetryBackoffSteps.Length - 1);
+        return RetryBackoffSteps[index];
+    }
+
+    private static void OnSamples(ClientSession session, AudioRingBuffer ring, RollingBandBuffer bandBuffer, ReadOnlySpan<float> samples)
+    {
+        ring.Write(samples);
+        bandBuffer.Append(samples);
 
         // AUDCLNT_BUFFERFLAGS_SILENT is never set for a muted process (measured), so
         // NonZeroSamplesInLastWrite - not the capture flags - is the only reliable silence
         // signal available here.
-        if (session.Ring.NonZeroSamplesInLastWrite > 0)
+        if (ring.NonZeroSamplesInLastWrite > 0)
             session.LastNonZeroUtc = DateTime.UtcNow;
     }
 
-    private float[] ReadBuffer(uint processId, out int count)
+    private float[] ReadRawBuffer(uint processId, out int count)
     {
         ClientSession? session;
         lock (_gate)
@@ -421,10 +549,19 @@ internal sealed class TriffAudioService : IDisposable
         public readonly uint ProcessId;
         public string CharacterName;
         public AudioRingBuffer Ring = new(RingCapacitySamples);
+        public RollingBandBuffer BandBuffer = new(SplashFeatures.ContextFrames);
         public WasapiProcessCapture? Capture;
         public bool StartInProgress;
         public DateTime StartedUtc = DateTime.UtcNow;
         public DateTime LastNonZeroUtc = DateTime.UtcNow;
+        public int FailedAttempts;
+        public DateTime NextRetryUtc = DateTime.MinValue;
+
+        // Cached rolling context stats, refreshed at most once a second - see
+        // ContextStatsRefreshInterval.
+        public float[]? ContextMedian;
+        public float[]? ContextMad;
+        public DateTime ContextStatsComputedUtc = DateTime.MinValue;
 
         public ClientSession(uint processId, string characterName)
         {

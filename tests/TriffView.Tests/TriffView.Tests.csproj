@@ -61,6 +61,12 @@
     <Compile Include="..\..\native\TriffAudio\AudioRingBuffer.cs" Link="AudioRingBuffer.cs" />
   </ItemGroup>
 
+  <!-- RollingBandBuffer.cs is pure BCL (Array, Math) with no Windows-only dependencies, so it
+       links the same way as the other TriffAudio files above. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAudio\RollingBandBuffer.cs" Link="RollingBandBuffer.cs" />
+  </ItemGroup>
+
   <!-- Tests run from the build output directory, which has no path back to the source tree,
        so the 11 shipped splash templates are copied alongside the test binaries here; see
        TestTemplates.cs for the loader that resolves them from "templates/". -->
