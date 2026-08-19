@@ -61,6 +61,20 @@ public sealed class TriffAlertsSettings
         return Events.TryGetValue(type, out var config) ? config : CreateDefaultEvents()[type];
     }
 
+    /// <summary>
+    /// Whether <see cref="Event"/> can answer for <paramref name="type"/>. It falls back to the
+    /// defaults dictionary by indexer, so an unknown type throws rather than returning a default -
+    /// callers taking a type from outside (a web message, another subsystem) must ask this first.
+    /// Normalizes for the same reason <see cref="Event"/> does: it is what guarantees every
+    /// default type is present in <see cref="Events"/>.
+    /// </summary>
+    public bool HasEvent(string type)
+    {
+        if (string.IsNullOrWhiteSpace(type)) return false;
+        Normalize();
+        return Events.ContainsKey(type);
+    }
+
     public object ToState()
     {
         Normalize();
@@ -476,9 +490,18 @@ public sealed class TriffAlertsService : IDisposable
     public void RaiseExternalAlert(string type, string characterName, string source, string message)
     {
         var cleanType = string.IsNullOrWhiteSpace(type) ? "" : type.Trim();
+        if (cleanType.Length == 0) return;
+
         var cleanCharacter = characterName ?? "";
         lock (_gate)
         {
+            // BuildEvent resolves the type through TriffAlertsSettings.Event, which throws
+            // KeyNotFoundException for a type that is neither configured nor a default. This is a
+            // public entry point, so an unknown type is refused rather than allowed to throw
+            // inside the lock. Checked here rather than before the lock because _settings is only
+            // ever touched under _gate - HasEvent normalizes, which mutates the events dictionary.
+            if (!_settings.HasEvent(cleanType)) return;
+
             var alert = BuildEvent(cleanType, cleanCharacter, source ?? "", message ?? "");
             EmitLocked(alert);
         }

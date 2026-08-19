@@ -153,6 +153,26 @@ internal sealed class SplashTemplateStore
         }
     }
 
+    /// <summary>
+    /// The built-in resource naming rule, in one place: a template resource is a `.wav`, its stem
+    /// is everything before that extension (which the `.json` sibling shares), and its id is the
+    /// last dot-separated segment of the stem, e.g. "splash-01" out of
+    /// "...splash-templates.splash-01.wav". Both <see cref="LoadBuiltIns"/> and
+    /// <see cref="TryReadBuiltInWav"/> derive ids this way and must agree - a divergence would
+    /// break the play button while loading still worked.
+    /// </summary>
+    private static bool TryDescribeBuiltInWav(string resourceName, out string stem, out string id)
+    {
+        stem = "";
+        id = "";
+        if (!resourceName.EndsWith(".wav", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        stem = resourceName[..^".wav".Length];
+        id = stem.Split('.')[^1];
+        return true;
+    }
+
     /// <summary>Same resource-pairing logic as <see cref="LoadBuiltIns"/>, re-run for one id
     /// rather than cached alongside <see cref="_templates"/> - this only runs when a user
     /// actually presses play, not on every load/reload.</summary>
@@ -161,11 +181,10 @@ internal sealed class SplashTemplateStore
         var assembly = typeof(SplashTemplateStore).Assembly;
         foreach (var wavName in assembly.GetManifestResourceNames())
         {
-            if (!wavName.EndsWith(".wav", StringComparison.OrdinalIgnoreCase))
+            if (!TryDescribeBuiltInWav(wavName, out _, out var resourceId))
                 continue;
 
-            var stem = wavName[..^".wav".Length];
-            if (!string.Equals(stem.Split('.')[^1], id, StringComparison.Ordinal))
+            if (!string.Equals(resourceId, id, StringComparison.Ordinal))
                 continue;
 
             try
@@ -222,19 +241,15 @@ internal sealed class SplashTemplateStore
 
         foreach (var wavName in resourceNames)
         {
-            if (!wavName.EndsWith(".wav", StringComparison.OrdinalIgnoreCase))
+            if (!TryDescribeBuiltInWav(wavName, out var stem, out var id))
                 continue;
 
-            var stem = wavName[..^".wav".Length];
             var jsonName = stem + ".json";
             if (!resourceNames.Contains(jsonName))
             {
                 TriffViewDiagnostics.Log("splash-templates", $"built-in resource '{wavName}' has no matching '{jsonName}'; skipped.");
                 continue;
             }
-
-            // The id is the filename stem, e.g. "splash-01" out of "...splash-templates.splash-01.wav".
-            var id = stem.Split('.')[^1];
 
             byte[] wavBytes;
             byte[] jsonBytes;
@@ -381,9 +396,12 @@ internal sealed class SplashTemplateStore
             if (doc.RootElement.TryGetProperty("name", out var nameEl) && nameEl.ValueKind == JsonValueKind.String)
                 return nameEl.GetString();
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
             // Malformed JSON is handled by FromWav's own parse; here we just fall back to the id.
+            // InvalidOperationException too: TryGetProperty throws it when the root is not an
+            // object (an array, or a bare string), and letting that escape would abort
+            // LoadUserTemplates' loop - one bad file would hide every later user template.
         }
 
         return null;

@@ -59,6 +59,7 @@ internal sealed class TriffViewController : IDisposable
     private int _combatLogUploadInProgress;
     private string _lastClientTopologySignature = "";
     private string _lastClientStateSignature = "";
+    private string _lastAudioStatusSignature = "";
     private readonly Dictionary<string, nint> _cycleGroupCursors = new(StringComparer.OrdinalIgnoreCase);
     private nint _foregroundWinEventHook;
     private bool _hasObservedForeground;
@@ -562,6 +563,16 @@ internal sealed class TriffViewController : IDisposable
         // detection is disabled - see its own doc comment - so this never needs its own
         // Settings.Alerts.SplashDetectionEnabled check.
         _audio.SetClients(_clients.Select(client => (client.ProcessId, client.CharacterName)).ToArray());
+
+        // Audio status is per-client state the UI renders, but it appears in neither the topology
+        // nor the state signature - so without this, a client going monitoring -> silent (exactly
+        // what the status exists to surface) sat unposted until some unrelated change triggered a
+        // post. Taken once and handed to PostState below: Statuses clones under a lock.
+        var audioStatuses = _audio.Statuses;
+        var audioStatusSignature = AudioStatusSignature(audioStatuses);
+        var audioStatusChanged = !string.Equals(audioStatusSignature, _lastAudioStatusSignature, StringComparison.Ordinal);
+        _lastAudioStatusSignature = audioStatusSignature;
+
         ObserveForegroundTransition(foreground, _clients);
 
         if (topologyChanged)
@@ -576,7 +587,7 @@ internal sealed class TriffViewController : IDisposable
         }
 
         if (showOverlayAfterRefresh) ShowOverlay();
-        if (topologyChanged || stateChanged) PostState();
+        if (topologyChanged || stateChanged || audioStatusChanged) PostState(audioStatuses: audioStatuses);
     }
 
     private void StartForegroundTracking()
@@ -658,6 +669,15 @@ internal sealed class TriffViewController : IDisposable
     private static string ClientTopologySignature(IReadOnlyList<EveClientWindow> clients)
     {
         return string.Join(";", clients.Select(client => $"{client.Handle:X}|{client.ProcessId}|{client.Title}|{client.CharacterName}"));
+    }
+
+    private static string AudioStatusSignature(IReadOnlyList<AudioClientStatus> statuses)
+    {
+        // Ordered by pid: Statuses enumerates a dictionary, whose order is not stable across
+        // insertions and removals, and an unordered join would report spurious changes.
+        return string.Join(";", statuses
+            .OrderBy(status => status.ProcessId)
+            .Select(status => $"{status.ProcessId}|{status.Status}"));
     }
 
     private static string ClientStateSignature(IReadOnlyList<EveClientWindow> clients, nint foreground)
@@ -1252,7 +1272,7 @@ internal sealed class TriffViewController : IDisposable
         var client = _clients.FirstOrDefault(c => string.Equals(c.StableKey, clientKey, StringComparison.OrdinalIgnoreCase));
         if (client is null)
         {
-            PostError("triffaudio-capture", "That client is no longer available.");
+            PostAudioError("triffaudio-capture", "That client is no longer available.");
             PostCaptureResult(clientKey, "no-client");
             return;
         }
@@ -1280,7 +1300,7 @@ internal sealed class TriffViewController : IDisposable
             // a shutdown that starts while it is running.
             if (_disposed) return;
 
-            _postToHud(new
+            PostAudioSafely("capture-result", () => _postToHud(new
             {
                 type = "triffaudio:capture-result",
                 clientKey,
@@ -1290,12 +1310,12 @@ internal sealed class TriffViewController : IDisposable
                     score = candidate.Score,
                     wavBase64 = Convert.ToBase64String(SplashTemplate.WriteWav(candidate.Samples, out _)),
                 }).ToArray(),
-            });
+            }));
         }
         catch (Exception ex)
         {
             if (_disposed) return;
-            PostError("triffaudio-capture", ex.Message);
+            PostAudioError("triffaudio-capture", ex.Message);
             // Always resolve the pending request, even on failure - the settings UI flips its
             // capture button to "Capturing..." the moment it sends the request and has nothing
             // else telling it to stop. (Same rule GetSplashTemplateAudio already follows.)
@@ -1308,14 +1328,42 @@ internal sealed class TriffViewController : IDisposable
     /// go through here or post a full result of its own.</summary>
     private void PostCaptureResult(string? clientKey, string reason)
     {
-        _postToHud(new
+        PostAudioSafely("capture-result", () => _postToHud(new
         {
             type = "triffaudio:capture-result",
             clientKey,
             candidates = Array.Empty<object>(),
             reason,
-        });
+        }));
     }
+
+    /// <summary>
+    /// The reporting boundary for the <c>triffaudio:*</c> handlers. They are <c>async void</c>,
+    /// and they report results both outside any try/catch (their early returns) and from inside
+    /// their catch blocks - so a throw from the report itself has nowhere to go but the thread
+    /// pool's unhandled-exception path, which terminates the process. <see cref="_postToHud"/>
+    /// reaches WebView2, which can throw when the view is disposed or not yet ready; plausible
+    /// during shutdown, and never worth a crash.
+    ///
+    /// Deliberately narrow: it wraps only the reporting call, not a handler body. The handlers
+    /// keep their own try/catch for their actual work.
+    /// </summary>
+    private void PostAudioSafely(string what, Action post)
+    {
+        try
+        {
+            post();
+        }
+        catch (Exception ex)
+        {
+            TriffViewDiagnostics.Log("splash-audio", $"failed to post {what}: {ex.Message}");
+        }
+    }
+
+    /// <summary><see cref="PostError"/> through <see cref="PostAudioSafely"/> - the audio
+    /// handlers' error reports need the same protection as their result reports.</summary>
+    private void PostAudioError(string action, string message) =>
+        PostAudioSafely(action, () => PostError(action, message));
 
     /// <summary>
     /// <see cref="TriffAudioService.SaveTemplate"/> ends in <see cref="SplashTemplateStore.Save"/>
@@ -1339,13 +1387,13 @@ internal sealed class TriffViewController : IDisposable
 
             if (!candidateFound)
             {
-                PostError("triffaudio-save-template", "That capture has expired; capture again.");
+                PostAudioError("triffaudio-save-template", "That capture has expired; capture again.");
                 return;
             }
 
             if (id is null)
             {
-                PostError("triffaudio-save-template", "Could not write the template file. Check that %APPDATA%\\TriffHud is writable.");
+                PostAudioError("triffaudio-save-template", "Could not write the template file. Check that %APPDATA%\\TriffHud is writable.");
                 return;
             }
 
@@ -1354,7 +1402,7 @@ internal sealed class TriffViewController : IDisposable
         catch (Exception ex)
         {
             if (_disposed) return;
-            PostError("triffaudio-save-template", ex.Message);
+            PostAudioError("triffaudio-save-template", ex.Message);
         }
     }
 
@@ -1374,7 +1422,7 @@ internal sealed class TriffViewController : IDisposable
         catch (Exception ex)
         {
             if (_disposed) return;
-            PostError("triffaudio-delete-template", ex.Message);
+            PostAudioError("triffaudio-delete-template", ex.Message);
         }
     }
 
@@ -1392,7 +1440,8 @@ internal sealed class TriffViewController : IDisposable
     {
         if (string.IsNullOrWhiteSpace(templateId))
         {
-            _postToHud(new { type = "triffaudio:template-audio-result", templateId, wavBase64 = (string?)null, found = false });
+            PostAudioSafely("template-audio-result", () => _postToHud(
+                new { type = "triffaudio:template-audio-result", templateId, wavBase64 = (string?)null, found = false }));
             return;
         }
 
@@ -1401,22 +1450,23 @@ internal sealed class TriffViewController : IDisposable
             var wav = await Task.Run(() => _audio.GetTemplateAudio(templateId));
             if (_disposed) return;
 
-            _postToHud(new
+            PostAudioSafely("template-audio-result", () => _postToHud(new
             {
                 type = "triffaudio:template-audio-result",
                 templateId,
                 wavBase64 = wav is null ? null : Convert.ToBase64String(wav),
                 found = wav is not null,
-            });
+            }));
         }
         catch (Exception ex)
         {
             if (_disposed) return;
-            PostError("triffaudio-template-audio", ex.Message);
+            PostAudioError("triffaudio-template-audio", ex.Message);
             // Always resolve the pending request, even on failure - otherwise the settings UI's
             // play button, which flips to "loading" the moment it sends the request, has nothing
             // telling it to stop.
-            _postToHud(new { type = "triffaudio:template-audio-result", templateId, wavBase64 = (string?)null, found = false });
+            PostAudioSafely("template-audio-result", () => _postToHud(
+                new { type = "triffaudio:template-audio-result", templateId, wavBase64 = (string?)null, found = false }));
         }
     }
 
@@ -1440,12 +1490,12 @@ internal sealed class TriffViewController : IDisposable
 
             if (_disposed) return;
 
-            _postToHud(new { type = "triffaudio:templates", templates });
+            PostAudioSafely("templates", () => _postToHud(new { type = "triffaudio:templates", templates }));
         }
         catch (Exception ex)
         {
             if (_disposed) return;
-            PostError("triffaudio-templates", ex.Message);
+            PostAudioError("triffaudio-templates", ex.Message);
         }
     }
 
@@ -2094,6 +2144,10 @@ internal sealed class TriffViewController : IDisposable
         Settings.Alerts = imported.Alerts;
         Settings.Save();
         _alerts.UpdateSettings(Settings.Alerts);
+        // Restoring a backup can flip splash detection either way, and nothing else on this path
+        // tells the audio service - without this, a restore that enables it never starts capture
+        // and one that disables it never stops it, until some unrelated settings save happens to.
+        _audio.UpdateSettings(Settings.Alerts.SplashDetectionEnabled, Settings.Alerts.SplashThreshold);
 
         if (Settings.Enabled)
         {
@@ -2757,7 +2811,7 @@ internal sealed class TriffViewController : IDisposable
         Refresh();
     }
 
-    private void PostState(bool force = false)
+    private void PostState(bool force = false, IReadOnlyList<AudioClientStatus>? audioStatuses = null)
     {
         var profile = Settings.ActiveProfile();
         // One snapshot for both the history list and the fight detection below:
@@ -2766,7 +2820,10 @@ internal sealed class TriffViewController : IDisposable
         var alertHistory = _alerts.History;
         // One lookup for the whole client list below: Statuses clones under a lock, same
         // reasoning as alertHistory above. Keyed by PID, matching what SetClients was fed.
-        var audioStatusByProcessId = _audio.Statuses.ToDictionary(status => status.ProcessId, status => status.Status);
+        // ApplyClientRefresh already took a snapshot to detect status changes; reuse it rather
+        // than taking the lock again for an identical answer.
+        var audioStatusByProcessId = (audioStatuses ?? _audio.Statuses)
+            .ToDictionary(status => status.ProcessId, status => status.Status);
         var payload = new
         {
             type = "triffview:state",
