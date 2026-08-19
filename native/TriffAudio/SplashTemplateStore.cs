@@ -17,7 +17,13 @@ namespace TriffView.Audio;
 internal sealed class SplashTemplateStore
 {
     private readonly string _userTemplateDirectory;
-    private readonly List<SplashTemplate> _templates = new();
+
+    // A reference swap, not a mutated-in-place list: TriffAudioService's detection tick reads
+    // Templates from a thread other than whichever one calls Save/Delete/Reload, and used to hold
+    // a live reference into a List<SplashTemplate> that Reload cleared and repopulated under it -
+    // "Collection was modified" thrown mid-scan, or worse, a torn read racing the resize. Every
+    // read here sees either the old, complete array or the new one, never a partial one.
+    private volatile IReadOnlyList<SplashTemplate> _templates = Array.Empty<SplashTemplate>();
 
     public SplashTemplateStore(string userTemplateDirectory)
     {
@@ -29,9 +35,10 @@ internal sealed class SplashTemplateStore
 
     public void Reload()
     {
-        _templates.Clear();
-        LoadBuiltIns();
-        LoadUserTemplates();
+        var loaded = new List<SplashTemplate>();
+        LoadBuiltIns(loaded);
+        LoadUserTemplates(loaded);
+        _templates = loaded;
     }
 
     public string Save(string name, ReadOnlySpan<float> samples, float[] median, float[] mad)
@@ -51,7 +58,8 @@ internal sealed class SplashTemplateStore
 
     public bool Delete(string id)
     {
-        var existing = _templates.FirstOrDefault(t => t.Id == id);
+        var current = _templates;
+        var existing = current.FirstOrDefault(t => t.Id == id);
         if (existing is null || existing.BuiltIn)
             return false;
 
@@ -63,7 +71,7 @@ internal sealed class SplashTemplateStore
         if (File.Exists(jsonPath)) { File.Delete(jsonPath); deletedAny = true; }
 
         if (deletedAny)
-            _templates.Remove(existing);
+            _templates = current.Where(t => t.Id != id).ToList();
 
         return deletedAny;
     }
@@ -74,7 +82,7 @@ internal sealed class SplashTemplateStore
     /// exact namespace-mangled prefix MSBuild produces for the embed - that mangling is easy to
     /// get subtly wrong and this makes the pairing independent of it.
     /// </summary>
-    private void LoadBuiltIns()
+    private static void LoadBuiltIns(List<SplashTemplate> target)
     {
         var assembly = typeof(SplashTemplateStore).Assembly;
         var resourceNames = assembly.GetManifestResourceNames();
@@ -115,14 +123,14 @@ internal sealed class SplashTemplateStore
                 continue;
             }
 
-            _templates.Add(template);
+            target.Add(template);
         }
 
         // A broken embed (a rename, a glob regression, a packaging change) must never silently
         // leave the detector with nothing to match against - that fails as "no splashes, ever",
         // which is indistinguishable from a quiet evening. Log loudly, but do not throw: a
         // broken embed should degrade to no detection, not stop the app from starting.
-        if (_templates.Count(t => t.BuiltIn) == 0)
+        if (target.Count(t => t.BuiltIn) == 0)
         {
             TriffViewDiagnostics.Log(
                 "splash-templates-critical",
@@ -136,7 +144,7 @@ internal sealed class SplashTemplateStore
     /// a `.wav` with no matching `.json`, a `.json` with no `.wav`, an unreadable file, or a
     /// pair that <see cref="SplashTemplate.FromWav"/> rejects as malformed.
     /// </summary>
-    private void LoadUserTemplates()
+    private void LoadUserTemplates(List<SplashTemplate> target)
     {
         if (!Directory.Exists(_userTemplateDirectory))
             return;
@@ -183,7 +191,7 @@ internal sealed class SplashTemplateStore
                 continue;
             }
 
-            _templates.Add(template);
+            target.Add(template);
         }
     }
 

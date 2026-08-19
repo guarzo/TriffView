@@ -350,10 +350,11 @@ internal sealed class TriffAudioService : IDisposable
 
         if (toScore.Count == 0) return;
 
-        // A snapshot of the template list, not the live one _templateStore.Templates hands
-        // back: SplashTemplateStore.Save calls Reload, which clears and repopulates that same
-        // List<SplashTemplate> in place. Scoring against the live list while a template-capture
-        // save (Task 10) lands mid-tick throws "Collection was modified".
+        // SplashTemplateStore.Templates is a reference swap (Reload/Delete build a new list and
+        // assign it), not a mutated-in-place one, so reading it once here and holding onto the
+        // result for the rest of this tick is safe even if a template-capture save (Task 10)
+        // lands concurrently: this tick either sees the old, complete list or the new one, never
+        // a partial one.
         var detector = SnapshotDetector();
 
         foreach (var session in toScore)
@@ -378,7 +379,7 @@ internal sealed class TriffAudioService : IDisposable
         }
     }
 
-    private SplashDetector SnapshotDetector() => new(_templateStore.Templates.ToArray());
+    private SplashDetector SnapshotDetector() => new(_templateStore.Templates);
 
     /// <summary>
     /// The decision made once a score exists, whether it came from the real tick above or
