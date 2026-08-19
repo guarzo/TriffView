@@ -35,6 +35,14 @@ public static class SplashFeatures
         var window = BuildHannWindow(FftSize);
         var edges = BuildBandBinEdges();
 
+        // scipy.signal.stft scales its output by 1/win.sum() (amplitude-spectrum scaling); an
+        // unnormalized FFT is louder by exactly that factor (~54 dB for this periodic Hann, whose
+        // coefficients sum to N/2), which uniformly inflates every band's dB value relative to
+        // the median/mad the reference implementation computed. Match that scaling here.
+        var windowSum = 0.0;
+        for (var i = 0; i < window.Length; i++)
+            windowSum += window[i];
+
         var re = new double[FftSize];
         var im = new double[FftSize];
 
@@ -55,7 +63,7 @@ public static class SplashFeatures
             var half = FftSize / 2;
             var mag = new double[half + 1];
             for (var i = 0; i <= half; i++)
-                mag[i] = Math.Sqrt(re[i] * re[i] + im[i] * im[i]);
+                mag[i] = Math.Sqrt(re[i] * re[i] + im[i] * im[i]) / windowSum;
 
             for (var b = 0; b < BandCount; b++)
             {
@@ -200,7 +208,7 @@ public static class SplashFeatures
         {
             var ratio = (double)b / BandCount;
             var hz = BandMinHz * Math.Pow(BandMaxHz / BandMinHz, ratio);
-            var bin = (int)Math.Round(hz / binHz);
+            var bin = (int)Math.Floor(hz / binHz);
             edges[b] = Math.Clamp(bin, 0, half);
         }
 
