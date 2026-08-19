@@ -20,6 +20,8 @@ public sealed class AudioRingBuffer
     private readonly float[] _buffer;
     private int _writePos;
     private bool _full;
+    private long _totalWritten;
+    private long _nonZeroInLastWrite;
 
     public AudioRingBuffer(int capacitySamples)
     {
@@ -30,14 +32,17 @@ public sealed class AudioRingBuffer
     }
 
     /// <summary>Total samples ever written, not clamped to capacity.</summary>
-    public long TotalWritten { get; private set; }
+    public long TotalWritten { get { lock (_gate) return _totalWritten; } }
 
     /// <summary>
     /// Count of non-zero samples in the most recent <see cref="Write"/> call only (not
     /// cumulative). A muted WASAPI process delivers zero-filled buffers without ever setting
-    /// AUDCLNT_BUFFERFLAGS_SILENT, so this is the only reliable way to detect silence.
+    /// AUDCLNT_BUFFERFLAGS_SILENT, so this is the only reliable way to detect silence. Read from
+    /// a different thread than the one that writes it (the detection timer decides whether to
+    /// show a client as muted), so this getter locks like everything else here rather than being
+    /// a plain auto-property read.
     /// </summary>
-    public long NonZeroSamplesInLastWrite { get; private set; }
+    public long NonZeroSamplesInLastWrite { get { lock (_gate) return _nonZeroInLastWrite; } }
 
     public void Write(ReadOnlySpan<float> samples)
     {
@@ -48,8 +53,8 @@ public sealed class AudioRingBuffer
 
         lock (_gate)
         {
-            NonZeroSamplesInLastWrite = nonZero;
-            TotalWritten += samples.Length;
+            _nonZeroInLastWrite = nonZero;
+            _totalWritten += samples.Length;
 
             // A single incoming span can exceed capacity; only its tail (the most recent
             // capacity-worth of samples) can ever be read back, so skip the rest without ever
@@ -83,7 +88,7 @@ public sealed class AudioRingBuffer
                 }
             }
 
-            if (!_full && TotalWritten >= _buffer.Length)
+            if (!_full && _totalWritten >= _buffer.Length)
                 _full = true;
         }
     }
