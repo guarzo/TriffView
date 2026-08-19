@@ -35,6 +35,54 @@
     <Compile Include="..\..\native\TriffViewUpdateChecker.cs" Link="TriffViewUpdateChecker.cs" />
   </ItemGroup>
 
+  <!-- SplashFeatures.cs is pure BCL math (Math, Array, Span) with no Windows-only
+       dependencies, so it links the same way as the groups above. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAudio\SplashFeatures.cs" Link="SplashFeatures.cs" />
+  </ItemGroup>
+
+  <!-- SplashTemplate.cs is pure BCL (Buffers.Binary, Text.Json) with no Windows-only
+       dependencies, so it links the same way as SplashFeatures.cs above. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAudio\SplashTemplate.cs" Link="SplashTemplate.cs" />
+  </ItemGroup>
+
+  <!-- SplashDetector.cs is pure BCL (Math, Linq) with no Windows-only dependencies, so it
+       links the same way as SplashFeatures.cs and SplashTemplate.cs above. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAudio\SplashDetector.cs" Link="SplashDetector.cs" />
+  </ItemGroup>
+
+  <!-- AudioRingBuffer.cs is pure BCL (Array, Span, Math) with no Windows-only dependencies, so
+       it links the same way as the other TriffAudio files above. WasapiProcessCapture.cs, its
+       sibling in native/TriffAudio, is Windows-only WASAPI interop and is deliberately NOT
+       linked here. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAudio\AudioRingBuffer.cs" Link="AudioRingBuffer.cs" />
+  </ItemGroup>
+
+  <!-- RollingBandBuffer.cs is pure BCL (Array, Math) with no Windows-only dependencies, so it
+       links the same way as the other TriffAudio files above. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAudio\RollingBandBuffer.cs" Link="RollingBandBuffer.cs" />
+  </ItemGroup>
+
+  <!-- Tests run from the build output directory, which has no path back to the source tree,
+       so the 11 shipped splash templates are copied alongside the test binaries here; see
+       TestTemplates.cs for the loader that resolves them from "templates/". -->
+  <ItemGroup>
+    <None Include="..\..\native\TriffAudio\Assets\splash-templates\**\*"
+          Link="templates\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Accuracy fixtures for SplashAccuracyTests: committed .wav/.json pairs under
+       fixtures/splash-accuracy, copied alongside the test binaries so the test can find them
+       relative to AppContext.BaseDirectory. Separate from the "templates" group above. -->
+  <ItemGroup>
+    <None Include="fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />

@@ -9,6 +9,7 @@ using System.Text.Json.Nodes;
 using System.Windows;
 using Microsoft.Web.WebView2.Core;
 using TriffView.Alerts;
+using TriffView.Audio;
 using TriffView.EveSettings;
 using TriffView.Preview;
 using TriffView.TriffFleets;
@@ -134,6 +135,7 @@ public partial class MainWindow : Window
     private Forms.ToolStripMenuItem? _triffViewEnabledItem;
     private Forms.ToolStripMenuItem? _triffViewHotkeysItem;
     private TriffViewController? _triffView;
+    private readonly AlertSoundPlayer _alertSoundPlayer = new();
     private EveSettingsController? _eveSettings;
     private TriffFleetsController? _triffFleets;
     private TriffSkills.TriffSkillsController? _triffSkills;
@@ -239,6 +241,7 @@ public partial class MainWindow : Window
             alwaysOnTop => Dispatcher.InvokeAsync(() => ApplySettingsAlwaysOnTop(alwaysOnTop))
         );
         _triffView.AlertNotificationRequested += OnTriffAlertNotification;
+        _triffView.AlertSoundRequested += OnTriffAlertSoundRequested;
         _triffView.Start();
     }
 
@@ -1068,6 +1071,16 @@ public partial class MainWindow : Window
                 : $"{alert.Source}: {alert.Message}";
             _trayIcon.ShowBalloonTip(5500, title, body, icon);
         });
+    }
+
+    /// <summary>
+    /// Raised by <see cref="TriffViewController.ProcessPendingAlerts"/> on the WPF dispatcher, so
+    /// nothing here needs its own marshalling. <see cref="AlertSoundPlayer.Play"/> is itself
+    /// fire-and-forget - see its own doc comment for why blocking here is never a risk.
+    /// </summary>
+    private void OnTriffAlertSoundRequested(TriffAlertEvent alert, string soundId, double masterVolume)
+    {
+        _alertSoundPlayer.Play(soundId, masterVolume);
     }
 
     private void OnTrayBalloonClicked()
