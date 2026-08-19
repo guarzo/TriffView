@@ -1252,6 +1252,26 @@ internal sealed class TriffViewController : IDisposable
         try
         {
             var processId = client.ProcessId;
+
+            // Decision 1 (Task 9) tears every audio session down while splash detection is off,
+            // and a session that has not started capturing yet looks identical from here - both
+            // produce zero candidates. Without distinguishing them, the settings UI (Task 10) sees
+            // "candidates: []" for "detection is off" and for "still in its 30 s warm-up" alike and
+            // cannot render a useful message for either. A live session's process id always shows
+            // up in Statuses (see TriffAudioService.SetClients), regardless of whether it has
+            // finished warming up, so its absence here means specifically "no session at all".
+            if (!_audio.Statuses.Any(s => s.ProcessId == processId))
+            {
+                _postToHud(new
+                {
+                    type = "triffaudio:capture-result",
+                    clientKey,
+                    candidates = Array.Empty<object>(),
+                    reason = "no-session",
+                });
+                return;
+            }
+
             var candidates = await Task.Run(() => _audio.CaptureTemplateCandidates(processId, maxResults: 3));
 
             // Same disposal race ExportCombatLogs guards against: the capture pass can outlive

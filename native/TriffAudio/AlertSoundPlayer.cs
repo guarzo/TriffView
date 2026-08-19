@@ -15,6 +15,25 @@ internal sealed class AlertSoundPlayer
 {
     private readonly MediaPlayer _player = new();
 
+    // The soundId currently (or most recently) being opened, purely so a MediaFailed callback -
+    // which arrives with no context of its own - can say which sound it was complaining about.
+    private string? _currentSoundId;
+
+    public AlertSoundPlayer()
+    {
+        // MediaPlayer.Open/Play both report load/playback failures asynchronously through this
+        // event rather than through an exception or return value from Open/Play themselves. Without
+        // subscribing, the try/catch below catches essentially nothing and a bad file, unsupported
+        // codec, or missing audio device fails completely silently: no exception, no log line, no
+        // sound - indistinguishable from everything having worked.
+        _player.MediaFailed += OnMediaFailed;
+    }
+
+    private void OnMediaFailed(object? sender, ExceptionEventArgs e)
+    {
+        TriffViewDiagnostics.Log("audio-alert-sound", $"failed to play '{_currentSoundId}': {e.ErrorException?.Message}");
+    }
+
     /// <summary>
     /// Fire-and-forget: <see cref="Play"/> is called from <c>ProcessPendingAlerts</c>, which runs
     /// on the WPF dispatcher, so nothing here may block it. <see cref="MediaPlayer.Open"/> and
@@ -28,6 +47,7 @@ internal sealed class AlertSoundPlayer
         var uri = SoundUri(soundId);
         if (uri is null) return;
 
+        _currentSoundId = soundId;
         try
         {
             _player.Volume = Math.Clamp(volume, 0, 1);
@@ -38,6 +58,7 @@ internal sealed class AlertSoundPlayer
         {
             // Never let a bad codec load or a missing audio device take the dispatcher down with
             // it - the flash and tray branches beside this one in ProcessPendingAlerts still ran.
+            // Most real failures surface via MediaFailed instead of here (see the constructor).
             TriffViewDiagnostics.Log("audio-alert-sound", $"failed to play '{soundId}': {ex.Message}");
         }
     }

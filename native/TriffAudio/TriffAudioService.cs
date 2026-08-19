@@ -63,7 +63,19 @@ internal sealed class TriffAudioService : IDisposable
 
     private readonly object _gate = new();
     private readonly Dictionary<uint, ClientSession> _sessions = new();
-    private readonly SplashTemplateStore _templateStore;
+
+    /// <summary>
+    /// <see cref="SplashTemplateStore"/>'s constructor loads all 11 built-in templates via
+    /// <c>FromWav</c>, each running <see cref="SplashFeatures.ComputeBands"/> over a 2 s clip -
+    /// roughly 4,000 FFTs total, synchronously. Constructing <see cref="TriffAudioService"/>
+    /// happens on the WPF dispatcher at app startup for every user, including those who never
+    /// enable splash detection, so that cost cannot sit directly in this class's constructor.
+    /// <see cref="Lazy{T}"/> lets construction be kicked off on a thread-pool thread immediately
+    /// (see the constructor) while every caller still gets a fully-built store: the default
+    /// thread-safety mode blocks concurrent access to <see cref="Lazy{T}.Value"/> until the one
+    /// execution finishes, rather than racing an empty store.
+    /// </summary>
+    private readonly Lazy<SplashTemplateStore> _templateStore;
     private readonly System.Threading.Timer _detectionTimer;
     private readonly ConcurrentQueue<(string CharacterName, double Score)> _pendingDetections = new();
 
@@ -88,13 +100,29 @@ internal sealed class TriffAudioService : IDisposable
     private int _detectionDispatchScheduled;
     private bool _disposed;
 
-    public TriffAudioService(string? userTemplateDirectory = null)
+    /// <summary>
+    /// Starts a capture for a session; real callers get real WASAPI capture, tests supply a fake
+    /// so <c>SetClients(enabled: true, ...)</c> never has to open real process-loopback capture
+    /// against whatever process happens to hold a hardcoded test PID (that was root-causing a
+    /// flaky test - see the Task 9 review).
+    /// </summary>
+    private readonly Func<uint, WasapiProcessCapture.SampleCallback, IAudioCapture> _captureFactory;
+
+    public TriffAudioService(
+        string? userTemplateDirectory = null,
+        Func<uint, WasapiProcessCapture.SampleCallback, IAudioCapture>? captureFactory = null)
     {
         var directory = string.IsNullOrWhiteSpace(userTemplateDirectory)
             ? DefaultUserTemplateDirectory()
             : userTemplateDirectory;
 
-        _templateStore = new SplashTemplateStore(directory);
+        _captureFactory = captureFactory ?? ((processId, onSamples) => new WasapiProcessCapture(processId, onSamples));
+
+        _templateStore = new Lazy<SplashTemplateStore>(() => new SplashTemplateStore(directory));
+        // Start building it now rather than waiting for first access, so the cost lands on a
+        // thread-pool thread instead of stalling whichever WPF dispatcher call (SaveTemplate,
+        // DeleteTemplate, ListTemplates, or the first detection tick) would otherwise trigger it.
+        ThreadPool.QueueUserWorkItem(_ => { _ = _templateStore.Value; });
 
         // Runs from the moment the service exists rather than only once enabled: the tick
         // itself no-ops while disabled, and starting it unconditionally means UpdateSettings
@@ -300,9 +328,17 @@ internal sealed class TriffAudioService : IDisposable
 
         lock (_gate)
         {
-            // Overwrites (rather than appends to) this client's entry: only the most recent
-            // capture needs to stay saveable, per the class-level comment on the field.
-            _pendingCandidatesByClient[processId] = cached;
+            // The compute above takes hundreds of ms; if SetClients removed this pid while it
+            // ran, storing anyway would recreate exactly the stale-entry-under-a-reused-pid
+            // problem the per-client rework was meant to close, since the pid is gone from
+            // _sessions and nothing iterates it again to prune this entry. Store only if the
+            // session is still live.
+            if (_sessions.ContainsKey(processId))
+            {
+                // Overwrites (rather than appends to) this client's entry: only the most recent
+                // capture needs to stay saveable, per the class-level comment on the field.
+                _pendingCandidatesByClient[processId] = cached;
+            }
         }
 
         return results;
@@ -334,17 +370,17 @@ internal sealed class TriffAudioService : IDisposable
         if (found is null)
             return null;
 
-        return _templateStore.Save(name, found.Value.Samples, found.Value.Median, found.Value.Mad);
+        return _templateStore.Value.Save(name, found.Value.Samples, found.Value.Median, found.Value.Mad);
     }
 
     /// <summary>Pass-through to <see cref="SplashTemplateStore.Delete"/> - kept encapsulated here
     /// rather than exposing the store itself, so this service stays the one owner of it.</summary>
-    public bool DeleteTemplate(string templateId) => _templateStore.Delete(templateId);
+    public bool DeleteTemplate(string templateId) => _templateStore.Value.Delete(templateId);
 
     /// <summary>Pass-through to <see cref="SplashTemplateStore.Templates"/>, same reasoning as
     /// <see cref="DeleteTemplate"/>. A method rather than a property, matching the other two
     /// pass-throughs it is always used alongside.</summary>
-    public IReadOnlyList<SplashTemplate> ListTemplates() => _templateStore.Templates;
+    public IReadOnlyList<SplashTemplate> ListTemplates() => _templateStore.Value.Templates;
 
     /// <summary>
     /// Test-only hook. Runs exactly the decision code the real detection tick runs once it has
@@ -446,6 +482,7 @@ internal sealed class TriffAudioService : IDisposable
 
         var now = DateTime.UtcNow;
         var toScore = new List<ClientSession>();
+        var toDispose = new List<IAudioCapture>();
 
         lock (_gate)
         {
@@ -457,8 +494,12 @@ internal sealed class TriffAudioService : IDisposable
                 {
                     // Tear down now rather than wait for SetClients to notice: the next
                     // SetClients call sees Capture == null and starts a fresh session, which is
-                    // also what resets warm-up for a stream that died and came back.
-                    session.Capture.Dispose();
+                    // also what resets warm-up for a stream that died and came back. Dispose can
+                    // block up to 2 s (WasapiProcessCapture's join timeout), so it must happen
+                    // after releasing _gate - Statuses takes the same lock on every PostState, and
+                    // holding it here would stall the dispatcher for that long. SetClients already
+                    // disposes outside its lock for the same reason.
+                    toDispose.Add(session.Capture);
                     session.Capture = null;
                     continue;
                 }
@@ -468,6 +509,9 @@ internal sealed class TriffAudioService : IDisposable
                 toScore.Add(session);
             }
         }
+
+        foreach (var capture in toDispose)
+            capture.Dispose();
 
         if (toScore.Count == 0) return;
 
@@ -500,7 +544,7 @@ internal sealed class TriffAudioService : IDisposable
         }
     }
 
-    private SplashDetector SnapshotDetector() => new(_templateStore.Templates);
+    private SplashDetector SnapshotDetector() => new(_templateStore.Value.Templates);
 
     /// <summary>
     /// The decision made once a score exists, whether it came from the real tick above or
@@ -567,7 +611,7 @@ internal sealed class TriffAudioService : IDisposable
             session.ContextStatsComputedUtc = DateTime.MinValue;
         }
 
-        var capture = new WasapiProcessCapture(session.ProcessId, samples => OnSamples(session, ring, bandBuffer, samples));
+        var capture = _captureFactory(session.ProcessId, samples => OnSamples(session, ring, bandBuffer, samples));
         var ok = capture.Start(out var error);
 
         var keep = false;
@@ -672,7 +716,7 @@ internal sealed class TriffAudioService : IDisposable
         public string CharacterName;
         public AudioRingBuffer Ring = new(RingCapacitySamples);
         public RollingBandBuffer BandBuffer = new(SplashFeatures.ContextFrames);
-        public WasapiProcessCapture? Capture;
+        public IAudioCapture? Capture;
         public bool StartInProgress;
         public DateTime StartedUtc = DateTime.UtcNow;
         public DateTime LastNonZeroUtc = DateTime.UtcNow;

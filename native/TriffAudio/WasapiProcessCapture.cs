@@ -6,6 +6,20 @@ using System.Threading;
 namespace TriffView.Audio;
 
 /// <summary>
+/// The seam <see cref="TriffAudioService"/> starts captures through, so tests can supply a fake
+/// that never touches real WASAPI/COM state instead of racing real audio capture against
+/// whatever process happens to hold a hardcoded test PID.
+/// </summary>
+internal interface IAudioCapture : IDisposable
+{
+    /// <summary>UTC time of the most recently delivered packet; see the real implementation's
+    /// remarks on what "delivered" means for silence.</summary>
+    DateTime LastPacketUtc { get; }
+
+    bool Start(out string? error);
+}
+
+/// <summary>
 /// Captures the audio rendered by a single process (and its child processes) via WASAPI
 /// process-loopback capture, resampling to 16 kHz mono before invoking <see cref="SampleCallback"/>.
 /// Windows-only COM/WASAPI interop, so unlike the rest of TriffAudio this is not linked into the
@@ -15,7 +29,7 @@ namespace TriffView.Audio;
 /// like they could be simplified but were each confirmed by measurement during that spike; see the
 /// comments at each one before changing it.
 /// </summary>
-internal sealed class WasapiProcessCapture : IDisposable
+internal sealed class WasapiProcessCapture : IAudioCapture
 {
     public delegate void SampleCallback(ReadOnlySpan<float> samples);
 
@@ -192,17 +206,31 @@ internal sealed class WasapiProcessCapture : IDisposable
 
     private void CaptureLoop()
     {
-        var waitHandles = new WaitHandle[] { _stopEvent, _dataEvent };
-        while (true)
+        // Nothing calling into this loop (WaitHandle.WaitAny, GetNextPacketSize, GetBuffer,
+        // ReleaseBuffer) is guarded anywhere below, and this runs on its own background thread -
+        // an unhandled exception here is an unhandled exception on a background thread, which
+        // terminates the whole process. That is reachable in practice: Dispose() only best-effort
+        // joins this thread before releasing the COM objects and disposing the wait handles it
+        // waits on, so a slow-to-notice stop request can land here mid-call against objects that
+        // are already gone (see Dispose).
+        try
         {
-            var signaled = WaitHandle.WaitAny(waitHandles, 2000);
-            if (signaled == 0)
-                return; // stop requested
+            var waitHandles = new WaitHandle[] { _stopEvent, _dataEvent };
+            while (true)
+            {
+                var signaled = WaitHandle.WaitAny(waitHandles, 2000);
+                if (signaled == 0)
+                    return; // stop requested
 
-            if (signaled == WaitHandle.WaitTimeout)
-                continue; // no packet in this interval; keep waiting rather than treat it as an error
+                if (signaled == WaitHandle.WaitTimeout)
+                    continue; // no packet in this interval; keep waiting rather than treat it as an error
 
-            DrainPackets();
+                DrainPackets();
+            }
+        }
+        catch (Exception ex)
+        {
+            TriffViewDiagnostics.Log("audio-capture", $"capture loop for process {_processId} stopped: {ex.Message}");
         }
     }
 
@@ -249,7 +277,20 @@ internal sealed class WasapiProcessCapture : IDisposable
         _disposed = true;
 
         _stopEvent.Set();
-        _captureThread?.Join(2000);
+        var joined = _captureThread?.Join(2000) ?? true;
+
+        if (!joined)
+        {
+            // The capture thread is still inside a WASAPI call (or otherwise wedged) past the
+            // join timeout. Releasing the COM objects or disposing the wait handles out from
+            // under it would turn its next call into an InvalidComObjectException or
+            // ObjectDisposedException - unhandled on a background thread (CaptureLoop now catches
+            // that, but there is no reason to manufacture it) and, before that catch existed, fatal
+            // to the whole process. A leaked RCW and two event handles are cheap; deliberately leak
+            // them here rather than risk it.
+            TriffViewDiagnostics.Log("audio-capture", $"capture thread for process {_processId} did not stop in time; leaking its COM state rather than risk a background-thread crash.");
+            return;
+        }
 
         try { _audioClient?.Stop(); } catch { /* best-effort teardown */ }
 
