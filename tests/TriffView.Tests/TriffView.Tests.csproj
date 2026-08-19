@@ -62,6 +62,13 @@
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- Accuracy fixtures for SplashAccuracyTests: committed .wav/.json pairs under
+       fixtures/splash-accuracy, copied alongside the test binaries so the test can find them
+       relative to AppContext.BaseDirectory. Separate from the "templates" group above. -->
+  <ItemGroup>
+    <None Include="fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
