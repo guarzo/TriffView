@@ -1068,6 +1068,10 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
   const [splashTemplates, setSplashTemplates] = useState([]);
   const [candidateNameDrafts, setCandidateNameDrafts] = useState({});
   const guidePromptedRef = useRef(false);
+  // Kept in sync below so the capture-result handler - registered once, in an
+  // effect with an empty dependency array - can read the *current* client
+  // list rather than the one captured at mount.
+  const clientsRef = useRef([]);
   const profile = state.profile || {};
   const clients = Array.isArray(state.clients) ? state.clients : [];
   const alerts = useMemo(() => normalizeAlertsState(state.alerts), [state.alerts]);
@@ -1119,6 +1123,10 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
     setEditingProfileName(false);
     setProfileNameDraft(profile.name || "");
   }, [profile.id, profile.name]);
+
+  useEffect(() => {
+    clientsRef.current = clients;
+  }, [clients]);
 
   useEffect(() => {
     if (!open || guidePromptedRef.current || state.guideCompleted) return;
@@ -1323,11 +1331,29 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
         });
       } else if (message?.type === "triffaudio:capture-result") {
         setSplashCapturing(false);
+        const candidates = Array.isArray(message.candidates) ? message.candidates : [];
         setSplashCapture({
           clientKey: message.clientKey,
-          candidates: Array.isArray(message.candidates) ? message.candidates : [],
+          candidates,
           reason: message.reason || null,
         });
+        // With no play button on the saved list, the name chosen here is the only way a
+        // user can later tell templates apart - default to something identifiable rather
+        // than an empty box, but leave it editable before save.
+        if (candidates.length) {
+          const client = clientsRef.current.find((item) => item.key === message.clientKey);
+          const clientLabel = client?.characterName || client?.title || message.clientKey || "Client";
+          const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          setCandidateNameDrafts((current) => {
+            const next = { ...current };
+            candidates.forEach((candidate) => {
+              if (candidate.id in next) return;
+              const score = Math.round((candidate.score ?? 0) * 100);
+              next[candidate.id] = `${clientLabel} splash ${timestamp} (${score}%)`;
+            });
+            return next;
+          });
+        }
       } else if (message?.type === "triffaudio:templates") {
         setSplashTemplates(Array.isArray(message.templates) ? message.templates : []);
       }
