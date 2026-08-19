@@ -117,6 +117,17 @@ internal sealed class SplashTemplateStore
 
             _templates.Add(template);
         }
+
+        // A broken embed (a rename, a glob regression, a packaging change) must never silently
+        // leave the detector with nothing to match against - that fails as "no splashes, ever",
+        // which is indistinguishable from a quiet evening. Log loudly, but do not throw: a
+        // broken embed should degrade to no detection, not stop the app from starting.
+        if (_templates.Count(t => t.BuiltIn) == 0)
+        {
+            TriffViewDiagnostics.Log(
+                "splash-templates-critical",
+                "no built-in splash templates loaded; splash detection is disabled until this is fixed.");
+        }
     }
 
     /// <summary>
