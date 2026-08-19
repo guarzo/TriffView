@@ -16,6 +16,8 @@ public sealed class TriffAlertsSettings
     public bool PveMode { get; set; } = true;
     public bool PersistUntilSelected { get; set; }
     public double MasterVolume { get; set; } = 0.75;
+    public bool SplashDetectionEnabled { get; set; }
+    public double SplashThreshold { get; set; } = 0.35;
     public Dictionary<string, TriffAlertEventConfig> Events { get; set; } = CreateDefaultEvents();
 
     public static TriffAlertsSettings CreateDefault()
@@ -28,6 +30,7 @@ public sealed class TriffAlertsSettings
     public void Normalize()
     {
         MasterVolume = Math.Max(0, Math.Min(1, MasterVolume));
+        SplashThreshold = Math.Max(0.10, Math.Min(0.90, SplashThreshold));
         Events = new Dictionary<string, TriffAlertEventConfig>(Events ?? new Dictionary<string, TriffAlertEventConfig>(), StringComparer.OrdinalIgnoreCase);
 
         var defaultsByType = CreateDefaultEvents();
@@ -68,6 +71,8 @@ public sealed class TriffAlertsSettings
             pveMode = PveMode,
             persistUntilSelected = PersistUntilSelected,
             masterVolume = MasterVolume,
+            splashDetectionEnabled = SplashDetectionEnabled,
+            splashThreshold = SplashThreshold,
             events = Events.ToDictionary(
                 item => item.Key,
                 item => item.Value.ToState(),
@@ -157,6 +162,20 @@ public sealed class TriffAlertsSettings
                 FlashThickness = 24,
                 FlashDurationMs = 400,
                 FlashPulseCount = 1,
+            },
+            ["wormhole_splash"] = new()
+            {
+                Type = "wormhole_splash",
+                Label = "Wormhole splash",
+                Enabled = true,
+                Severity = TriffAlertSeverity.Warning,
+                CooldownSeconds = 15,
+                FlashEnabled = true,
+                FlashColor = "#53B6FF",
+                FlashThickness = 24,
+                FlashDurationMs = 400,
+                FlashPulseCount = 1,
+                TrayNotification = true,
             },
         };
     }
@@ -448,6 +467,21 @@ public sealed class TriffAlertsService : IDisposable
         }
 
         AlertTriggered?.Invoke(this, alert);
+    }
+
+    // Entry point for alerts raised outside the log-parsing path (e.g. audio-detected wormhole
+    // splashes). Joins the same EmitLocked gate/cooldown/history path as ParseLine-derived alerts
+    // so the two sources cannot drift apart; notifications are dispatched off-lock by EmitLocked
+    // exactly as they are for log alerts.
+    public void RaiseExternalAlert(string type, string characterName, string source, string message)
+    {
+        var cleanType = string.IsNullOrWhiteSpace(type) ? "" : type.Trim();
+        var cleanCharacter = characterName ?? "";
+        lock (_gate)
+        {
+            var alert = BuildEvent(cleanType, cleanCharacter, source ?? "", message ?? "");
+            EmitLocked(alert);
+        }
     }
 
     public void Dispose()

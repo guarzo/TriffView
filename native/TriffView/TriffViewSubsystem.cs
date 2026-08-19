@@ -1106,6 +1106,12 @@ internal sealed class TriffViewController : IDisposable
                 case "masterVolume":
                     alerts.MasterVolume = ClampDouble(value, 0, 1, alerts.MasterVolume);
                     break;
+                case "splashDetectionEnabled":
+                    alerts.SplashDetectionEnabled = value?.GetValue<bool>() == true;
+                    break;
+                case "splashThreshold":
+                    alerts.SplashThreshold = ClampDouble(value, 0.10, 0.90, alerts.SplashThreshold);
+                    break;
             }
         }
 
