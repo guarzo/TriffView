@@ -67,12 +67,20 @@ internal sealed class TriffAudioService : IDisposable
     private readonly System.Threading.Timer _detectionTimer;
     private readonly ConcurrentQueue<(string CharacterName, double Score)> _pendingDetections = new();
 
-    /// <summary>Candidates handed to the template-capture UI, keyed by the id it was given -
-    /// consumed (removed) by <see cref="SaveTemplate"/>. Never persisted: a restart or an unsaved
-    /// capture simply expires it, which is fine since the UI holds no reference either.</summary>
-    private readonly ConcurrentDictionary<string, PendingCandidate> _pendingCandidates = new();
+    /// <summary>
+    /// Candidates from the most recent <see cref="CaptureTemplateCandidates"/> call, one entry
+    /// per client (a later capture for the same client replaces its previous one; there is no
+    /// reason to keep more than the last), guarded by <see cref="_gate"/> like everything else
+    /// touching <see cref="_sessions"/>. <see cref="SaveTemplate"/> looks a candidate id up here
+    /// rather than recapturing at save time - recapturing would pair the saved audio with
+    /// whatever context stats the ring buffer holds by then, not the ones it was ranked against,
+    /// the same failure class that cost four rounds in Task 4. Dropped for a client's pid as soon
+    /// as <see cref="SetClients"/> stops wanting it, so a stale capture can never outlive the
+    /// client it was taken from.
+    /// </summary>
+    private readonly Dictionary<uint, List<PendingCandidate>> _pendingCandidatesByClient = new();
 
-    private readonly record struct PendingCandidate(float[] Samples, float[] Median, float[] Mad);
+    private readonly record struct PendingCandidate(string Id, float[] Samples, float[] Median, float[] Mad);
 
     private bool _enabled;
     private double _threshold = 0.35;
@@ -142,6 +150,10 @@ internal sealed class TriffAudioService : IDisposable
                 if (wanted.ContainsKey(pid)) continue;
                 toDispose.Add(_sessions[pid]);
                 _sessions.Remove(pid);
+                // A client that is gone can no longer have its candidates saved - drop them
+                // rather than let them answer for a pid that might be reused by an unrelated
+                // process later.
+                _pendingCandidatesByClient.Remove(pid);
             }
 
             var now = DateTime.UtcNow;
@@ -249,12 +261,14 @@ internal sealed class TriffAudioService : IDisposable
     /// Ranks candidates exactly like <see cref="CaptureCandidates"/>, but for the template-save
     /// flow rather than mere display: each candidate's samples and the context median/MAD they
     /// were ranked against (one <see cref="SplashDetector.RankWindows"/> call, one buffer
-    /// snapshot) are cached here under a generated id, so a later <see cref="SaveTemplate"/> can
-    /// persist audio and statistics that are guaranteed to match. Re-deriving stats at save time
-    /// instead would risk pairing a candidate with whatever the ring buffer holds by then - the
-    /// same failure class the Task 8 template pipeline had to be built around. Same cost as
-    /// <see cref="CaptureCandidates"/> - a full <see cref="SplashFeatures.ComputeBands"/> pass -
-    /// so call it from a background thread, never the dispatcher.
+    /// snapshot) are cached here under a generated id, keyed by <paramref name="processId"/>, so
+    /// a later <see cref="SaveTemplate"/> can persist audio and statistics that are guaranteed to
+    /// match. Re-deriving stats at save time instead would risk pairing a candidate with whatever
+    /// the ring buffer holds by then - the same failure class the Task 4 template pipeline had to
+    /// be built around. Replaces this client's previous capture, if any - only the most recent
+    /// one needs to stay saveable. Same cost as <see cref="CaptureCandidates"/> - a full
+    /// <see cref="SplashFeatures.ComputeBands"/> pass - so call it from a background thread,
+    /// never the dispatcher.
     /// </summary>
     public IReadOnlyList<(string Id, double Score, float[] Samples)> CaptureTemplateCandidates(uint processId, int maxResults)
     {
@@ -270,6 +284,7 @@ internal sealed class TriffAudioService : IDisposable
             out var median, out var mad);
 
         var results = new List<(string, double, float[])>(ranked.Count);
+        var cached = new List<PendingCandidate>(ranked.Count);
         foreach (var (score, offsetSeconds) in ranked)
         {
             var startSample = (int)Math.Round(offsetSeconds * SplashFeatures.SampleRate);
@@ -279,8 +294,15 @@ internal sealed class TriffAudioService : IDisposable
                 Array.Copy(buffer, startSample, samples, 0, available);
 
             var id = Guid.NewGuid().ToString("N");
-            _pendingCandidates[id] = new PendingCandidate(samples, median, mad);
+            cached.Add(new PendingCandidate(id, samples, median, mad));
             results.Add((id, score, samples));
+        }
+
+        lock (_gate)
+        {
+            // Overwrites (rather than appends to) this client's entry: only the most recent
+            // capture needs to stay saveable, per the class-level comment on the field.
+            _pendingCandidatesByClient[processId] = cached;
         }
 
         return results;
@@ -289,15 +311,30 @@ internal sealed class TriffAudioService : IDisposable
     /// <summary>
     /// Persists a candidate handed back by <see cref="CaptureTemplateCandidates"/> as a named
     /// user template, using the samples and context stats cached at capture time. Null if the
-    /// candidate id is unknown - the cache is not persisted, so this is expected after a restart,
-    /// or if the same candidate is saved twice (the entry is consumed on first save).
+    /// candidate id is unknown - expected if the client was removed since capture, a newer
+    /// capture superseded it, or the process restarted.
     /// </summary>
     public string? SaveTemplate(string candidateId, string name)
     {
-        if (!_pendingCandidates.TryRemove(candidateId, out var pending))
+        PendingCandidate? found = null;
+
+        lock (_gate)
+        {
+            foreach (var candidates in _pendingCandidatesByClient.Values)
+            {
+                var match = candidates.FirstOrDefault(c => c.Id == candidateId);
+                if (match.Id == candidateId)
+                {
+                    found = match;
+                    break;
+                }
+            }
+        }
+
+        if (found is null)
             return null;
 
-        return _templateStore.Save(name, pending.Samples, pending.Median, pending.Mad);
+        return _templateStore.Save(name, found.Value.Samples, found.Value.Median, found.Value.Mad);
     }
 
     /// <summary>Pass-through to <see cref="SplashTemplateStore.Delete"/> - kept encapsulated here
@@ -305,8 +342,9 @@ internal sealed class TriffAudioService : IDisposable
     public bool DeleteTemplate(string templateId) => _templateStore.Delete(templateId);
 
     /// <summary>Pass-through to <see cref="SplashTemplateStore.Templates"/>, same reasoning as
-    /// <see cref="DeleteTemplate"/>.</summary>
-    public IReadOnlyList<SplashTemplate> Templates => _templateStore.Templates;
+    /// <see cref="DeleteTemplate"/>. A method rather than a property, matching the other two
+    /// pass-throughs it is always used alongside.</summary>
+    public IReadOnlyList<SplashTemplate> ListTemplates() => _templateStore.Templates;
 
     /// <summary>
     /// Test-only hook. Runs exactly the decision code the real detection tick runs once it has
@@ -369,6 +407,7 @@ internal sealed class TriffAudioService : IDisposable
         {
             sessions = _sessions.Values.ToList();
             _sessions.Clear();
+            _pendingCandidatesByClient.Clear();
         }
 
         foreach (var session in sessions)

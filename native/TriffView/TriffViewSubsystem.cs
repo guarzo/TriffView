@@ -1303,7 +1303,7 @@ internal sealed class TriffViewController : IDisposable
         _postToHud(new
         {
             type = "triffaudio:templates",
-            templates = _audio.Templates.Select(template => new
+            templates = _audio.ListTemplates().Select(template => new
             {
                 id = template.Id,
                 name = template.Name,
