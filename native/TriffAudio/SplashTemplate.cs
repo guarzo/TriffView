@@ -58,9 +58,11 @@ public sealed class SplashTemplate
         {
             return null;
         }
-        catch (InvalidOperationException)
+        catch (Exception ex) when (ex is InvalidOperationException or FormatException)
         {
-            // Thrown by GetInt32/GetDouble when the JSON element isn't the expected kind.
+            // InvalidOperationException: GetInt32/GetDouble called on the wrong JSON element kind.
+            // FormatException: a syntactically-valid but out-of-range numeric literal (e.g. a
+            // "version" too large for Int32).
             return null;
         }
 
@@ -80,7 +82,6 @@ public sealed class SplashTemplate
             samples[i] = (float)(samples[i] / stats.Gain);
 
         var bands = SplashFeatures.ComputeBands(samples);
-        var frameCount = bands.GetLength(1);
         var patch = SplashFeatures.BuildPatch(bands, 0, stats.Median, stats.Mad);
 
         return new SplashTemplate

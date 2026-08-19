@@ -48,4 +48,17 @@ public class SplashTemplateTests
         Assert.Null(SplashTemplate.FromWav("x", "x", false,
             SplashTemplate.WriteWav(samples, out _), bad));
     }
+
+    [Fact]
+    public void FromWav_ReturnsNullForOutOfRangeNumericLiteral()
+    {
+        // Syntactically valid JSON, but "version" overflows Int32: JsonElement.GetInt32()
+        // throws FormatException here rather than InvalidOperationException, which must
+        // also be swallowed so a corrupt user-supplied file degrades to "skipped".
+        var samples = Ramp(32000);
+        var bad = System.Text.Encoding.UTF8.GetBytes(
+            "{\"version\":99999999999999999999,\"sampleRate\":16000,\"gain\":1.0,\"median\":[],\"mad\":[]}");
+        Assert.Null(SplashTemplate.FromWav("x", "x", false,
+            SplashTemplate.WriteWav(samples, out _), bad));
+    }
 }
