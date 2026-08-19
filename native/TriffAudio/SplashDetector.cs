@@ -79,10 +79,22 @@ public sealed class SplashDetector
     /// </summary>
     public IReadOnlyList<(double Score, double OffsetSeconds)> RankWindows(
         ReadOnlySpan<float> samples, int maxResults, double minSeparationSeconds)
+        => RankWindows(samples, maxResults, minSeparationSeconds, out _, out _);
+
+    /// <summary>
+    /// Same ranking as the overload above, but also hands back the context median/MAD this call
+    /// derived from <paramref name="samples"/> - the template-capture flow (Task 9) must persist
+    /// a saved template's statistics alongside the exact audio they were computed from, and a
+    /// second, separate call over the (live, still-filling) ring buffer could pair a candidate
+    /// with different context than it was ranked against.
+    /// </summary>
+    public IReadOnlyList<(double Score, double OffsetSeconds)> RankWindows(
+        ReadOnlySpan<float> samples, int maxResults, double minSeparationSeconds,
+        out float[] median, out float[] mad)
     {
         var bands = SplashFeatures.ComputeBands(samples);
         var frameCount = bands.GetLength(1);
-        SplashFeatures.ComputeContextStats(bands, frameCount, out var median, out var mad);
+        SplashFeatures.ComputeContextStats(bands, frameCount, out median, out mad);
 
         var candidates = new List<(double Score, double OffsetSeconds)>();
         for (var startFrame = 0; startFrame + SplashFeatures.WindowFrames <= frameCount; startFrame += StepFrames)

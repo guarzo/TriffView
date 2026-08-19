@@ -36,6 +36,7 @@
 
   <ItemGroup>
     <Resource Include="Assets\TriffView.ico" />
+    <Resource Include="Assets\sounds\*.wav" />
     <EmbeddedResource Include="Assets\overlay-dist.zip"
                       Condition="Exists('Assets\overlay-dist.zip')"
                       LogicalName="TriffView.Assets.overlay-dist.zip" />

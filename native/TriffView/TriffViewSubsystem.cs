@@ -11,6 +11,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows.Threading;
 using TriffView.Alerts;
+using TriffView.Audio;
 using TriffView.Eve;
 using Forms = System.Windows.Forms;
 
@@ -26,6 +27,7 @@ internal sealed class TriffViewController : IDisposable
     private readonly EveWindowTracker _tracker = new();
     private readonly object _trackerGate = new();
     private readonly TriffAlertsService _alerts;
+    private readonly TriffAudioService _audio;
     private readonly ICredentialStore _credentials;
 
     /// <summary>
@@ -67,6 +69,7 @@ internal sealed class TriffViewController : IDisposable
     public bool SettingsPanelOpen => _settingsPanelOpen;
     internal const string CombatLogWebhookCredentialTarget = "TriffView.CombatLogExport.DiscordWebhook";
     public event Action<TriffAlertEvent>? AlertNotificationRequested;
+    public event Action<TriffAlertEvent, string, double>? AlertSoundRequested;
 
     public TriffViewController(
         Dispatcher dispatcher,
@@ -103,6 +106,10 @@ internal sealed class TriffViewController : IDisposable
         _overlay.HotkeyPressed += HandleHotkey;
         _alerts.AlertTriggered += OnAlertTriggered;
         _alerts.UpdateSettings(Settings.Alerts);
+
+        _audio = new TriffAudioService();
+        _audio.SplashDetected += OnSplashDetected;
+        _audio.UpdateSettings(Settings.Alerts.SplashDetectionEnabled, Settings.Alerts.SplashThreshold);
 
         _timer = new DispatcherTimer(DispatcherPriority.Background, _dispatcher)
         {
@@ -326,6 +333,18 @@ internal sealed class TriffViewController : IDisposable
             case "triffview:hide-all":
                 SetEnabled(false);
                 return true;
+            case "triffaudio:capture":
+                CaptureSplashTemplateCandidates(message?["clientKey"]?.GetValue<string>());
+                return true;
+            case "triffaudio:save-template":
+                SaveSplashTemplate(message?["candidateId"]?.GetValue<string>(), message?["name"]?.GetValue<string>());
+                return true;
+            case "triffaudio:delete-template":
+                DeleteSplashTemplate(message?["templateId"]?.GetValue<string>());
+                return true;
+            case "triffaudio:list-templates":
+                PostSplashTemplates();
+                return true;
             default:
                 return false;
         }
@@ -431,6 +450,7 @@ internal sealed class TriffViewController : IDisposable
         StopForegroundTracking();
         StopDisplayTracking();
         _alerts.Dispose();
+        _audio.Dispose();
         _overlay.Dispose();
     }
 
@@ -534,6 +554,11 @@ internal sealed class TriffViewController : IDisposable
         _lastClientTopologySignature = topologySignature;
         _lastClientStateSignature = stateSignature;
         _alerts.SetActiveCharacters(_clients.Select(client => client.CharacterName));
+        // Same cadence as SetActiveCharacters above, and just as cheap to call unconditionally:
+        // SetClients itself no-ops (tears everything down, starts nothing) while splash
+        // detection is disabled - see its own doc comment - so this never needs its own
+        // Settings.Alerts.SplashDetectionEnabled check.
+        _audio.SetClients(_clients.Select(client => (client.ProcessId, client.CharacterName)).ToArray());
         ObserveForegroundTransition(foreground, _clients);
 
         if (topologyChanged)
@@ -1118,6 +1143,7 @@ internal sealed class TriffViewController : IDisposable
         alerts.Normalize();
         Settings.Save();
         _alerts.UpdateSettings(Settings.Alerts);
+        _audio.UpdateSettings(Settings.Alerts.SplashDetectionEnabled, Settings.Alerts.SplashThreshold);
         PostState(force: true);
     }
 
@@ -1190,6 +1216,102 @@ internal sealed class TriffViewController : IDisposable
         SchedulePendingAlertDispatch();
     }
 
+    /// <summary>
+    /// Raised by <see cref="TriffAudioService"/> off a thread-pool work item, never inline under
+    /// its own lock. Marshalled to the dispatcher the same way <see cref="OnAlertTriggered"/>'s
+    /// own downstream work is, rather than calling <see cref="TriffAlertsService.RaiseExternalAlert"/>
+    /// directly from that thread-pool thread.
+    /// </summary>
+    private void OnSplashDetected(object? sender, (string CharacterName, double Score) detection)
+    {
+        if (_disposed) return;
+        _dispatcher.InvokeAsync(() =>
+        {
+            if (_disposed) return;
+            _alerts.RaiseExternalAlert("wormhole_splash", detection.CharacterName, "Audio", "Wormhole activated nearby");
+        });
+    }
+
+    /// <summary>
+    /// Ranks the last 30 s of a client's captured audio and hands back up to three candidates for
+    /// the settings UI to audition. <see cref="TriffAudioService.CaptureTemplateCandidates"/> is a
+    /// full <see cref="SplashFeatures.ComputeBands"/> pass, so it runs on the thread pool exactly
+    /// like <see cref="ExportCombatLogs"/> does for its own heavy work - never on the dispatcher.
+    /// </summary>
+    private async void CaptureSplashTemplateCandidates(string? clientKey)
+    {
+        if (string.IsNullOrWhiteSpace(clientKey)) return;
+
+        var client = _clients.FirstOrDefault(c => string.Equals(c.StableKey, clientKey, StringComparison.OrdinalIgnoreCase));
+        if (client is null)
+        {
+            PostError("triffaudio-capture", "That client is no longer available.");
+            return;
+        }
+
+        try
+        {
+            var processId = client.ProcessId;
+            var candidates = await Task.Run(() => _audio.CaptureTemplateCandidates(processId, maxResults: 3));
+
+            // Same disposal race ExportCombatLogs guards against: the capture pass can outlive
+            // a shutdown that starts while it is running.
+            if (_disposed) return;
+
+            _postToHud(new
+            {
+                type = "triffaudio:capture-result",
+                clientKey,
+                candidates = candidates.Select(candidate => new
+                {
+                    id = candidate.Id,
+                    score = candidate.Score,
+                    wavBase64 = Convert.ToBase64String(SplashTemplate.WriteWav(candidate.Samples, out _)),
+                }).ToArray(),
+            });
+        }
+        catch (Exception ex)
+        {
+            if (_disposed) return;
+            PostError("triffaudio-capture", ex.Message);
+        }
+    }
+
+    private void SaveSplashTemplate(string? candidateId, string? name)
+    {
+        if (string.IsNullOrWhiteSpace(candidateId) || string.IsNullOrWhiteSpace(name)) return;
+
+        var id = _audio.SaveTemplate(candidateId, name.Trim());
+        if (id is null)
+        {
+            PostError("triffaudio-save-template", "That capture has expired; capture again.");
+            return;
+        }
+
+        PostSplashTemplates();
+    }
+
+    private void DeleteSplashTemplate(string? templateId)
+    {
+        if (string.IsNullOrWhiteSpace(templateId)) return;
+        _audio.DeleteTemplate(templateId);
+        PostSplashTemplates();
+    }
+
+    private void PostSplashTemplates()
+    {
+        _postToHud(new
+        {
+            type = "triffaudio:templates",
+            templates = _audio.Templates.Select(template => new
+            {
+                id = template.Id,
+                name = template.Name,
+                builtIn = template.BuiltIn,
+            }).ToArray(),
+        });
+    }
+
     private void SchedulePendingAlertDispatch()
     {
         if (Interlocked.CompareExchange(ref _alertDispatchScheduled, 1, 0) != 0) return;
@@ -1222,6 +1344,15 @@ internal sealed class TriffViewController : IDisposable
                 if (config.TrayNotification)
                 {
                     AlertNotificationRequested?.Invoke(alert);
+                }
+
+                // Deliberately not gated on config.TrayNotification: web playback (removed from
+                // App.jsx alongside this) fired independent of tray configuration, so hanging
+                // sound off AlertNotificationRequested instead would silently drop it for any
+                // alert configured with sound on and tray off.
+                if (!string.Equals(config.Sound, "none", StringComparison.OrdinalIgnoreCase))
+                {
+                    AlertSoundRequested?.Invoke(alert, config.Sound, Settings.Alerts.MasterVolume);
                 }
             }
 
@@ -2496,6 +2627,9 @@ internal sealed class TriffViewController : IDisposable
         // the property clones every event under a lock, and this runs on each
         // state post.
         var alertHistory = _alerts.History;
+        // One lookup for the whole client list below: Statuses clones under a lock, same
+        // reasoning as alertHistory above. Keyed by PID, matching what SetClients was fed.
+        var audioStatusByProcessId = _audio.Statuses.ToDictionary(status => status.ProcessId, status => status.Status);
         var payload = new
         {
             type = "triffview:state",
@@ -2521,6 +2655,7 @@ internal sealed class TriffViewController : IDisposable
                 minimized = client.IsMinimized,
                 foreground = client.IsForeground,
                 key = client.StableKey,
+                audioStatus = ClientAudioStatus.Resolve(audioStatusByProcessId, client.ProcessId),
             }).ToArray(),
             alerts = Settings.Alerts.ToState(),
             alertHistory = alertHistory.Select(alert => alert.ToState()).ToArray(),

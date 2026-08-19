@@ -67,6 +67,13 @@ internal sealed class TriffAudioService : IDisposable
     private readonly System.Threading.Timer _detectionTimer;
     private readonly ConcurrentQueue<(string CharacterName, double Score)> _pendingDetections = new();
 
+    /// <summary>Candidates handed to the template-capture UI, keyed by the id it was given -
+    /// consumed (removed) by <see cref="SaveTemplate"/>. Never persisted: a restart or an unsaved
+    /// capture simply expires it, which is fine since the UI holds no reference either.</summary>
+    private readonly ConcurrentDictionary<string, PendingCandidate> _pendingCandidates = new();
+
+    private readonly record struct PendingCandidate(float[] Samples, float[] Median, float[] Mad);
+
     private bool _enabled;
     private double _threshold = 0.35;
     private int _detectionTickInProgress;
@@ -104,6 +111,10 @@ internal sealed class TriffAudioService : IDisposable
     /// disposes sessions for PIDs no longer present, and leaves everything else alone. A PID
     /// already capturing is never restarted here - only the detection tick tears a session's
     /// capture down (on the unavailable timeout), and only then does this method start it again.
+    /// While disabled (<see cref="UpdateSettings"/>), <paramref name="clients"/> is treated as
+    /// empty regardless of what the caller passes: every existing capture is torn down and none
+    /// started, so a caller can call this unconditionally from its own refresh loop without
+    /// checking the enabled flag itself.
     /// </summary>
     public void SetClients(IReadOnlyList<(uint ProcessId, string CharacterName)> clients)
     {
@@ -114,8 +125,16 @@ internal sealed class TriffAudioService : IDisposable
         {
             if (_disposed) return; // nothing started here would ever be torn down again
 
+            // While splash detection is switched off, no client should have a live capture -
+            // an unconditional diff here would open WASAPI process-loopback capture and run
+            // per-packet FFT work for audio nobody is scoring, for a feature that defaults to
+            // disabled. Treating the wanted set as empty whenever disabled reuses the diff
+            // logic below to tear every existing session down and start none, rather than
+            // adding a second enabled check at every call site that reaches SetClients.
+            var effectiveClients = _enabled ? clients : Array.Empty<(uint ProcessId, string CharacterName)>();
+
             var wanted = new Dictionary<uint, string>();
-            foreach (var client in clients)
+            foreach (var client in effectiveClients)
                 wanted[client.ProcessId] = client.CharacterName ?? "";
 
             foreach (var pid in _sessions.Keys.ToList())
@@ -225,6 +244,69 @@ internal sealed class TriffAudioService : IDisposable
         SplashFeatures.ComputeContextStats(bands, bands.GetLength(1), out median, out mad);
         return true;
     }
+
+    /// <summary>
+    /// Ranks candidates exactly like <see cref="CaptureCandidates"/>, but for the template-save
+    /// flow rather than mere display: each candidate's samples and the context median/MAD they
+    /// were ranked against (one <see cref="SplashDetector.RankWindows"/> call, one buffer
+    /// snapshot) are cached here under a generated id, so a later <see cref="SaveTemplate"/> can
+    /// persist audio and statistics that are guaranteed to match. Re-deriving stats at save time
+    /// instead would risk pairing a candidate with whatever the ring buffer holds by then - the
+    /// same failure class the Task 8 template pipeline had to be built around. Same cost as
+    /// <see cref="CaptureCandidates"/> - a full <see cref="SplashFeatures.ComputeBands"/> pass -
+    /// so call it from a background thread, never the dispatcher.
+    /// </summary>
+    public IReadOnlyList<(string Id, double Score, float[] Samples)> CaptureTemplateCandidates(uint processId, int maxResults)
+    {
+        var buffer = ReadRawBuffer(processId, out var count);
+        if (count == 0)
+            return Array.Empty<(string, double, float[])>();
+
+        var windowSampleCount = SplashFeatures.WindowFrames * SplashFeatures.HopSize;
+        var detector = SnapshotDetector();
+        var ranked = detector.RankWindows(
+            buffer.AsSpan(0, count), maxResults,
+            minSeparationSeconds: SplashFeatures.WindowFrames * (double)SplashFeatures.HopSize / SplashFeatures.SampleRate,
+            out var median, out var mad);
+
+        var results = new List<(string, double, float[])>(ranked.Count);
+        foreach (var (score, offsetSeconds) in ranked)
+        {
+            var startSample = (int)Math.Round(offsetSeconds * SplashFeatures.SampleRate);
+            var samples = new float[windowSampleCount];
+            var available = Math.Clamp(count - startSample, 0, windowSampleCount);
+            if (available > 0)
+                Array.Copy(buffer, startSample, samples, 0, available);
+
+            var id = Guid.NewGuid().ToString("N");
+            _pendingCandidates[id] = new PendingCandidate(samples, median, mad);
+            results.Add((id, score, samples));
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Persists a candidate handed back by <see cref="CaptureTemplateCandidates"/> as a named
+    /// user template, using the samples and context stats cached at capture time. Null if the
+    /// candidate id is unknown - the cache is not persisted, so this is expected after a restart,
+    /// or if the same candidate is saved twice (the entry is consumed on first save).
+    /// </summary>
+    public string? SaveTemplate(string candidateId, string name)
+    {
+        if (!_pendingCandidates.TryRemove(candidateId, out var pending))
+            return null;
+
+        return _templateStore.Save(name, pending.Samples, pending.Median, pending.Mad);
+    }
+
+    /// <summary>Pass-through to <see cref="SplashTemplateStore.Delete"/> - kept encapsulated here
+    /// rather than exposing the store itself, so this service stays the one owner of it.</summary>
+    public bool DeleteTemplate(string templateId) => _templateStore.Delete(templateId);
+
+    /// <summary>Pass-through to <see cref="SplashTemplateStore.Templates"/>, same reasoning as
+    /// <see cref="DeleteTemplate"/>.</summary>
+    public IReadOnlyList<SplashTemplate> Templates => _templateStore.Templates;
 
     /// <summary>
     /// Test-only hook. Runs exactly the decision code the real detection tick runs once it has
