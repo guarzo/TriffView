@@ -245,12 +245,25 @@ public class TriffAudioServiceTests : IDisposable
     [InlineData("no-such-candidate")]
     public void SaveTemplateRejectsACandidateIdThatNamesNothing(string? candidateId)
     {
-        // PendingCandidate is a struct, so a FirstOrDefault miss used to yield a default whose Id
-        // is null - which a null candidateId then "matched", saving a template built from null
-        // samples. A blank id arrives whenever the web message omits the field.
-        using var svc = CreateService();
+        // PendingCandidate is a struct, so a FirstOrDefault miss over a client's candidate list
+        // yielded a default whose Id is null - which a null candidateId then "matched", saving a
+        // template built from null samples. A blank id arrives whenever the web message omits the
+        // field.
+        //
+        // The capture below is what makes this a regression test rather than a tautology: the
+        // buggy comparison lived inside a foreach over _pendingCandidatesByClient.Values, which
+        // only CaptureTemplateCandidates ever populates, and which returns before storing
+        // anything while the ring is empty. With no stored entry the loop body never ran, and the
+        // pre-fix code returned (null, false) for the same reason the fixed code does.
+        using var started = new CountdownEvent(1);
+        using var svc = CreateService(started);
         svc.UpdateSettings(enabled: true, threshold: 0.35);
         svc.SetClients(new[] { (1234u, "Pilot") });
+        WaitForCaptureStarts(started);
+        WarmUp(svc, 1234u, seed: 11);
+
+        var captured = svc.CaptureTemplateCandidates(1234u, maxResults: 3);
+        Assert.NotEmpty(captured);                     // an entry now exists to be searched
 
         var (id, candidateFound) = svc.SaveTemplate(candidateId!, "name");
 

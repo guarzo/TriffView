@@ -83,6 +83,27 @@ public class ExternalAlertTests
         Assert.Equal(0, Volatile.Read(ref count));
     }
 
+    [Theory]
+    [InlineData("not_a_real_event")]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void TestAlertFallsBackToAttackForATypeItCannotResolve(string? type)
+    {
+        // Same indexer as RaiseExternalAlert reached, same KeyNotFoundException inside the lock;
+        // the preview button substitutes "attack" here rather than doing nothing, matching what
+        // it already did for a blank type.
+        using var svc = NewService(out _);
+        TriffAlertEvent? seen = null;
+        using var gate = new ManualResetEventSlim();
+        svc.AlertTriggered += (_, e) => { seen = e; gate.Set(); };
+
+        svc.TestAlert(type, "Pilot");
+
+        Assert.True(Wait(gate), "AlertTriggered did not fire within 5s");
+        Assert.Equal("attack", seen!.Type);
+    }
+
     [Fact]
     public void SplashThresholdIsClamped()
     {

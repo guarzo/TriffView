@@ -476,6 +476,13 @@ public sealed class TriffAlertsService : IDisposable
         lock (_gate)
         {
             _settings.Normalize();
+            // Same defect RaiseExternalAlert's guard closes: BuildEvent resolves the type through
+            // a dictionary indexer, so a type from a web message that is neither configured nor a
+            // default throws KeyNotFoundException inside the lock. An unknown one falls back to
+            // the same "attack" this method already substitutes for a blank type, keeping the
+            // preview button total rather than silently doing nothing.
+            if (!_settings.HasEvent(cleanType)) cleanType = "attack";
+
             alert = BuildEvent(cleanType, cleanCharacter, "TriffAlerts test", "Preview flash test", test: true);
             AppendHistoryLocked(alert);
         }

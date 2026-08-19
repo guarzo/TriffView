@@ -1300,7 +1300,7 @@ internal sealed class TriffViewController : IDisposable
             // a shutdown that starts while it is running.
             if (_disposed) return;
 
-            PostAudioSafely("capture-result", () => _postToHud(new
+            var posted = PostAudioSafely("capture-result", () => _postToHud(new
             {
                 type = "triffaudio:capture-result",
                 clientKey,
@@ -1311,6 +1311,12 @@ internal sealed class TriffViewController : IDisposable
                     wavBase64 = Convert.ToBase64String(SplashTemplate.WriteWav(candidate.Samples, out _)),
                 }).ToArray(),
             }));
+
+            // This post is also what resolves the pending request, so a failure has to fall back
+            // to resolving it some other way or the settings UI stays on "Capturing..." forever.
+            // The fallback goes through the same channel that just failed, so it is a long shot -
+            // but it costs nothing and it is the behaviour the handler's own catch used to give.
+            if (!posted) PostCaptureResult(clientKey, "failed");
         }
         catch (Exception ex)
         {
@@ -1347,16 +1353,22 @@ internal sealed class TriffViewController : IDisposable
     ///
     /// Deliberately narrow: it wraps only the reporting call, not a handler body. The handlers
     /// keep their own try/catch for their actual work.
+    ///
+    /// Returns false when the post failed, so a caller whose success report also resolves a
+    /// pending UI state can still fall back to resolving it - before this existed, that fallback
+    /// came from the handler's own catch, which no longer sees the throw.
     /// </summary>
-    private void PostAudioSafely(string what, Action post)
+    private bool PostAudioSafely(string what, Action post)
     {
         try
         {
             post();
+            return true;
         }
         catch (Exception ex)
         {
             TriffViewDiagnostics.Log("splash-audio", $"failed to post {what}: {ex.Message}");
+            return false;
         }
     }
 
@@ -1450,13 +1462,19 @@ internal sealed class TriffViewController : IDisposable
             var wav = await Task.Run(() => _audio.GetTemplateAudio(templateId));
             if (_disposed) return;
 
-            PostAudioSafely("template-audio-result", () => _postToHud(new
+            var posted = PostAudioSafely("template-audio-result", () => _postToHud(new
             {
                 type = "triffaudio:template-audio-result",
                 templateId,
                 wavBase64 = wav is null ? null : Convert.ToBase64String(wav),
                 found = wav is not null,
             }));
+
+            // Same reasoning as the capture handler's fallback: this post is what stops the play
+            // button's "loading" state, so a failure still has to try to resolve the request.
+            if (!posted)
+                PostAudioSafely("template-audio-result", () => _postToHud(
+                    new { type = "triffaudio:template-audio-result", templateId, wavBase64 = (string?)null, found = false }));
         }
         catch (Exception ex)
         {
