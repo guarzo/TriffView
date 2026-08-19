@@ -21,7 +21,7 @@ public static class SplashFeatures
 
     /// <summary>
     /// Computes a log-magnitude, geometrically-banded spectrogram from raw samples.
-    /// Returns a [BandCount, frames] array where frames = floor((samples.Length - FftSize) / HopSize) + 1.
+    /// Returns a [BandCount, frames] array where frames = samples.Length / HopSize.
     /// </summary>
     public static float[,] ComputeBands(ReadOnlySpan<float> samples)
     {

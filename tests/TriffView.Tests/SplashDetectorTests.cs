@@ -21,6 +21,25 @@ public class SplashDetectorTests
     }
 
     [Fact]
+    public void ScoresWindowZeroCorrectlyWhenNotTheOnlyWindow()
+    {
+        // A 376-frame buffer (WindowFrames) is exactly one window, so ScoresAShippedTemplateAgainstItselfNearOne
+        // above cannot catch a single-window-scoring bug: it scores "window 0" whether the
+        // implementation scans every window or only the trailing one. Append 2 s of silence so
+        // the buffer is 752 frames, the scan evaluates starts 0..329, and window 0 (the real
+        // splash) must still score ~1.0 even though it is no longer the trailing window.
+        var det = new SplashDetector(TestTemplates.LoadShipped());
+        var samples = TestTemplates.LoadShippedSamples(0);
+        var (median, mad) = TestTemplates.LoadShippedStats(0);
+
+        var padded = new float[samples.Length + SplashFeatures.SampleRate * 2];
+        samples.CopyTo(padded, 0);
+
+        Assert.True(det.Score(padded, median, mad) > 0.95,
+            "window 0 must still score ~1.0 once it is no longer the trailing window");
+    }
+
+    [Fact]
     public void ScoresSilenceFarBelowThreshold()
     {
         var det = new SplashDetector(TestTemplates.LoadShipped());

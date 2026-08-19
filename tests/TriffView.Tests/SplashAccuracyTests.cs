@@ -10,15 +10,15 @@ using Xunit;
 public class SplashAccuracyTests
 {
     [Theory]
-    [InlineData("splash-a.wav", true)]
-    [InlineData("splash-b.wav", true)]
-    [InlineData("splash-c.wav", true)]
-    [InlineData("splash-d.wav", true)]
-    [InlineData("warp-a.wav", false)]
-    [InlineData("warp-b.wav", false)]
-    [InlineData("weapons-a.wav", false)]
-    [InlineData("ambient-a.wav", false)]
-    public void ClassifiesFixturesCorrectlyAtDefaultThreshold(string file, bool isSplash)
+    [InlineData("splash-a.wav", true, 0.6801)]
+    [InlineData("splash-b.wav", true, 0.7087)]
+    [InlineData("splash-c.wav", true, 0.6242)]
+    [InlineData("splash-d.wav", true, 0.6737)]
+    [InlineData("warp-a.wav", false, 0.1511)]
+    [InlineData("warp-b.wav", false, 0.0703)]
+    [InlineData("weapons-a.wav", false, 0.3183)]
+    [InlineData("ambient-a.wav", false, 0.1528)]
+    public void ClassifiesFixturesCorrectlyAtDefaultThreshold(string file, bool isSplash, double expected)
     {
         var det = new SplashDetector(TestTemplates.LoadShipped());
         var dir = Path.Combine(AppContext.BaseDirectory, "fixtures", "splash-accuracy");
@@ -38,5 +38,11 @@ public class SplashAccuracyTests
         var score = det.Score(samples, median, mad);
         if (isSplash) Assert.True(score >= 0.35, $"{file} scored {score:F3}, expected >= 0.35");
         else          Assert.True(score <  0.35, $"{file} scored {score:F3}, expected < 0.35");
+
+        // Binary classification alone is too weak a guard: earlier broken rounds still passed
+        // 6/8 while scores were far from the reference (e.g. splash-a at 0.395 and 0.360
+        // against a reference of 0.694). Pin the actual value so a regression that keeps the
+        // same side of the threshold still fails here.
+        Assert.InRange(score, expected - 0.02, expected + 0.02);
     }
 }
