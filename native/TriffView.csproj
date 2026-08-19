@@ -39,6 +39,8 @@
     <EmbeddedResource Include="Assets\overlay-dist.zip"
                       Condition="Exists('Assets\overlay-dist.zip')"
                       LogicalName="TriffView.Assets.overlay-dist.zip" />
+    <EmbeddedResource Include="TriffAudio\Assets\splash-templates\*.wav" />
+    <EmbeddedResource Include="TriffAudio\Assets\splash-templates\*.json" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(UpdateRepository)' != ''">
