@@ -25,6 +25,26 @@ internal sealed class SplashTemplateStore
     // read here sees either the old, complete array or the new one, never a partial one.
     private volatile IReadOnlyList<SplashTemplate> _templates = Array.Empty<SplashTemplate>();
 
+    /// <summary>
+    /// Serialises the three writers - <see cref="Save"/>, <see cref="Delete"/> and
+    /// <see cref="Reload"/>. **They may run concurrently on thread-pool threads**: the settings-UI
+    /// handlers in TriffViewController hand all of them to <c>Task.Run</c>, since each ends in
+    /// file IO or a full re-parse of every built-in and none may sit on the WPF dispatcher. Do not
+    /// assume a single writer here, however UI-driven the calls look from the outside.
+    ///
+    /// The lock is what makes the publish-swap above safe. Without it, each writer computes its
+    /// new list from a snapshot of <c>_templates</c> taken before its own file IO, so a Delete
+    /// spanning a Save publishes a list built before that Save existed: the just-saved template
+    /// vanishes from the in-memory list - and from <see cref="GetAudio"/> and <see cref="Delete"/>
+    /// by id with it - until the next save or a restart, while the files on disk stay correct.
+    /// Readers still take no lock; they only ever see one whole array or another.
+    ///
+    /// Reentrant by design: <see cref="Save"/> holds it across its own call to
+    /// <see cref="Reload"/>. Contention costs nothing at these rates - a template is saved or
+    /// deleted by hand, at most.
+    /// </summary>
+    private readonly object _writeGate = new();
+
     public SplashTemplateStore(string userTemplateDirectory)
     {
         _userTemplateDirectory = userTemplateDirectory;
@@ -35,10 +55,13 @@ internal sealed class SplashTemplateStore
 
     public void Reload()
     {
-        var loaded = new List<SplashTemplate>();
-        LoadBuiltIns(loaded);
-        LoadUserTemplates(loaded);
-        _templates = loaded;
+        lock (_writeGate)
+        {
+            var loaded = new List<SplashTemplate>();
+            LoadBuiltIns(loaded);
+            LoadUserTemplates(loaded);
+            _templates = loaded;
+        }
     }
 
     /// <summary>
@@ -57,24 +80,29 @@ internal sealed class SplashTemplateStore
         var wavPath = Path.Combine(_userTemplateDirectory, id + ".wav");
         var jsonPath = Path.Combine(_userTemplateDirectory, id + ".json");
 
-        try
+        // Held across the write and the Reload it triggers - see _writeGate.
+        lock (_writeGate)
         {
-            Directory.CreateDirectory(_userTemplateDirectory);
-            File.WriteAllBytes(wavPath, wav);
-            File.WriteAllBytes(jsonPath, json);
-        }
-        catch (Exception ex)
-        {
-            TriffViewDiagnostics.Log("splash-templates", $"failed to save template '{name}': {ex.Message}");
+            try
+            {
+                Directory.CreateDirectory(_userTemplateDirectory);
+                File.WriteAllBytes(wavPath, wav);
+                File.WriteAllBytes(jsonPath, json);
+            }
+            catch (Exception ex)
+            {
+                TriffViewDiagnostics.Log("splash-templates", $"failed to save template '{name}': {ex.Message}");
 
-            // A half-written pair (WAV present, JSON missing) would be skipped by
-            // LoadUserTemplates on every later Reload, forever. Best-effort cleanup.
-            TryDelete(wavPath);
-            TryDelete(jsonPath);
-            return null;
+                // A half-written pair (WAV present, JSON missing) would be skipped by
+                // LoadUserTemplates on every later Reload, forever. Best-effort cleanup.
+                TryDelete(wavPath);
+                TryDelete(jsonPath);
+                return null;
+            }
+
+            Reload();
         }
 
-        Reload();
         return id;
     }
 
@@ -156,23 +184,29 @@ internal sealed class SplashTemplateStore
 
     public bool Delete(string id)
     {
-        var current = _templates;
-        var existing = current.FirstOrDefault(t => t.Id == id);
-        if (existing is null || existing.BuiltIn)
-            return false;
+        // Held across the snapshot, the file IO and the publish - see _writeGate. Reading
+        // _templates outside it and publishing a list derived from that stale snapshot is exactly
+        // how a concurrent Save gets silently dropped from the in-memory list.
+        lock (_writeGate)
+        {
+            var current = _templates;
+            var existing = current.FirstOrDefault(t => t.Id == id);
+            if (existing is null || existing.BuiltIn)
+                return false;
 
-        var wavPath = Path.Combine(_userTemplateDirectory, id + ".wav");
-        var jsonPath = Path.Combine(_userTemplateDirectory, id + ".json");
+            var wavPath = Path.Combine(_userTemplateDirectory, id + ".wav");
+            var jsonPath = Path.Combine(_userTemplateDirectory, id + ".json");
 
-        // Deleting is best-effort for the same reason Save's write is (see there): a file locked
-        // or a directory turned read-only must not throw out of a web-message handler.
-        var deletedAny = TryDelete(wavPath);
-        deletedAny |= TryDelete(jsonPath);
+            // Deleting is best-effort for the same reason Save's write is (see there): a file
+            // locked or a directory turned read-only must not throw out of a web-message handler.
+            var deletedAny = TryDelete(wavPath);
+            deletedAny |= TryDelete(jsonPath);
 
-        if (deletedAny)
-            _templates = current.Where(t => t.Id != id).ToList();
+            if (deletedAny)
+                _templates = current.Where(t => t.Id != id).ToList();
 
-        return deletedAny;
+            return deletedAny;
+        }
     }
 
     /// <summary>

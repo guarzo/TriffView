@@ -71,8 +71,21 @@ public class TriffAudioServiceTests : IDisposable
             // TriffAudioService.StartCapture installs the session's fresh buffers before calling
             // this, so a test that waits on the countdown here is guaranteed to feed samples into
             // the buffers the session will actually score.
-            if (_started is { CurrentCount: > 0 })
-                _started.Signal();
+            //
+            // Signal throws once the countdown reaches zero, and StartCapture calls Start with no
+            // try/catch of its own - the real WasapiProcessCapture.Start never throws, and a fake
+            // must honour the contract it stands in for or it invents a thread-pool crash the real
+            // code cannot have. A retried capture (backoff path) is exactly how an extra Start
+            // arrives after the countdown is done, so this is reachable, not theoretical.
+            try
+            {
+                _started?.Signal();
+            }
+            catch (InvalidOperationException)
+            {
+                // More starts than the test asked to wait for; the ordering it wanted already held.
+            }
+
             return true;
         }
 
