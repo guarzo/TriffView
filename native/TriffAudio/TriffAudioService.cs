@@ -122,7 +122,20 @@ internal sealed class TriffAudioService : IDisposable
         // Start building it now rather than waiting for first access, so the cost lands on a
         // thread-pool thread instead of stalling whichever WPF dispatcher call (SaveTemplate,
         // DeleteTemplate, ListTemplates, or the first detection tick) would otherwise trigger it.
-        ThreadPool.QueueUserWorkItem(_ => { _ = _templateStore.Value; });
+        // Wrapped in its own try/catch: SplashTemplateStore's constructor is meant to be total
+        // (see LoadUserTemplates), but Lazy<T>'s default mode caches and rethrows any exception
+        // that does escape on every later .Value access - including from the WPF dispatcher via
+        // ListTemplates/SaveTemplate/DeleteTemplate, and every 250 ms from SnapshotDetector via
+        // OnDetectionTick. Touching .Value here just forces the construction; nothing needs its
+        // result, so swallowing a failure here (already logged inside the store itself, and this
+        // line adds nothing that log line does not already say) simply means the cost was paid on
+        // this thread instead of avoided - the exception still surfaces normally to whichever
+        // caller triggers .Value next.
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { _ = _templateStore.Value; }
+            catch (Exception ex) { TriffViewDiagnostics.Log("splash-templates", $"template store construction failed: {ex.Message}"); }
+        });
 
         // Runs from the moment the service exists rather than only once enabled: the tick
         // itself no-ops while disabled, and starting it unconditionally means UpdateSettings
@@ -418,14 +431,17 @@ internal sealed class TriffAudioService : IDisposable
     /// <summary>
     /// Test-only hook. Runs one detection pass synchronously (bypassing the timer and its
     /// re-entrancy guard) and returns how long it took - the number this design most needed
-    /// measured rather than estimated from the algorithm's shape.
+    /// measured rather than estimated from the algorithm's shape - alongside how many clients
+    /// were actually scored. The count matters because a pass that skips every client (all still
+    /// warming up, or all torn down as unavailable) would otherwise produce a fast, misleadingly
+    /// green measurement of doing nothing.
     /// </summary>
-    internal TimeSpan RunDetectionPassForTests()
+    internal (TimeSpan Elapsed, int ScoredCount) RunDetectionPassForTests()
     {
         var stopwatch = Stopwatch.StartNew();
-        RunDetectionPass();
+        var scoredCount = RunDetectionPass();
         stopwatch.Stop();
-        return stopwatch.Elapsed;
+        return (stopwatch.Elapsed, scoredCount);
     }
 
     public void Dispose()
@@ -474,11 +490,11 @@ internal sealed class TriffAudioService : IDisposable
         }
     }
 
-    private void RunDetectionPass()
+    private int RunDetectionPass()
     {
         bool enabled;
         lock (_gate) enabled = _enabled;
-        if (!enabled) return;
+        if (!enabled) return 0;
 
         var now = DateTime.UtcNow;
         var toScore = new List<ClientSession>();
@@ -513,7 +529,7 @@ internal sealed class TriffAudioService : IDisposable
         foreach (var capture in toDispose)
             capture.Dispose();
 
-        if (toScore.Count == 0) return;
+        if (toScore.Count == 0) return 0;
 
         // SplashTemplateStore.Templates is a reference swap (Reload/Delete build a new list and
         // assign it), not a mutated-in-place one, so reading it once here and holding onto the
@@ -522,6 +538,7 @@ internal sealed class TriffAudioService : IDisposable
         // a partial one.
         var detector = SnapshotDetector();
 
+        var scoredCount = 0;
         foreach (var session in toScore)
         {
             var bandBuffer = session.BandBuffer;
@@ -541,7 +558,10 @@ internal sealed class TriffAudioService : IDisposable
             var patch = SplashFeatures.BuildPatch(windowBands, 0, session.ContextMedian, session.ContextMad!);
             var score = detector.ScorePatch(patch);
             EvaluateDetection(session, score);
+            scoredCount++;
         }
+
+        return scoredCount;
     }
 
     private SplashDetector SnapshotDetector() => new(_templateStore.Value.Templates);
@@ -599,6 +619,14 @@ internal sealed class TriffAudioService : IDisposable
         // (or lack of it) the old buffers held. Captured locally rather than resolved through
         // `session.Ring`/`session.BandBuffer` inside the capture callback below, so the
         // callback always writes to the buffers this particular capture attempt created.
+        //
+        // This local binding is also what makes IAudioCapture's disposal looseness survivable:
+        // Dispose does not guarantee its callback thread has stopped, so a leaked callback can
+        // fire after a session moves on to a new capture attempt (or is torn down entirely). Because
+        // the callback closes over this attempt's own `ring`/`bandBuffer` rather than reading them
+        // back off `session`, a stray late callback writes into buffers nothing else uses anymore
+        // instead of corrupting a later attempt's still-live ones. Do not "simplify" this back to
+        // reading through `session` - that would remove the property this depends on.
         var ring = new AudioRingBuffer(RingCapacitySamples);
         var bandBuffer = new RollingBandBuffer(SplashFeatures.ContextFrames);
 

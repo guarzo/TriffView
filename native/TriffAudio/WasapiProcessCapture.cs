@@ -17,6 +17,17 @@ internal interface IAudioCapture : IDisposable
     DateTime LastPacketUtc { get; }
 
     bool Start(out string? error);
+
+    // Disposal contract, binding on every implementation (not just the real one):
+    //
+    // - Dispose is best-effort: it must never throw, and it does not guarantee the capture
+    //   callback has stopped by the time it returns. WasapiProcessCapture deliberately trades a
+    //   guaranteed-stopped callback for never risking a fatal background-thread exception (see
+    //   Dispose's own comment) - callers must tolerate a callback invocation arriving briefly
+    //   after Dispose returns.
+    // - The capture's own worker thread (if it has one) must never let an exception escape it,
+    //   for the same reason: an unhandled exception on a background thread takes the whole
+    //   process down with it.
 }
 
 /// <summary>

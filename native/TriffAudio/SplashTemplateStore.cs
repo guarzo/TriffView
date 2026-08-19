@@ -146,52 +146,68 @@ internal sealed class SplashTemplateStore
     /// </summary>
     private void LoadUserTemplates(List<SplashTemplate> target)
     {
-        if (!Directory.Exists(_userTemplateDirectory))
-            return;
-
-        var wavPaths = Directory.EnumerateFiles(_userTemplateDirectory, "*.wav")
-            .ToDictionary(p => Path.GetFileNameWithoutExtension(p)!, p => p, StringComparer.OrdinalIgnoreCase);
-        var jsonPaths = Directory.EnumerateFiles(_userTemplateDirectory, "*.json")
-            .ToDictionary(p => Path.GetFileNameWithoutExtension(p)!, p => p, StringComparer.OrdinalIgnoreCase);
-
-        var ids = wavPaths.Keys.Union(jsonPaths.Keys, StringComparer.OrdinalIgnoreCase);
-
-        foreach (var id in ids)
+        // The whole body is one try/catch, not just the individual file reads below: Directory.Exists
+        // above a Directory.EnumerateFiles call is inherently TOCTOU (the directory can vanish or
+        // become unreadable between the two), and a case-only filename collision makes the
+        // ToDictionary calls throw ArgumentException. This runs from the constructor, off the
+        // calling thread (see TriffAudioService's constructor), so an escape here is an unhandled
+        // exception on a thread-pool thread - and, worse, Lazy<T> would cache and rethrow it on
+        // every subsequent access. A broken user-template directory must degrade to "no user
+        // templates", the same policy LoadBuiltIns already applies to a broken embed, not to a
+        // crash loop.
+        try
         {
-            if (!wavPaths.TryGetValue(id, out var wavPath))
-            {
-                TriffViewDiagnostics.Log("splash-templates", $"user template '{id}' has a stats file but no matching .wav; skipped.");
-                continue;
-            }
+            if (!Directory.Exists(_userTemplateDirectory))
+                return;
 
-            if (!jsonPaths.TryGetValue(id, out var jsonPath))
-            {
-                TriffViewDiagnostics.Log("splash-templates", $"user template '{id}' has a .wav but no matching stats file; skipped.");
-                continue;
-            }
+            var wavPaths = Directory.EnumerateFiles(_userTemplateDirectory, "*.wav")
+                .ToDictionary(p => Path.GetFileNameWithoutExtension(p)!, p => p, StringComparer.OrdinalIgnoreCase);
+            var jsonPaths = Directory.EnumerateFiles(_userTemplateDirectory, "*.json")
+                .ToDictionary(p => Path.GetFileNameWithoutExtension(p)!, p => p, StringComparer.OrdinalIgnoreCase);
 
-            byte[] wavBytes;
-            byte[] jsonBytes;
-            try
-            {
-                wavBytes = File.ReadAllBytes(wavPath);
-                jsonBytes = File.ReadAllBytes(jsonPath);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                TriffViewDiagnostics.Log("splash-templates", $"failed to read user template '{id}': {ex.Message}");
-                continue;
-            }
+            var ids = wavPaths.Keys.Union(jsonPaths.Keys, StringComparer.OrdinalIgnoreCase);
 
-            var name = TryReadName(jsonBytes) ?? id;
-            var template = SplashTemplate.FromWav(id, name, builtIn: false, wavBytes, jsonBytes);
-            if (template is null)
+            foreach (var id in ids)
             {
-                TriffViewDiagnostics.Log("splash-templates", $"user template '{id}' failed to parse; skipped.");
-                continue;
-            }
+                if (!wavPaths.TryGetValue(id, out var wavPath))
+                {
+                    TriffViewDiagnostics.Log("splash-templates", $"user template '{id}' has a stats file but no matching .wav; skipped.");
+                    continue;
+                }
 
-            target.Add(template);
+                if (!jsonPaths.TryGetValue(id, out var jsonPath))
+                {
+                    TriffViewDiagnostics.Log("splash-templates", $"user template '{id}' has a .wav but no matching stats file; skipped.");
+                    continue;
+                }
+
+                byte[] wavBytes;
+                byte[] jsonBytes;
+                try
+                {
+                    wavBytes = File.ReadAllBytes(wavPath);
+                    jsonBytes = File.ReadAllBytes(jsonPath);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    TriffViewDiagnostics.Log("splash-templates", $"failed to read user template '{id}': {ex.Message}");
+                    continue;
+                }
+
+                var name = TryReadName(jsonBytes) ?? id;
+                var template = SplashTemplate.FromWav(id, name, builtIn: false, wavBytes, jsonBytes);
+                if (template is null)
+                {
+                    TriffViewDiagnostics.Log("splash-templates", $"user template '{id}' failed to parse; skipped.");
+                    continue;
+                }
+
+                target.Add(template);
+            }
+        }
+        catch (Exception ex)
+        {
+            TriffViewDiagnostics.Log("splash-templates", $"failed to load user templates from '{_userTemplateDirectory}': {ex.Message}");
         }
     }
 

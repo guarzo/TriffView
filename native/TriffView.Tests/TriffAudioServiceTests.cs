@@ -189,14 +189,16 @@ public class TriffAudioServiceTests : IDisposable
         // First pass also computes the once-per-second context stats (median/MAD); run it once
         // unmeasured so the timed pass reflects the common case where they are still fresh.
         svc.RunDetectionPassForTests();
-        var elapsed = svc.RunDetectionPassForTests();
+        var (elapsed, scoredCount) = svc.RunDetectionPassForTests();
 
         _output.WriteLine($"MEASURED one-client tick: {elapsed.TotalMilliseconds:F3} ms");
-        // This is a measurement, not a correctness assertion (see the section comment) - assert
-        // structurally that the pass actually scored the client, and only trip on catastrophic
-        // regressions an order of magnitude above the 250 ms tick budget, never on ordinary
-        // machine load.
-        Assert.Single(svc.Statuses);
+        // This is a measurement, not a correctness assertion (see the section comment), but it
+        // must still assert that the pass actually did the work being measured - ScoredCount
+        // catches the failure mode where every client is skipped (still warming up, or torn down
+        // as unavailable) and the "measurement" is really just timing an empty loop. Trip on
+        // catastrophic regressions an order of magnitude above the 250 ms tick budget, never on
+        // ordinary machine load.
+        Assert.Equal(1, scoredCount);
         Assert.True(elapsed < TimeSpan.FromSeconds(2), $"one-client tick took {elapsed.TotalMilliseconds:F2} ms, an order of magnitude above budget");
     }
 
@@ -215,12 +217,13 @@ public class TriffAudioServiceTests : IDisposable
             WarmUp(svc, clients[i].ProcessId, seed: i + 1);
 
         svc.RunDetectionPassForTests();
-        var elapsed = svc.RunDetectionPassForTests();
+        var (elapsed, scoredCount) = svc.RunDetectionPassForTests();
 
         _output.WriteLine($"MEASURED six-client tick: {elapsed.TotalMilliseconds:F3} ms");
-        // Measurement, not correctness (see above) - assert structurally that all six clients
-        // were scored, and only trip on a catastrophic, order-of-magnitude regression.
-        Assert.Equal(6, svc.Statuses.Count);
+        // Measurement, not correctness (see above), but must confirm the pass actually scored all
+        // six clients rather than timing an empty loop; only trip on a catastrophic,
+        // order-of-magnitude regression.
+        Assert.Equal(6, scoredCount);
         Assert.True(elapsed < TimeSpan.FromSeconds(2), $"six-client tick took {elapsed.TotalMilliseconds:F2} ms, an order of magnitude above budget");
     }
 }
