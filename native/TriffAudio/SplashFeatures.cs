@@ -208,7 +208,7 @@ public static class SplashFeatures
         {
             var ratio = (double)b / BandCount;
             var hz = BandMinHz * Math.Pow(BandMaxHz / BandMinHz, ratio);
-            var bin = (int)Math.Floor(hz / binHz);
+            var bin = (int)Math.Ceiling(hz / binHz);
             edges[b] = Math.Clamp(bin, 0, half);
         }
 
