@@ -398,18 +398,27 @@ internal sealed class TriffAudioService : IDisposable
     /// </summary>
     public (string? Id, bool CandidateFound) SaveTemplate(string candidateId, string name)
     {
+        // A blank id can never name a real candidate, and it is what arrives when the web message
+        // omits the field entirely. Rejected up front so the search below never has to reason
+        // about it: PendingCandidate is a struct, so a FirstOrDefault miss yields a default whose
+        // Id is null - which a null candidateId would then "match", saving a null-sample template.
+        if (string.IsNullOrWhiteSpace(candidateId))
+            return (null, false);
+
         PendingCandidate? found = null;
 
         lock (_gate)
         {
             foreach (var candidates in _pendingCandidatesByClient.Values)
             {
-                var match = candidates.FirstOrDefault(c => c.Id == candidateId);
-                if (match.Id == candidateId)
+                foreach (var candidate in candidates)
                 {
-                    found = match;
+                    if (!string.Equals(candidate.Id, candidateId, StringComparison.Ordinal)) continue;
+                    found = candidate;
                     break;
                 }
+
+                if (found is not null) break;
             }
         }
 
@@ -833,7 +842,6 @@ internal sealed class TriffAudioService : IDisposable
         public IAudioCapture? Capture;
         public bool StartInProgress;
         public DateTime StartedUtc = DateTime.UtcNow;
-        public DateTime LastNonZeroUtc = DateTime.UtcNow;
         public int FailedAttempts;
         public DateTime NextRetryUtc = DateTime.MinValue;
 
@@ -847,6 +855,21 @@ internal sealed class TriffAudioService : IDisposable
         {
             ProcessId = processId;
             CharacterName = characterName;
+        }
+
+        /// <summary>
+        /// Written on the capture thread from <see cref="OnSamples"/> and read from the detection
+        /// tick in <see cref="ComputeStatus"/>, so it is held as ticks behind interlocked
+        /// accessors: a plain <see cref="DateTime"/> is 8 bytes with no atomicity guarantee and
+        /// could be torn across those threads. Same reasoning the ring and band buffers already
+        /// apply to their own state.
+        /// </summary>
+        private long _lastNonZeroTicks = DateTime.UtcNow.Ticks;
+
+        public DateTime LastNonZeroUtc
+        {
+            get => new(Interlocked.Read(ref _lastNonZeroTicks), DateTimeKind.Utc);
+            set => Interlocked.Exchange(ref _lastNonZeroTicks, value.Ticks);
         }
 
         public void Dispose() => Capture?.Dispose();

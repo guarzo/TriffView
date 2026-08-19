@@ -62,8 +62,14 @@ internal sealed class WasapiProcessCapture : IAudioCapture
     }
 
     /// <summary>UTC time of the most recently delivered packet, updated even when the packet is
-    /// silence — this is "capture is alive", not "audio is playing".</summary>
-    public DateTime LastPacketUtc { get; private set; }
+    /// silence — this is "capture is alive", not "audio is playing".
+    ///
+    /// Written on the capture thread and read from the detection tick, so it is stored as ticks
+    /// behind interlocked accessors rather than as a plain 8-byte <see cref="DateTime"/> field,
+    /// which has no atomicity guarantee across threads.</summary>
+    public DateTime LastPacketUtc => new(Interlocked.Read(ref _lastPacketTicks), DateTimeKind.Utc);
+
+    private long _lastPacketTicks;
 
     /// <summary>
     /// Activates process-loopback capture for the target process and starts the capture thread.
@@ -80,6 +86,7 @@ internal sealed class WasapiProcessCapture : IAudioCapture
         try
         {
             IntPtr paramsPtr = IntPtr.Zero;
+            var activationAbandoned = false;
             try
             {
                 var activationParams = new AudioClientActivationParams
@@ -115,6 +122,12 @@ internal sealed class WasapiProcessCapture : IAudioCapture
                 // arbitrary MTA thread, hence IAgileObject on the handler) signals it is done.
                 if (!handler.Wait(TimeSpan.FromSeconds(5)))
                 {
+                    // The activation is still outstanding and the COM layer may read the blob at
+                    // paramsPtr whenever it finally runs, so the allocation is deliberately leaked
+                    // rather than freed - one abandoned struct costs a few dozen bytes, while
+                    // freeing it risks the activation touching freed memory. Start is only retried
+                    // behind a backoff, which bounds how often this can happen.
+                    activationAbandoned = true;
                     localError = "Timed out waiting for audio interface activation.";
                     return false;
                 }
@@ -139,7 +152,10 @@ internal sealed class WasapiProcessCapture : IAudioCapture
             }
             finally
             {
-                if (paramsPtr != IntPtr.Zero)
+                // Safe on every other path: either the completion handler has run (so nothing
+                // will read the blob again), or ActivateAudioInterfaceAsync itself threw, which
+                // with PreserveSig = false means the operation never started.
+                if (paramsPtr != IntPtr.Zero && !activationAbandoned)
                     Marshal.FreeHGlobal(paramsPtr);
             }
 
@@ -260,7 +276,7 @@ internal sealed class WasapiProcessCapture : IAudioCapture
 
             try
             {
-                LastPacketUtc = DateTime.UtcNow;
+                Interlocked.Exchange(ref _lastPacketTicks, DateTime.UtcNow.Ticks);
 
                 var stereoSamples = new float[framesAvailable * 2];
                 // AUDCLNT_BUFFERFLAGS_SILENT is not trustworthy here: a muted process delivers
