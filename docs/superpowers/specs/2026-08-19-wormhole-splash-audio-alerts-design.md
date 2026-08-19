@@ -31,7 +31,7 @@ All numbers below were measured on real recordings from the user's machine
 |---|---|
 | Per-process capture, 6 concurrent clients | 2.73% of one core, ~0.5%/client, 12 MB |
 | Packet granularity | ~10 ms |
-| Detection, held-out session | **P=0.87, R=0.95, F1=0.909** at threshold 0.30 |
+| Detection, held-out session | **P=0.84, R=1.00, F1=0.913** at threshold 0.35 |
 | Warp rejection (7 confirmed instances) | max score 0.19 |
 | Session with no splashes (35 s) | 0 false positives |
 
@@ -43,7 +43,7 @@ extracted clips.
 
 - **The splash is a sustained sound of over a second**, not a transient. Onset
   detection finds it at most 1 time in 8; a 2-second analysis window is required.
-- **Warp is the dominant confounder** and is cleanly rejected (0.19 vs 0.30
+- **Warp is the dominant confounder** and is cleanly rejected (0.19 vs 0.35
   threshold). Two earlier "signals" turned out to be warp and weapons.
 - **All discriminative content is below ~6 kHz.** Accuracy is identical at 48,
   24, 16 and 12 kHz, so the pipeline runs at 16 kHz — 3× less DSP and 3× smaller
@@ -103,7 +103,7 @@ context          trailing 30 s: per-band median and MAD, MAD floored at 1e-3
 window           2.0 s = 376 frames
 patch            (bands - median) / mad, flattened, mean-subtracted, L2-normalised
 score            max dot product over all templates
-threshold        0.30 (default, user-adjustable)
+threshold        0.35 (default, user-adjustable)
 evaluation rate  4 Hz (every 250 ms)
 ```
 
@@ -117,8 +117,14 @@ with** — a bare clip cannot be placed in the same feature space as a live wind
 
 ```
 splash-NN.wav    16 kHz mono 16-bit PCM, 2.0 s, peak-normalised to 0.95
-splash-NN.json   {"version":1,"sampleRate":16000,"median":[32],"mad":[32]}
+splash-NN.json   {"version":1,"sampleRate":16000,"gain":G,"median":[32],"mad":[32]}
 ```
+
+`gain` is the scale factor applied when writing the WAV (clips are peak-normalised
+so quiet ones survive 16-bit quantisation). **Readers must divide the samples by
+`gain` before feature extraction.** Skipping this was measured to destroy
+separation entirely — quiet negatives get amplified ~200x and read as large
+deviations from their own context median, scoring as high as real splashes.
 
 Shipped templates are embedded (`EmbeddedResource`, matching the existing
 `overlay-dist.zip` pattern). User templates live in
@@ -225,12 +231,24 @@ rest of the alerts settings):
 
 ```csharp
 public bool SplashDetectionEnabled { get; set; }       // default false
-public double SplashThreshold { get; set; }            // default 0.30, clamped 0.10-0.90
+public double SplashThreshold { get; set; }            // default 0.35, clamped 0.10-0.90
 ```
 
 Clamping goes in `TriffAlertsSettings.Normalize()`, per the project rule that
 invariants live in `Normalize()` rather than at call sites. Both need a `case` in
 `ApplyAlertsPatch` — a new field with no case silently no-ops.
+
+## Warm-up
+
+Scores are only meaningful once the rolling context is populated. Measured: with
+only 3 s of context, splash scores fall to 0.22-0.24 while non-splashes reach
+0.24 — the classes stop separating entirely.
+
+**Rule: no alert is raised for a client until its ring buffer holds at least 30 s
+of audio.** Status stays `monitoring` during warm-up; the user is not told the
+detector is warming up, because on a client that has just appeared there is
+nothing actionable to report. A client whose buffer is reset (stream death and
+re-activation) starts its warm-up again.
 
 ## Concurrency
 
