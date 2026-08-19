@@ -314,12 +314,12 @@ independent grounds. Recorded here so it is not re-proposed.
 
 ## Documentation correction
 
-`CLAUDE.md` states there is one test project with a `<Compile Include>`
-constraint. There are three targets: `tests/TriffView.Tests` (net8.0,
+`CLAUDE.md` stated there was one test project with a `<Compile Include>`
+constraint. There are in fact three targets: `tests/TriffView.Tests` (net8.0,
 cross-platform, individually linked — as documented, run by
 `.github/workflows/build.yml:29-30`), `native/TriffView.Tests` (net8.0-windows,
 `ProjectReference` + `InternalsVisibleTo`, 27 test files, run by
 `.github/workflows/ci.yml:49-55`), and the `tests/TriffAlerts.Tests` regression
 harness invoked via `dotnet run` (`.github/workflows/ci.yml:58`). The documented
-constraint applies only to the first. This should be corrected as part of this
-work.
+constraint applies only to the first. Corrected in `CLAUDE.md`, which also gained
+a section on the audio subsystem's fixed detector constants and failure modes.
