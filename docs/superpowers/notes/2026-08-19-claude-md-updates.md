@@ -1,15 +1,12 @@
-# CLAUDE.md updates applied to the dotfiles overlay (2026-08-19)
+# CLAUDE.md updates applied to the external overlay (2026-08-19)
 
-`CLAUDE.md` at the repo root is a symlink to
-`/home/tng/.dotfiles/projects/TriffView/CLAUDE.md`, kept out of this repo's git history on
-purpose (`.gitignore`: `# Personal Claude Code config that lives alongside project repos via
-symlink ... Keep it out of public/open-source commits.` — `CLAUDE.md` is one of the patterns
-listed). That overlay is itself outside this repo's git history, so this note is the only record
-in this branch that the documentation half of Task 11 happened.
+`CLAUDE.md` at the repo root is a symlink into a personal configuration overlay that lives
+outside this repository, kept out of its git history on purpose (`.gitignore`: `# Personal Claude
+Code config that lives alongside project repos via symlink ... Keep it out of public/open-source
+commits.` — `CLAUDE.md` is one of the patterns listed). Because that overlay is not versioned
+here, this note is the only record in this branch that the documentation half of Task 11 happened.
 
-Two amendments were applied directly to the real file
-(`/home/tng/.dotfiles/projects/TriffView/CLAUDE.md`, not committed — that repo has unrelated
-pre-existing uncommitted state in `ai/claude/settings.json` which was left untouched):
+Two amendments were applied directly to the overlay's copy of the file:
 
 ## 1. Testing section corrected
 
@@ -33,10 +30,14 @@ Placed after "Coordinate spaces" and before the (rewritten) "Testing" section, m
 existing pattern of a dedicated section per tricky subsystem. Covers, each verified against the
 actual code rather than assumed:
 
-- The detector constants read directly from `SplashFeatures.cs` (16 kHz, FFT 1024, hop 85, 32
-  bands over `geomspace(80, 7600)`, 2.0 s/376-frame window, 30 s/5647-frame context, MAD floor
-  `1e-3`, default threshold 0.35 from `TriffAudioService.cs:98`) and that changing any of them
-  invalidates the 11 committed template assets under `native/TriffAudio/Assets/splash-templates/`.
+- The feature-generation and normalisation constants read directly from `SplashFeatures.cs`
+  (16 kHz, FFT 1024, hop 85, 32 bands over `geomspace(80, 7600)`, 2.0 s/376-frame window,
+  30 s/5647-frame context, MAD floor `1e-3`) — changing any of *these* invalidates the 11
+  committed template assets under `native/TriffAudio/Assets/splash-templates/`, because they
+  determine how those templates were generated.
+- Separately, the default threshold (0.35, `TriffAudioService.cs`) is a runtime comparison against
+  a score. It changes sensitivity only; it plays no part in generating templates and changing it
+  invalidates nothing.
 - The template/gain contract (`SplashTemplate.cs:82` divides samples by `stats.Gain`) and why
   skipping it breaks scoring.
 - The muted-client silent-failure mode: `AUDCLNT_BUFFERFLAGS_SILENT` is never set on a muted
