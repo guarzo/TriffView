@@ -6,11 +6,16 @@ namespace TriffView.Audio;
 
 /// <summary>
 /// Matches a buffer of samples against a set of splash templates, scoring by the maximum
-/// normalised dot product between the query patch and each template's patch. Pure BCL, so it
-/// links into the cross-platform test project like <see cref="SplashFeatures"/>.
+/// normalised dot product between the query patch and each template's patch, over every
+/// 250 ms-spaced window in the buffer. Pure BCL, so it links into the cross-platform test
+/// project like <see cref="SplashFeatures"/>.
 /// </summary>
 public sealed class SplashDetector
 {
+    /// <summary>250 ms between evaluated window starts, in frames (47 at 16 kHz / hop 85).</summary>
+    private static readonly int StepFrames =
+        Math.Max(1, (int)Math.Round(0.25 * SplashFeatures.SampleRate / SplashFeatures.HopSize));
+
     private readonly IReadOnlyList<SplashTemplate> _templates;
 
     public SplashDetector(IReadOnlyList<SplashTemplate> templates)
@@ -31,7 +36,7 @@ public sealed class SplashDetector
         var bands = SplashFeatures.ComputeBands(samples);
         var frameCount = bands.GetLength(1);
         SplashFeatures.ComputeContextStats(bands, frameCount, out var median, out var mad);
-        return ScoreCore(bands, frameCount - SplashFeatures.WindowFrames, median, mad);
+        return ScoreCore(bands, median, mad);
     }
 
     /// <summary>
@@ -42,8 +47,7 @@ public sealed class SplashDetector
     public double Score(ReadOnlySpan<float> samples, float[] median, float[] mad)
     {
         var bands = SplashFeatures.ComputeBands(samples);
-        var frameCount = bands.GetLength(1);
-        return ScoreCore(bands, frameCount - SplashFeatures.WindowFrames, median, mad);
+        return ScoreCore(bands, median, mad);
     }
 
     /// <summary>
@@ -59,13 +63,10 @@ public sealed class SplashDetector
         var frameCount = bands.GetLength(1);
         SplashFeatures.ComputeContextStats(bands, frameCount, out var median, out var mad);
 
-        const double stepSeconds = 0.25;
-        var stepFrames = Math.Max(1, (int)Math.Round(stepSeconds * SplashFeatures.SampleRate / SplashFeatures.HopSize));
-
         var candidates = new List<(double Score, double OffsetSeconds)>();
-        for (var startFrame = 0; startFrame + SplashFeatures.WindowFrames <= frameCount; startFrame += stepFrames)
+        for (var startFrame = 0; startFrame + SplashFeatures.WindowFrames <= frameCount; startFrame += StepFrames)
         {
-            var score = ScoreCore(bands, startFrame, median, mad);
+            var score = ScoreWindow(bands, startFrame, median, mad);
             var offsetSeconds = startFrame * (double)SplashFeatures.HopSize / SplashFeatures.SampleRate;
             candidates.Add((score, offsetSeconds));
         }
@@ -88,7 +89,32 @@ public sealed class SplashDetector
         return results;
     }
 
-    private double ScoreCore(float[,] bands, int startFrame, float[] median, float[] mad)
+    /// <summary>
+    /// Best score over every window in the buffer, spaced <see cref="StepFrames"/> apart. The
+    /// upper bound is exclusive (<c>start + WindowFrames &lt; frameCount</c>), matching the
+    /// reference implementation's <c>range(0, frames - WindowFrames, step)</c>; including the
+    /// final exactly-fitting window changes the scores of the accuracy fixtures. A buffer too
+    /// short to produce any window is still scored once, at frame 0, so an exactly-window-length
+    /// buffer (a template scored against itself) does not fall through to negative infinity.
+    /// </summary>
+    private double ScoreCore(float[,] bands, float[] median, float[] mad)
+    {
+        var frameCount = bands.GetLength(1);
+
+        var best = double.NegativeInfinity;
+        var scoredAny = false;
+        for (var startFrame = 0; startFrame + SplashFeatures.WindowFrames < frameCount; startFrame += StepFrames)
+        {
+            var score = ScoreWindow(bands, startFrame, median, mad);
+            if (score > best)
+                best = score;
+            scoredAny = true;
+        }
+
+        return scoredAny ? best : ScoreWindow(bands, 0, median, mad);
+    }
+
+    private double ScoreWindow(float[,] bands, int startFrame, float[] median, float[] mad)
     {
         var patch = SplashFeatures.BuildPatch(bands, startFrame, median, mad);
 
