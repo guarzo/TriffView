@@ -135,6 +135,9 @@ internal sealed class AlertSoundPlayer
     /// </summary>
     private static Uri? SoundResourceUri(string soundId) => soundId.ToLowerInvariant() switch
     {
+        "chime" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/chime.wav", UriKind.Absolute),
+        "bell" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/bell.wav", UriKind.Absolute),
+        "pulse" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/pulse.wav", UriKind.Absolute),
         "alarm" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/alarm.wav", UriKind.Absolute),
         "woop" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/woop.wav", UriKind.Absolute),
         "siren" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/siren.wav", UriKind.Absolute),

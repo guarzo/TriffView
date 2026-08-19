@@ -319,7 +319,14 @@ public sealed class TriffAlertEventConfig
     private static string NormalizeSound(string? sound)
     {
         var clean = (sound ?? "none").Trim().ToLowerInvariant();
-        return clean is "none" or "alarm" or "woop" or "siren" or "ding" ? clean : "none";
+        // Must list every id offered by ALERT_SOUND_OPTIONS in the settings UI and resolved by
+        // AlertSoundPlayer.SoundResourceUri. An id missing here is not rejected visibly - it is
+        // rewritten to "none", so the option appears in the dropdown and then silently never plays.
+        return clean is "none"
+            or "chime" or "bell" or "pulse"
+            or "alarm" or "woop" or "siren" or "ding"
+            ? clean
+            : "none";
     }
 
     private static string NormalizeColor(string? value, string fallback)

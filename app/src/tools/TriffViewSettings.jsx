@@ -121,8 +121,14 @@ const DEFAULT_ALERTS = {
   events: DEFAULT_ALERT_EVENTS,
 };
 
+// Softer tones first, then the original louder set. Every id here must also be accepted by
+// NormalizeSound in TriffAlertsService.cs and resolved in AlertSoundPlayer.cs, or the option
+// shows in the dropdown and silently plays nothing.
 const ALERT_SOUND_OPTIONS = [
   { value: "none", label: "None" },
+  { value: "chime", label: "Chime (soft)" },
+  { value: "bell", label: "Bell (soft)" },
+  { value: "pulse", label: "Pulse (soft)" },
   { value: "alarm", label: "Alarm" },
   { value: "woop", label: "Woop" },
   { value: "siren", label: "Siren" },
