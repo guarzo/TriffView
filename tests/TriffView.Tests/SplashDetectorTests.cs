@@ -56,8 +56,18 @@ public class SplashDetectorTests
 
         var top = det.RankWindows(buf, 3, 2.0);
         Assert.Equal(3, top.Count);                                   // never thresholded
+
+        // Results come back score-ordered, not offset-ordered, so adjacent entries say nothing
+        // about the separation guarantee - every pair has to be checked.
+        for (var i = 0; i < top.Count; i++)
+            for (var j = i + 1; j < top.Count; j++)
+                Assert.True(
+                    Math.Abs(top[i].OffsetSeconds - top[j].OffsetSeconds) >= 2.0,
+                    $"candidates {i} ({top[i].OffsetSeconds}s) and {j} ({top[j].OffsetSeconds}s) are closer than 2s apart");
+
         for (var i = 1; i < top.Count; i++)
-            Assert.True(Math.Abs(top[i].OffsetSeconds - top[i - 1].OffsetSeconds) >= 2.0);
-        Assert.True(top[0].Score >= top[1].Score);
+            Assert.True(
+                top[i - 1].Score >= top[i].Score,
+                $"candidate {i} scored {top[i].Score} above its predecessor's {top[i - 1].Score}");
     }
 }

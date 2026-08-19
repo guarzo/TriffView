@@ -19,7 +19,7 @@ public class ExternalAlertTests
     [Fact]
     public void RaisesAndRecordsHistory()
     {
-        var svc = NewService(out _);
+        using var svc = NewService(out _);
         TriffAlertEvent? seen = null;
         using var gate = new ManualResetEventSlim();
         svc.AlertTriggered += (_, e) => { seen = e; gate.Set(); };
@@ -36,7 +36,7 @@ public class ExternalAlertTests
     [Fact]
     public void AppliesTheSameCooldownAsLogAlerts()
     {
-        var svc = NewService(out _);
+        using var svc = NewService(out _);
         var count = 0;
         using var gate = new ManualResetEventSlim();
         svc.AlertTriggered += (_, _) => { Interlocked.Increment(ref count); gate.Set(); };
@@ -55,13 +55,31 @@ public class ExternalAlertTests
         var settings = new TriffAlertsSettings { Enabled = true };
         settings.Normalize();
         settings.Events["wormhole_splash"].Enabled = false;
-        var svc = new TriffAlertsService(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
+        using var svc = new TriffAlertsService(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
         svc.UpdateSettings(settings);
 
         var count = 0;
         svc.AlertTriggered += (_, _) => Interlocked.Increment(ref count);
         svc.RaiseExternalAlert("wormhole_splash", "Pilot", "audio", "x");
         Thread.Sleep(500);                   // a disabled event must produce nothing at all
+        Assert.Equal(0, Volatile.Read(ref count));
+    }
+
+    [Theory]
+    [InlineData("not_a_real_event")]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void IgnoresAnUnknownEventType(string type)
+    {
+        // The type resolves through a dictionary indexer once past the guard, so an unknown one
+        // used to throw KeyNotFoundException out of a public method, inside the lock.
+        using var svc = NewService(out _);
+        var count = 0;
+        svc.AlertTriggered += (_, _) => Interlocked.Increment(ref count);
+
+        svc.RaiseExternalAlert(type, "Pilot", "audio", "x");
+
+        Thread.Sleep(500);
         Assert.Equal(0, Volatile.Read(ref count));
     }
 

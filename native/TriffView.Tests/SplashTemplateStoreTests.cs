@@ -54,6 +54,33 @@ public class SplashTemplateStoreTests
     }
 
     [Fact]
+    public void AUserFileWhoseStatsJsonIsNotAnObjectDoesNotHideLaterOnes()
+    {
+        // TryReadName caught only JsonException, but TryGetProperty throws
+        // InvalidOperationException when the root is an array or a bare string - which escaped to
+        // LoadUserTemplates' blanket catch and aborted the loop, so every user template sorting
+        // after the bad one silently vanished.
+        var dir = Path.Combine(Path.GetTempPath(), "tv-tmpl-" + Guid.NewGuid().ToString("N"));
+        var store = new SplashTemplateStore(dir);
+        var samples = new float[SplashFeatures.SampleRate * 2];
+        for (var i = 0; i < samples.Length; i++)
+            samples[i] = (float)Math.Sin(2 * Math.PI * 300.0 * i / SplashFeatures.SampleRate);
+        var bands = SplashFeatures.ComputeBands(samples);
+        SplashFeatures.ComputeContextStats(bands, bands.GetLength(1), out var med, out var mad);
+
+        // Named to sort after the bad pair, so the loop reaches it only if the bad one is skipped.
+        var id = store.Save("zzz-good", samples, med, mad);
+        Assert.NotNull(id);
+
+        File.WriteAllBytes(Path.Combine(dir, "aaa-bad.wav"), new byte[] { 1, 2, 3 });
+        File.WriteAllText(Path.Combine(dir, "aaa-bad.json"), "[1,2,3]");
+
+        store.Reload();                                    // must not throw
+        Assert.Contains(store.Templates, t => t.Id == id && !t.BuiltIn);
+        Assert.Equal(11, store.Templates.Count(t => t.BuiltIn));
+    }
+
+    [Fact]
     public void OrphanWavWithNoJsonIsSkippedNotFatal()
     {
         var dir = Path.Combine(Path.GetTempPath(), "tv-tmpl-" + Guid.NewGuid().ToString("N"));

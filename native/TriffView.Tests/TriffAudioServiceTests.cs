@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Threading;
+using TriffView.Alerts;
 using TriffView.Audio;
 using Xunit;
 
@@ -188,6 +189,74 @@ public class TriffAudioServiceTests : IDisposable
         using var svc = CreateService();
         svc.UpdateSettings(enabled: true, threshold: 0.35);
         Assert.Empty(svc.Statuses);
+    }
+
+    /// <summary>
+    /// What restoring a settings backup has to produce. TriffViewController.ReplaceSettings now
+    /// forwards the restored splash settings to the audio service and then refreshes (which
+    /// reaches SetClients); before that it forwarded only the alert settings, so a restore that
+    /// enabled splash detection never started capture. The controller itself cannot be
+    /// constructed in a unit test (its constructor creates the WinForms overlay and loads the
+    /// real settings file), so this drives the same two calls in the same order.
+    /// </summary>
+    [Fact]
+    public void RestoringSettingsThatEnableSplashDetectionStartsCapture()
+    {
+        var started = new CountdownEvent(1);
+        using var svc = CreateService(started);
+        svc.UpdateSettings(enabled: false, threshold: 0.35);
+        svc.SetClients(new[] { (1234u, "Pilot") });
+        Assert.Empty(svc.Statuses);                       // nothing capturing while disabled
+
+        var restored = new TriffAlertsSettings { SplashDetectionEnabled = true, SplashThreshold = 0.5 };
+        restored.Normalize();
+        svc.UpdateSettings(restored.SplashDetectionEnabled, restored.SplashThreshold);
+        svc.SetClients(new[] { (1234u, "Pilot") });
+
+        WaitForCaptureStarts(started);
+        var status = Assert.Single(svc.Statuses);
+        Assert.Equal(1234u, status.ProcessId);
+        Assert.NotEqual("off", status.Status);
+    }
+
+    /// <summary>The other direction of the same restore path - see the test above.</summary>
+    [Fact]
+    public void RestoringSettingsThatDisableSplashDetectionStopsCapture()
+    {
+        var started = new CountdownEvent(1);
+        using var svc = CreateService(started);
+        svc.UpdateSettings(enabled: true, threshold: 0.35);
+        svc.SetClients(new[] { (1234u, "Pilot") });
+        WaitForCaptureStarts(started);
+        Assert.Single(svc.Statuses);
+
+        var restored = new TriffAlertsSettings { SplashDetectionEnabled = false };
+        restored.Normalize();
+        svc.UpdateSettings(restored.SplashDetectionEnabled, restored.SplashThreshold);
+        svc.SetClients(new[] { (1234u, "Pilot") });
+
+        Assert.Empty(svc.Statuses);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("no-such-candidate")]
+    public void SaveTemplateRejectsACandidateIdThatNamesNothing(string? candidateId)
+    {
+        // PendingCandidate is a struct, so a FirstOrDefault miss used to yield a default whose Id
+        // is null - which a null candidateId then "matched", saving a template built from null
+        // samples. A blank id arrives whenever the web message omits the field.
+        using var svc = CreateService();
+        svc.UpdateSettings(enabled: true, threshold: 0.35);
+        svc.SetClients(new[] { (1234u, "Pilot") });
+
+        var (id, candidateFound) = svc.SaveTemplate(candidateId!, "name");
+
+        Assert.Null(id);
+        Assert.False(candidateFound);
+        Assert.DoesNotContain(svc.ListTemplates(), t => !t.BuiltIn);
     }
 
     [Fact]

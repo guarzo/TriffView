@@ -49,6 +49,68 @@ public class SplashTemplateTests
             SplashTemplate.WriteWav(samples, out _), bad));
     }
 
+    /// <summary>Valid stats for a Ramp(32000) clip, so a test can vary exactly one thing.</summary>
+    private static byte[] GoodStatsJson(float[] samples, double gain)
+    {
+        var bands = SplashFeatures.ComputeBands(samples);
+        SplashFeatures.ComputeContextStats(bands, bands.GetLength(1), out var med, out var mad);
+        return SplashTemplate.WriteStatsJson(gain, med, mad);
+    }
+
+    /// <summary>
+    /// FromWav must reject every malformed input by returning null rather than throwing:
+    /// SplashTemplateStore relies on that to skip one bad user file instead of aborting the
+    /// whole load. A throw from any of these fails the test on its own.
+    /// </summary>
+    [Theory]
+    [InlineData("{not json at all")]
+    [InlineData("")]
+    [InlineData("[1,2,3]")]                                       // valid JSON, non-object root
+    [InlineData("\"a string\"")]                                  // ditto
+    [InlineData("{\"version\":1,\"sampleRate\":16000,\"median\":[],\"mad\":[]}")]              // no gain
+    [InlineData("{\"version\":1,\"sampleRate\":16000,\"gain\":0.0,\"median\":[],\"mad\":[]}")]  // gain not positive
+    [InlineData("{\"version\":1,\"sampleRate\":16000,\"gain\":-2.0,\"median\":[],\"mad\":[]}")]
+    [InlineData("{\"version\":1,\"sampleRate\":16000,\"gain\":1.0,\"median\":\"nope\",\"mad\":[]}")] // median not an array
+    public void FromWav_ReturnsNullForMalformedStats(string statsJson)
+    {
+        var wav = SplashTemplate.WriteWav(Ramp(32000), out _);
+        Assert.Null(SplashTemplate.FromWav("x", "x", false,
+            wav, System.Text.Encoding.UTF8.GetBytes(statsJson)));
+    }
+
+    [Theory]
+    [InlineData(0)]                                               // empty
+    [InlineData(SplashFeatures.BandCount - 1)]                    // too short
+    [InlineData(SplashFeatures.BandCount + 1)]                    // too long
+    public void FromWav_ReturnsNullForWrongLengthStatsArrays(int length)
+    {
+        var samples = Ramp(32000);
+        var wav = SplashTemplate.WriteWav(samples, out var gain);
+        var wrong = new float[length];
+        var good = new float[SplashFeatures.BandCount];
+
+        Assert.Null(SplashTemplate.FromWav("x", "x", false,
+            wav, SplashTemplate.WriteStatsJson(gain, wrong, good)));
+        Assert.Null(SplashTemplate.FromWav("x", "x", false,
+            wav, SplashTemplate.WriteStatsJson(gain, good, wrong)));
+    }
+
+    [Fact]
+    public void FromWav_ReturnsNullForAudioThatIsNotAUsableWav()
+    {
+        var samples = Ramp(32000);
+        SplashTemplate.WriteWav(samples, out var gain);
+        var stats = GoodStatsJson(samples, gain);
+
+        Assert.Null(SplashTemplate.FromWav("x", "x", false, Array.Empty<byte>(), stats));
+        Assert.Null(SplashTemplate.FromWav("x", "x", false,
+            System.Text.Encoding.UTF8.GetBytes("this is not a RIFF file at all"), stats));
+
+        // A real WAV truncated mid-header: plausible for a file written by a crashed process.
+        var truncated = SplashTemplate.WriteWav(samples, out _).AsSpan(0, 20).ToArray();
+        Assert.Null(SplashTemplate.FromWav("x", "x", false, truncated, stats));
+    }
+
     [Fact]
     public void FromWav_ReturnsNullForOutOfRangeNumericLiteral()
     {
