@@ -47,79 +47,77 @@ internal sealed class WasapiProcessCapture : IDisposable
     /// </summary>
     public bool Start(out string? error)
     {
-        error = null;
-        IntPtr paramsPtr = IntPtr.Zero;
+        // The whole body is one try/catch, not just the WASAPI calls: Task 8 starts one capture
+        // per EVE process in a loop, so anything escaping here (including AllocHGlobal under
+        // memory pressure, or a property read on a handler that never completed) would abort the
+        // remaining clients and leave the ones already started un-disposed.
+        string? localError = null;
         try
         {
-            var activationParams = new AudioClientActivationParams
-            {
-                // 1 = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK.
-                ActivationType = 1,
-                TargetProcessId = _processId,
-                // 0 = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE: capture the EVE process
-                // and anything it spawns, not just the top-level process.
-                ProcessLoopbackMode = 0,
-            };
-
-            var paramsSize = Marshal.SizeOf<AudioClientActivationParams>();
-            paramsPtr = Marshal.AllocHGlobal(paramsSize);
-            Marshal.StructureToPtr(activationParams, paramsPtr, false);
-
-            // The activation parameters travel inside a PROPVARIANT of type VT_BLOB, holding a
-            // pointer to the AUDIOCLIENT_ACTIVATION_PARAMS struct above. This is the documented
-            // (if obscure) way to pass process-loopback parameters to ActivateAudioInterfaceAsync.
-            var propVariant = new PropVariant
-            {
-                Vt = VT_BLOB,
-                Blob = new Blob { Size = (uint)paramsSize, Data = paramsPtr },
-            };
-
-            var handler = new ActivationCompletionHandler();
+            IntPtr paramsPtr = IntPtr.Zero;
             try
             {
+                var activationParams = new AudioClientActivationParams
+                {
+                    // 1 = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK.
+                    ActivationType = 1,
+                    TargetProcessId = _processId,
+                    // 0 = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE: capture the EVE
+                    // process and anything it spawns, not just the top-level process.
+                    ProcessLoopbackMode = 0,
+                };
+
+                var paramsSize = Marshal.SizeOf<AudioClientActivationParams>();
+                paramsPtr = Marshal.AllocHGlobal(paramsSize);
+                Marshal.StructureToPtr(activationParams, paramsPtr, false);
+
+                // The activation parameters travel inside a PROPVARIANT of type VT_BLOB, holding
+                // a pointer to the AUDIOCLIENT_ACTIVATION_PARAMS struct above. This is the
+                // documented (if obscure) way to pass process-loopback parameters to
+                // ActivateAudioInterfaceAsync.
+                var propVariant = new PropVariant
+                {
+                    Vt = VT_BLOB,
+                    Blob = new Blob { Size = (uint)paramsSize, Data = paramsPtr },
+                };
+
+                var handler = new ActivationCompletionHandler();
                 ActivateAudioInterfaceAsync(
                     VirtualDeviceProcessLoopback, IID_IAudioClient, ref propVariant, handler, out _);
+
+                // Activation is asynchronous even though nothing here needs to run concurrently
+                // with it; block until the completion handler's callback (delivered on an
+                // arbitrary MTA thread, hence IAgileObject on the handler) signals it is done.
+                if (!handler.Wait(TimeSpan.FromSeconds(5)))
+                {
+                    localError = "Timed out waiting for audio interface activation.";
+                    return false;
+                }
+
+                if (handler.ActivateResult != 0)
+                {
+                    localError = $"Audio interface activation failed with HRESULT 0x{handler.ActivateResult:X8}.";
+                    return false;
+                }
+
+                // The virtual process-loopback device hands back a bare IAudioClient; querying it
+                // for IAudioClient2 returns E_NOINTERFACE (measured), so this deliberately does
+                // not attempt the IAudioClient2-specific initialization path other WASAPI clients
+                // use.
+                if (handler.ActivatedInterface is not IAudioClient audioClient)
+                {
+                    localError = "Activated interface was not an IAudioClient.";
+                    return false;
+                }
+
+                _audioClient = audioClient;
             }
-            catch (Exception ex)
+            finally
             {
-                error = $"ActivateAudioInterfaceAsync failed: {ex.Message}";
-                return false;
+                if (paramsPtr != IntPtr.Zero)
+                    Marshal.FreeHGlobal(paramsPtr);
             }
 
-            // Activation is asynchronous even though nothing here needs to run concurrently with
-            // it; block until the completion handler's callback (delivered on an arbitrary MTA
-            // thread, hence IAgileObject on the handler) signals it is done.
-            if (!handler.Wait(TimeSpan.FromSeconds(5)))
-            {
-                error = "Timed out waiting for audio interface activation.";
-                return false;
-            }
-
-            if (handler.ActivateResult != 0)
-            {
-                error = $"Audio interface activation failed with HRESULT 0x{handler.ActivateResult:X8}.";
-                return false;
-            }
-
-            // The virtual process-loopback device hands back a bare IAudioClient; querying it for
-            // IAudioClient2 returns E_NOINTERFACE (measured), so this deliberately does not attempt
-            // the IAudioClient2-specific initialization path other WASAPI clients use.
-            if (handler.ActivatedInterface is not IAudioClient audioClient)
-            {
-                error = "Activated interface was not an IAudioClient.";
-                return false;
-            }
-
-            _audioClient = audioClient;
-        }
-        finally
-        {
-            if (paramsPtr != IntPtr.Zero)
-                Marshal.FreeHGlobal(paramsPtr);
-        }
-
-        try
-        {
             // The virtual device does not support GetMixFormat or AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
             // (measured); an explicit format must be requested instead. 48 kHz stereo float32 is the
             // native EVE/Windows mix format in practice, so this avoids driver-side conversion.
@@ -136,20 +134,22 @@ internal sealed class WasapiProcessCapture : IDisposable
 
             var sessionGuid = Guid.Empty;
             // hnsPeriodicity must be 0 in shared mode; 200,000 * 100 ns = 20 ms buffer.
-            var hr = _audioClient.Initialize(
+            // IsFormatSupported is never called: the format above is fixed and known-good for
+            // this virtual device (measured), so there is nothing to validate ahead of Initialize.
+            var hr = _audioClient!.Initialize(
                 AudclntSharemodeShared,
                 AudclntStreamflagsLoopback | AudclntStreamflagsEventCallback,
                 200_000, 0, ref format, ref sessionGuid);
             if (hr != 0)
             {
-                error = $"IAudioClient.Initialize failed with HRESULT 0x{hr:X8}.";
+                localError = $"IAudioClient.Initialize failed with HRESULT 0x{hr:X8}.";
                 return false;
             }
 
             hr = _audioClient.SetEventHandle(_dataEvent.SafeWaitHandle.DangerousGetHandle());
             if (hr != 0)
             {
-                error = $"IAudioClient.SetEventHandle failed with HRESULT 0x{hr:X8}.";
+                localError = $"IAudioClient.SetEventHandle failed with HRESULT 0x{hr:X8}.";
                 return false;
             }
 
@@ -157,7 +157,7 @@ internal sealed class WasapiProcessCapture : IDisposable
             hr = _audioClient.GetService(ref captureClientIid, out var captureClientObj);
             if (hr != 0 || captureClientObj is not IAudioCaptureClient captureClient)
             {
-                error = $"IAudioClient.GetService(IAudioCaptureClient) failed with HRESULT 0x{hr:X8}.";
+                localError = $"IAudioClient.GetService(IAudioCaptureClient) failed with HRESULT 0x{hr:X8}.";
                 return false;
             }
 
@@ -166,7 +166,7 @@ internal sealed class WasapiProcessCapture : IDisposable
             hr = _audioClient.Start();
             if (hr != 0)
             {
-                error = $"IAudioClient.Start failed with HRESULT 0x{hr:X8}.";
+                localError = $"IAudioClient.Start failed with HRESULT 0x{hr:X8}.";
                 return false;
             }
 
@@ -181,8 +181,12 @@ internal sealed class WasapiProcessCapture : IDisposable
         }
         catch (Exception ex)
         {
-            error = ex.Message;
+            localError = ex.Message;
             return false;
+        }
+        finally
+        {
+            error = localError;
         }
     }
 
@@ -261,18 +265,28 @@ internal sealed class WasapiProcessCapture : IDisposable
     // --- Downmix + resample: 48 kHz stereo -> 16 kHz mono -------------------------------------
 
     /// <summary>
-    /// Downmixes stereo to mono and decimates 48 kHz to 16 kHz (an exact 3:1 ratio) with a small
+    /// Downmixes stereo to mono and decimates 48 kHz to 16 kHz (an exact 3:1 ratio) with a
     /// windowed-sinc FIR low-pass ahead of the decimation. Decimating without it would alias
-    /// everything above 8 kHz into the 0-8 kHz band the splash detector actually uses; the
-    /// detector's discriminative content is below ~6 kHz, so filter quality beyond "some
-    /// low-pass" does not matter, but no filter at all measurably corrupts that band.
+    /// everything above 8 kHz (the output Nyquist) into the 0-8 kHz band the splash detector
+    /// actually uses.
+    ///
+    /// Filter design (61-tap Kaiser, beta 5.0, cutoff at the 8 kHz output Nyquist) matches
+    /// <c>scipy.signal.resample_poly(x, 1, 3)</c>, the filter that produced the shipped
+    /// templates. This was not a free choice: measured against scipy at 6.5-7.5 kHz, a plainer
+    /// 31-tap Hamming design at a 7 kHz cutoff was 2-8 dB more attenuated, and that attenuation
+    /// varies enough *across* band 31 (6592-7600 Hz) that it does not cancel out in the
+    /// detector's z-score normalisation. Do not "improve" on this by lowering the cutoff or
+    /// changing the window - matching the templates, not minimizing aliasing further, is the
+    /// goal.
+    ///
     /// Holds FIR history and decimation phase across calls, since packets do not align with the
     /// 3-sample decimation period.
     /// </summary>
     private sealed class DownmixResampler
     {
-        private const int TapCount = 31;
-        private static readonly float[] Taps = BuildLowPassTaps(TapCount, cutoffHz: 7000.0, sampleRateHz: 48000.0);
+        private const int TapCount = 61;
+        private static readonly float[] Taps =
+            BuildLowPassTaps(TapCount, cutoffHz: 8000.0, sampleRateHz: 48000.0, kaiserBeta: 5.0);
 
         private readonly float[] _history = new float[TapCount - 1];
         private int _decimatePhase;
@@ -309,9 +323,13 @@ internal sealed class WasapiProcessCapture : IDisposable
             return output.ToArray();
         }
 
-        private static float[] BuildLowPassTaps(int tapCount, double cutoffHz, double sampleRateHz)
+        /// <summary>
+        /// Windowed-sinc lowpass FIR, Kaiser window (matching scipy's <c>firwin</c>/
+        /// <c>resample_poly</c> default design), normalized to unity DC gain.
+        /// </summary>
+        private static float[] BuildLowPassTaps(int tapCount, double cutoffHz, double sampleRateHz, double kaiserBeta)
         {
-            var cutoffNormalized = cutoffHz / (sampleRateHz / 2.0);
+            var wc = 2.0 * cutoffHz / sampleRateHz; // cutoff as a fraction of the sample-rate Nyquist
             var mid = (tapCount - 1) / 2.0;
             var taps = new double[tapCount];
             var sum = 0.0;
@@ -320,9 +338,9 @@ internal sealed class WasapiProcessCapture : IDisposable
             {
                 var x = i - mid;
                 var sinc = x == 0.0
-                    ? cutoffNormalized
-                    : Math.Sin(Math.PI * cutoffNormalized * x) / (Math.PI * x);
-                var window = 0.54 - 0.46 * Math.Cos(2 * Math.PI * i / (tapCount - 1)); // Hamming
+                    ? wc
+                    : Math.Sin(Math.PI * wc * x) / (Math.PI * x);
+                var window = KaiserWindow(i, tapCount - 1, kaiserBeta);
                 var value = sinc * window;
                 taps[i] = value;
                 sum += value;
@@ -333,6 +351,30 @@ internal sealed class WasapiProcessCapture : IDisposable
                 result[i] = (float)(taps[i] / sum); // normalize so DC gain is exactly 1
 
             return result;
+        }
+
+        /// <summary>Kaiser window value at tap <paramref name="n"/> of an <paramref name="m"/>+1-tap filter.</summary>
+        private static double KaiserWindow(int n, int m, double beta)
+        {
+            var ratio = (n - m / 2.0) / (m / 2.0);
+            var arg = beta * Math.Sqrt(Math.Max(0.0, 1.0 - ratio * ratio));
+            return BesselI0(arg) / BesselI0(beta);
+        }
+
+        /// <summary>Modified Bessel function of the first kind, order 0, via its power series.</summary>
+        private static double BesselI0(double x)
+        {
+            var sum = 1.0;
+            var term = 1.0;
+            var halfXSquared = (x / 2.0) * (x / 2.0);
+
+            for (var k = 1; k <= 25; k++)
+            {
+                term *= halfXSquared / (k * k);
+                sum += term;
+            }
+
+            return sum;
         }
     }
 
