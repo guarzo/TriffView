@@ -177,9 +177,12 @@ public static class SplashFeatures
 
     private static double[] BuildHannWindow(int size)
     {
+        // Periodic Hann (divide by size, not size-1) to match scipy.signal.stft's default
+        // (get_window('hann', nperseg, fftbins=True)), which generated the committed
+        // template assets. Do not "correct" this to the symmetric variant.
         var window = new double[size];
         for (var i = 0; i < size; i++)
-            window[i] = 0.5 - 0.5 * Math.Cos(2.0 * Math.PI * i / (size - 1));
+            window[i] = 0.5 - 0.5 * Math.Cos(2.0 * Math.PI * i / size);
         return window;
     }
 
