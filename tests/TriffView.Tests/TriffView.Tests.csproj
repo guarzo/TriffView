@@ -47,6 +47,21 @@
     <Compile Include="..\..\native\TriffAudio\SplashTemplate.cs" Link="SplashTemplate.cs" />
   </ItemGroup>
 
+  <!-- SplashDetector.cs is pure BCL (Math, Linq) with no Windows-only dependencies, so it
+       links the same way as SplashFeatures.cs and SplashTemplate.cs above. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAudio\SplashDetector.cs" Link="SplashDetector.cs" />
+  </ItemGroup>
+
+  <!-- Tests run from the build output directory, which has no path back to the source tree,
+       so the 11 shipped splash templates are copied alongside the test binaries here; see
+       TestTemplates.cs for the loader that resolves them from "templates/". -->
+  <ItemGroup>
+    <None Include="..\..\native\TriffAudio\Assets\splash-templates\**\*"
+          Link="templates\%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
