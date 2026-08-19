@@ -41,19 +41,56 @@ internal sealed class SplashTemplateStore
         _templates = loaded;
     }
 
-    public string Save(string name, ReadOnlySpan<float> samples, float[] median, float[] mad)
+    /// <summary>
+    /// Writes one user template as its `{id}.wav` / `{id}.json` pair. Null if the write failed -
+    /// a read-only, full, or redirected %APPDATA% is an ordinary environment, and this is reached
+    /// from a web message whose only try/catch (MainWindow.OnWebMessageReceived) covers JSON
+    /// parsing, with no DispatcherUnhandledException handler behind it: throwing from here would
+    /// turn "save template" into a process crash. Like the rest of this store, it is total.
+    /// </summary>
+    public string? Save(string name, ReadOnlySpan<float> samples, float[] median, float[] mad)
     {
-        Directory.CreateDirectory(_userTemplateDirectory);
-
         var id = "user-" + Guid.NewGuid().ToString("N");
         var wav = SplashTemplate.WriteWav(samples, out var gain);
         var json = BuildStatsJson(gain, median, mad, name);
 
-        File.WriteAllBytes(Path.Combine(_userTemplateDirectory, id + ".wav"), wav);
-        File.WriteAllBytes(Path.Combine(_userTemplateDirectory, id + ".json"), json);
+        var wavPath = Path.Combine(_userTemplateDirectory, id + ".wav");
+        var jsonPath = Path.Combine(_userTemplateDirectory, id + ".json");
+
+        try
+        {
+            Directory.CreateDirectory(_userTemplateDirectory);
+            File.WriteAllBytes(wavPath, wav);
+            File.WriteAllBytes(jsonPath, json);
+        }
+        catch (Exception ex)
+        {
+            TriffViewDiagnostics.Log("splash-templates", $"failed to save template '{name}': {ex.Message}");
+
+            // A half-written pair (WAV present, JSON missing) would be skipped by
+            // LoadUserTemplates on every later Reload, forever. Best-effort cleanup.
+            TryDelete(wavPath);
+            TryDelete(jsonPath);
+            return null;
+        }
 
         Reload();
         return id;
+    }
+
+    private static bool TryDelete(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+            File.Delete(path);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            TriffViewDiagnostics.Log("splash-templates", $"failed to delete '{Path.GetFileName(path)}': {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>
@@ -127,9 +164,10 @@ internal sealed class SplashTemplateStore
         var wavPath = Path.Combine(_userTemplateDirectory, id + ".wav");
         var jsonPath = Path.Combine(_userTemplateDirectory, id + ".json");
 
-        var deletedAny = false;
-        if (File.Exists(wavPath)) { File.Delete(wavPath); deletedAny = true; }
-        if (File.Exists(jsonPath)) { File.Delete(jsonPath); deletedAny = true; }
+        // Deleting is best-effort for the same reason Save's write is (see there): a file locked
+        // or a directory turned read-only must not throw out of a web-message handler.
+        var deletedAny = TryDelete(wavPath);
+        deletedAny |= TryDelete(jsonPath);
 
         if (deletedAny)
             _templates = current.Where(t => t.Id != id).ToList();

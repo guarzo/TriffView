@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace TriffView.Audio;
 
@@ -52,6 +53,10 @@ internal sealed class TriffAudioService : IDisposable
     /// </summary>
     private static readonly TimeSpan ContextStatsRefreshInterval = TimeSpan.FromSeconds(1);
 
+    /// <summary>Overall bound on <see cref="Dispose"/>, not a per-session one - see there. Sized
+    /// just above <see cref="WasapiProcessCapture"/>'s own 2 s capture-thread join.</summary>
+    private static readonly TimeSpan DisposeTimeout = TimeSpan.FromSeconds(3);
+
     /// <summary>Backoff after a failed capture start: 1, 2, 4, 8, 15, 30 s, then holds at 30 s.
     /// Without this, a permanently-broken client retried every ~700 ms (the caller's typical
     /// SetClients cadence) forever, each attempt costing up to 5 s and a diagnostics-log line.</summary>
@@ -70,8 +75,9 @@ internal sealed class TriffAudioService : IDisposable
     /// roughly 4,000 FFTs total, synchronously. Constructing <see cref="TriffAudioService"/>
     /// happens on the WPF dispatcher at app startup for every user, including those who never
     /// enable splash detection, so that cost cannot sit directly in this class's constructor.
-    /// <see cref="Lazy{T}"/> lets construction be kicked off on a thread-pool thread immediately
-    /// (see the constructor) while every caller still gets a fully-built store: the default
+    /// <see cref="Lazy{T}"/> lets construction be kicked off on a thread-pool thread as soon as
+    /// the feature is switched on (see <see cref="WarmUpTemplateStore"/>) while every caller still
+    /// gets a fully-built store: the default
     /// thread-safety mode blocks concurrent access to <see cref="Lazy{T}.Value"/> until the one
     /// execution finishes, rather than racing an empty store.
     /// </summary>
@@ -98,6 +104,7 @@ internal sealed class TriffAudioService : IDisposable
     private double _threshold = 0.35;
     private int _detectionTickInProgress;
     private int _detectionDispatchScheduled;
+    private int _templateWarmUpStarted;
     private bool _disposed;
 
     /// <summary>
@@ -119,23 +126,6 @@ internal sealed class TriffAudioService : IDisposable
         _captureFactory = captureFactory ?? ((processId, onSamples) => new WasapiProcessCapture(processId, onSamples));
 
         _templateStore = new Lazy<SplashTemplateStore>(() => new SplashTemplateStore(directory));
-        // Start building it now rather than waiting for first access, so the cost lands on a
-        // thread-pool thread instead of stalling whichever WPF dispatcher call (SaveTemplate,
-        // DeleteTemplate, ListTemplates, or the first detection tick) would otherwise trigger it.
-        // Wrapped in its own try/catch: SplashTemplateStore's constructor is meant to be total
-        // (see LoadUserTemplates), but Lazy<T>'s default mode caches and rethrows any exception
-        // that does escape on every later .Value access - including from the WPF dispatcher via
-        // ListTemplates/SaveTemplate/DeleteTemplate, and every 250 ms from SnapshotDetector via
-        // OnDetectionTick. Touching .Value here just forces the construction; nothing needs its
-        // result, so swallowing a failure here (already logged inside the store itself, and this
-        // line adds nothing that log line does not already say) simply means the cost was paid on
-        // this thread instead of avoided - the exception still surfaces normally to whichever
-        // caller triggers .Value next.
-        ThreadPool.QueueUserWorkItem(_ =>
-        {
-            try { _ = _templateStore.Value; }
-            catch (Exception ex) { TriffViewDiagnostics.Log("splash-templates", $"template store construction failed: {ex.Message}"); }
-        });
 
         // Runs from the moment the service exists rather than only once enabled: the tick
         // itself no-ops while disabled, and starting it unconditionally means UpdateSettings
@@ -153,6 +143,42 @@ internal sealed class TriffAudioService : IDisposable
             _enabled = enabled;
             _threshold = threshold;
         }
+
+        if (enabled) WarmUpTemplateStore();
+    }
+
+    /// <summary>
+    /// Forces the template store to build on a thread-pool thread, so the ~4,000 FFTs its
+    /// constructor runs land there rather than stalling whichever WPF dispatcher call
+    /// (SaveTemplate, DeleteTemplate, ListTemplates, or the first detection tick) would otherwise
+    /// trigger it.
+    ///
+    /// Deliberately not done in the constructor: splash detection defaults to off, and a user who
+    /// never enables it must pay neither the FFTs nor the ~0.5 MB of retained patches. The first
+    /// <see cref="UpdateSettings"/> that switches the feature on is early enough - it happens at
+    /// startup for users who have it enabled, and a first-time enable has the whole 30 s capture
+    /// warm-up ahead of it before any tick can want the store.
+    ///
+    /// Wrapped in its own try/catch: SplashTemplateStore's constructor is meant to be total (see
+    /// LoadUserTemplates), but Lazy&lt;T&gt;'s default mode caches and rethrows any exception that
+    /// does escape on every later .Value access - including from the WPF dispatcher via
+    /// ListTemplates/SaveTemplate/DeleteTemplate, and every 250 ms from SnapshotDetector via
+    /// OnDetectionTick. Touching .Value here just forces the construction; nothing needs its
+    /// result, so swallowing a failure here (already logged inside the store itself) simply means
+    /// the cost was paid on this thread instead of avoided - the exception still surfaces normally
+    /// to whichever caller triggers .Value next.
+    /// </summary>
+    private void WarmUpTemplateStore()
+    {
+        // UpdateSettings is called on every settings save, not only on a transition, so this
+        // queues the work exactly once per process rather than once per save.
+        if (Interlocked.CompareExchange(ref _templateWarmUpStarted, 1, 0) != 0) return;
+
+        ThreadPool.UnsafeQueueUserWorkItem(static service =>
+        {
+            try { _ = service._templateStore.Value; }
+            catch (Exception ex) { TriffViewDiagnostics.Log("splash-templates", $"template store construction failed: {ex.Message}"); }
+        }, this, preferLocal: false);
     }
 
     /// <summary>
@@ -359,11 +385,18 @@ internal sealed class TriffAudioService : IDisposable
 
     /// <summary>
     /// Persists a candidate handed back by <see cref="CaptureTemplateCandidates"/> as a named
-    /// user template, using the samples and context stats cached at capture time. Null if the
-    /// candidate id is unknown - expected if the client was removed since capture, a newer
-    /// capture superseded it, or the process restarted.
+    /// user template, using the samples and context stats cached at capture time.
+    ///
+    /// Two different failures, reported separately because they need different words in front of
+    /// the user: <c>CandidateFound: false</c> means the candidate id is unknown - expected if the
+    /// client was removed since capture, a newer capture superseded it, or the process restarted -
+    /// while a found candidate with a null id means the write itself failed (logged by
+    /// <see cref="SplashTemplateStore.Save"/>), which capturing again will not fix.
+    ///
+    /// Reloads the whole template store on success, which re-parses every built-in - never call
+    /// this from the dispatcher.
     /// </summary>
-    public string? SaveTemplate(string candidateId, string name)
+    public (string? Id, bool CandidateFound) SaveTemplate(string candidateId, string name)
     {
         PendingCandidate? found = null;
 
@@ -381,9 +414,9 @@ internal sealed class TriffAudioService : IDisposable
         }
 
         if (found is null)
-            return null;
+            return (null, false);
 
-        return _templateStore.Value.Save(name, found.Value.Samples, found.Value.Median, found.Value.Mad);
+        return (_templateStore.Value.Save(name, found.Value.Samples, found.Value.Median, found.Value.Mad), true);
     }
 
     /// <summary>Pass-through to <see cref="SplashTemplateStore.Delete"/> - kept encapsulated here
@@ -467,8 +500,24 @@ internal sealed class TriffAudioService : IDisposable
             _pendingCandidatesByClient.Clear();
         }
 
-        foreach (var session in sessions)
-            session.Dispose();
+        // Serially, each session's Dispose can block up to 2 s joining its capture thread
+        // (WasapiProcessCapture.Dispose) - and this runs on the UI thread, via MainWindow.Cleanup.
+        // Six wedged clients was a 12 s frozen exit. Disposed in parallel with one bounded wait
+        // instead: the worst case is now roughly one timeout, not one per client.
+        if (sessions.Count > 0)
+        {
+            var pending = sessions.Select(session => Task.Run(() =>
+            {
+                try { session.Dispose(); }
+                catch (Exception ex) { TriffViewDiagnostics.Log("audio-capture", $"pid {session.ProcessId}: dispose failed: {ex.Message}"); }
+            })).ToArray();
+
+            // Deliberately does not throw or wait longer if a capture thread refuses to join: the
+            // app is shutting down and the OS reclaims the handles. Nothing after this point
+            // depends on the captures actually being gone.
+            if (!Task.WaitAll(pending, DisposeTimeout))
+                TriffViewDiagnostics.Log("audio-capture", $"{pending.Count(t => !t.IsCompleted)} capture(s) still disposing after {DisposeTimeout.TotalSeconds:F0}s; abandoning them");
+        }
     }
 
     // --- Detection tick ------------------------------------------------------------------------
@@ -546,21 +595,53 @@ internal sealed class TriffAudioService : IDisposable
         var scoredCount = 0;
         foreach (var session in toScore)
         {
-            var bandBuffer = session.BandBuffer;
+            // Everything this iteration needs off the session is read once, under the lock, into
+            // locals - the buffers and the cached context stats alike. StartCapture replaces all
+            // five of these fields together (a client whose stream died and restarted), so a
+            // restart landing mid-iteration would otherwise hand BuildPatch a median that had
+            // just been nulled: a NullReferenceException that costs the whole pass, for every
+            // client, plus a log line. Rare, self-healing, and entirely avoidable.
+            RollingBandBuffer bandBuffer;
+            float[]? median;
+            float[]? mad;
+            DateTime statsComputedUtc;
+            lock (_gate)
+            {
+                bandBuffer = session.BandBuffer;
+                median = session.ContextMedian;
+                mad = session.ContextMad;
+                statsComputedUtc = session.ContextStatsComputedUtc;
+            }
 
-            if (session.ContextMedian is null || now - session.ContextStatsComputedUtc >= ContextStatsRefreshInterval)
+            // Not measured, unlike the per-tick cost the tests report. The six-client tick
+            // measurement in TriffAudioServiceTests covers only the cheap path - the branch where
+            // the cached stats are still fresh. This once-a-second recompute (a 32 x ContextFrames
+            // median sort, twice, per client) has never been measured; it is estimated at 20-50 ms
+            // for six clients against a 250 ms tick budget, and the per-client recomputes provably
+            // do not stagger - they all fall due on the same tick, because every session's stats
+            // are stamped with that tick's single `now`.
+            if (median is null || mad is null || now - statsComputedUtc >= ContextStatsRefreshInterval)
             {
                 var contextBands = bandBuffer.ReadRecent(SplashFeatures.ContextFrames);
-                SplashFeatures.ComputeContextStats(contextBands, contextBands.GetLength(1), out var median, out var mad);
-                session.ContextMedian = median;
-                session.ContextMad = mad;
-                session.ContextStatsComputedUtc = now;
+                SplashFeatures.ComputeContextStats(contextBands, contextBands.GetLength(1), out median, out mad);
+
+                lock (_gate)
+                {
+                    // Only if this session is still on the buffer these stats were derived from;
+                    // a capture restart in between makes them stats for audio nothing will score.
+                    if (ReferenceEquals(session.BandBuffer, bandBuffer))
+                    {
+                        session.ContextMedian = median;
+                        session.ContextMad = mad;
+                        session.ContextStatsComputedUtc = now;
+                    }
+                }
             }
 
             var windowBands = bandBuffer.ReadRecent(SplashFeatures.WindowFrames);
             if (windowBands.GetLength(1) < SplashFeatures.WindowFrames) continue; // shouldn't happen once warmed up; be safe anyway
 
-            var patch = SplashFeatures.BuildPatch(windowBands, 0, session.ContextMedian, session.ContextMad!);
+            var patch = SplashFeatures.BuildPatch(windowBands, 0, median, mad);
             var score = detector.ScorePatch(patch);
             EvaluateDetection(session, score);
             scoredCount++;

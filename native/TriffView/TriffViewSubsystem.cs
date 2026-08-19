@@ -1243,12 +1243,17 @@ internal sealed class TriffViewController : IDisposable
     /// </summary>
     private async void CaptureSplashTemplateCandidates(string? clientKey)
     {
-        if (string.IsNullOrWhiteSpace(clientKey)) return;
+        if (string.IsNullOrWhiteSpace(clientKey))
+        {
+            PostCaptureResult(clientKey, "no-client");
+            return;
+        }
 
         var client = _clients.FirstOrDefault(c => string.Equals(c.StableKey, clientKey, StringComparison.OrdinalIgnoreCase));
         if (client is null)
         {
             PostError("triffaudio-capture", "That client is no longer available.");
+            PostCaptureResult(clientKey, "no-client");
             return;
         }
 
@@ -1265,13 +1270,7 @@ internal sealed class TriffViewController : IDisposable
             // finished warming up, so its absence here means specifically "no session at all".
             if (!_audio.Statuses.Any(s => s.ProcessId == processId))
             {
-                _postToHud(new
-                {
-                    type = "triffaudio:capture-result",
-                    clientKey,
-                    candidates = Array.Empty<object>(),
-                    reason = "no-session",
-                });
+                PostCaptureResult(clientKey, "no-session");
                 return;
             }
 
@@ -1297,28 +1296,86 @@ internal sealed class TriffViewController : IDisposable
         {
             if (_disposed) return;
             PostError("triffaudio-capture", ex.Message);
+            // Always resolve the pending request, even on failure - the settings UI flips its
+            // capture button to "Capturing..." the moment it sends the request and has nothing
+            // else telling it to stop. (Same rule GetSplashTemplateAudio already follows.)
+            PostCaptureResult(clientKey, "failed");
         }
     }
 
-    private void SaveSplashTemplate(string? candidateId, string? name)
+    /// <summary>Resolves a pending capture request with no candidates and a reason the settings
+    /// UI can render. Every exit path out of <see cref="CaptureSplashTemplateCandidates"/> must
+    /// go through here or post a full result of its own.</summary>
+    private void PostCaptureResult(string? clientKey, string reason)
+    {
+        _postToHud(new
+        {
+            type = "triffaudio:capture-result",
+            clientKey,
+            candidates = Array.Empty<object>(),
+            reason,
+        });
+    }
+
+    /// <summary>
+    /// <see cref="TriffAudioService.SaveTemplate"/> ends in <see cref="SplashTemplateStore.Save"/>
+    /// -> <c>Reload</c>, which re-parses all 11 built-ins (~4,000 FFTs) plus every user template.
+    /// That is the same class of work as <see cref="CaptureSplashTemplateCandidates"/> and
+    /// <see cref="GetSplashTemplateAudio"/>, so it runs on the thread pool for the same reason -
+    /// never on the dispatcher.
+    /// </summary>
+    private async void SaveSplashTemplate(string? candidateId, string? name)
     {
         if (string.IsNullOrWhiteSpace(candidateId) || string.IsNullOrWhiteSpace(name)) return;
 
-        var id = _audio.SaveTemplate(candidateId, name.Trim());
-        if (id is null)
+        var trimmed = name.Trim();
+        try
         {
-            PostError("triffaudio-save-template", "That capture has expired; capture again.");
-            return;
-        }
+            var (id, candidateFound) = await Task.Run(() => _audio.SaveTemplate(candidateId, trimmed));
 
-        PostSplashTemplates();
+            // Same disposal race the capture path guards against: the save can outlive a
+            // shutdown that starts while it is running.
+            if (_disposed) return;
+
+            if (!candidateFound)
+            {
+                PostError("triffaudio-save-template", "That capture has expired; capture again.");
+                return;
+            }
+
+            if (id is null)
+            {
+                PostError("triffaudio-save-template", "Could not write the template file. Check that %APPDATA%\\TriffHud is writable.");
+                return;
+            }
+
+            PostSplashTemplates();
+        }
+        catch (Exception ex)
+        {
+            if (_disposed) return;
+            PostError("triffaudio-save-template", ex.Message);
+        }
     }
 
-    private void DeleteSplashTemplate(string? templateId)
+    /// <summary>File IO, and (for a user who has not enabled splash detection) possibly the first
+    /// touch of the lazily-built template store - same reasoning as
+    /// <see cref="PostSplashTemplates"/>, so same thread-pool treatment.</summary>
+    private async void DeleteSplashTemplate(string? templateId)
     {
         if (string.IsNullOrWhiteSpace(templateId)) return;
-        _audio.DeleteTemplate(templateId);
-        PostSplashTemplates();
+
+        try
+        {
+            await Task.Run(() => _audio.DeleteTemplate(templateId));
+            if (_disposed) return;
+            PostSplashTemplates();
+        }
+        catch (Exception ex)
+        {
+            if (_disposed) return;
+            PostError("triffaudio-delete-template", ex.Message);
+        }
     }
 
     /// <summary>
@@ -1363,18 +1420,33 @@ internal sealed class TriffViewController : IDisposable
         }
     }
 
-    private void PostSplashTemplates()
+    /// <summary>
+    /// Off the dispatcher like the rest of this group, and for a less obvious reason than they
+    /// have: the template store is only built once splash detection is switched on, so for a user
+    /// who has never enabled it, the "triffaudio:list-templates" the settings UI sends on mount is
+    /// the call that triggers construction - all 11 built-ins, ~4,000 FFTs - and doing that inline
+    /// would freeze the settings window on open.
+    /// </summary>
+    private async void PostSplashTemplates()
     {
-        _postToHud(new
+        try
         {
-            type = "triffaudio:templates",
-            templates = _audio.ListTemplates().Select(template => new
+            var templates = await Task.Run(() => _audio.ListTemplates().Select(template => new
             {
                 id = template.Id,
                 name = template.Name,
                 builtIn = template.BuiltIn,
-            }).ToArray(),
-        });
+            }).ToArray());
+
+            if (_disposed) return;
+
+            _postToHud(new { type = "triffaudio:templates", templates });
+        }
+        catch (Exception ex)
+        {
+            if (_disposed) return;
+            PostError("triffaudio-templates", ex.Message);
+        }
     }
 
     private void SchedulePendingAlertDispatch()

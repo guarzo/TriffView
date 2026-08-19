@@ -24,10 +24,11 @@ public class SplashTemplateStoreTests
         SplashFeatures.ComputeContextStats(bands, bands.GetLength(1), out var med, out var mad);
 
         var id = store.Save("mine", samples, med, mad);
+        Assert.NotNull(id);
         store.Reload();
         Assert.Contains(store.Templates, t => t.Id == id && !t.BuiltIn);
 
-        Assert.True(store.Delete(id));
+        Assert.True(store.Delete(id!));
         store.Reload();
         Assert.DoesNotContain(store.Templates, t => t.Id == id);
     }
@@ -102,9 +103,10 @@ public class SplashTemplateStoreTests
         var expectedPatch = SplashFeatures.BuildPatch(bandsRaw, 0, med, mad);
 
         var id = store.Save("quiet", samples, med, mad);
+        Assert.NotNull(id);
         store.Reload();
 
-        var persistedGain = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(dir, id + ".json")))
+        var persistedGain = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(dir, id! + ".json")))
             .RootElement.GetProperty("gain").GetDouble();
         Assert.True(persistedGain > 50.0, $"expected a large gain for a quiet clip, got {persistedGain}");
 

@@ -26,6 +26,23 @@ public class TriffAudioServiceTests : IDisposable
     private TriffAudioService CreateService() => new(_templateDirectory, FakeAudioCapture.Factory);
 
     /// <summary>
+    /// A service whose fake captures signal <paramref name="started"/> as each one starts, so a
+    /// test can wait for the capture attempts to land before feeding samples. Necessary because
+    /// <see cref="TriffAudioService.SetClients"/> queues <c>StartCapture</c> onto the thread pool
+    /// and <c>StartCapture</c> *replaces* the session's ring and band buffers: samples fed before
+    /// that swap are written into buffers that are then thrown away, and the client scores as
+    /// still warming up. Waiting on a real signal rather than hoping the queued work wins the
+    /// race is the difference between a test that is usually right and one that is always right.
+    /// </summary>
+    private TriffAudioService CreateService(CountdownEvent started) =>
+        new(_templateDirectory, (_, _) => new FakeAudioCapture(started));
+
+    /// <summary>Waits for every queued capture start, failing the test rather than proceeding
+    /// into the race if the thread pool never gets to them.</summary>
+    private static void WaitForCaptureStarts(CountdownEvent started) =>
+        Assert.True(started.Wait(TimeSpan.FromSeconds(10)), "capture starts did not complete; the warm-up below would race the buffer swap");
+
+    /// <summary>
     /// Stands in for <see cref="WasapiProcessCapture"/> in every test: never opens real WASAPI
     /// process-loopback capture, so <c>SetClients(enabled: true, ...)</c> here is safe to call
     /// with hardcoded PIDs that may coincide with whatever real process happens to be running on
@@ -39,11 +56,23 @@ public class TriffAudioServiceTests : IDisposable
         public static readonly Func<uint, WasapiProcessCapture.SampleCallback, IAudioCapture> Factory =
             (_, _) => new FakeAudioCapture();
 
+        private readonly CountdownEvent? _started;
+
+        public FakeAudioCapture(CountdownEvent? started = null)
+        {
+            _started = started;
+        }
+
         public DateTime LastPacketUtc { get; private set; } = DateTime.UtcNow;
 
         public bool Start(out string? error)
         {
             error = null;
+            // TriffAudioService.StartCapture installs the session's fresh buffers before calling
+            // this, so a test that waits on the countdown here is guaranteed to feed samples into
+            // the buffers the session will actually score.
+            if (_started is { CurrentCount: > 0 })
+                _started.Signal();
             return true;
         }
 
@@ -181,9 +210,11 @@ public class TriffAudioServiceTests : IDisposable
     [Fact]
     public void MeasuresOneDetectionTickForOneWarmedUpClient()
     {
-        using var svc = CreateService();
+        using var started = new CountdownEvent(1);
+        using var svc = CreateService(started);
         svc.UpdateSettings(enabled: true, threshold: 0.35);
         svc.SetClients(new[] { (1234u, "Pilot") });
+        WaitForCaptureStarts(started);
         WarmUp(svc, 1234u, seed: 1);
 
         // First pass also computes the once-per-second context stats (median/MAD); run it once
@@ -205,13 +236,15 @@ public class TriffAudioServiceTests : IDisposable
     [Fact]
     public void MeasuresOneDetectionTickForSixWarmedUpClients()
     {
-        using var svc = CreateService();
+        using var started = new CountdownEvent(6);
+        using var svc = CreateService(started);
         svc.UpdateSettings(enabled: true, threshold: 0.35);
 
         var clients = new (uint ProcessId, string CharacterName)[6];
         for (var i = 0; i < clients.Length; i++)
             clients[i] = ((uint)(1000 + i), $"Pilot{i}");
         svc.SetClients(clients);
+        WaitForCaptureStarts(started);
 
         for (var i = 0; i < clients.Length; i++)
             WarmUp(svc, clients[i].ProcessId, seed: i + 1);
