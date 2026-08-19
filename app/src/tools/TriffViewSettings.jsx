@@ -1067,6 +1067,10 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
   const [splashCapturing, setSplashCapturing] = useState(false);
   const [splashTemplates, setSplashTemplates] = useState([]);
   const [candidateNameDrafts, setCandidateNameDrafts] = useState({});
+  // Per-template-id status for the saved-list play button: "loading" while a
+  // triffaudio:template-audio request is in flight, "not-found" briefly after a
+  // found:false result (the template was deleted elsewhere while the request was in flight).
+  const [templateAudioStatus, setTemplateAudioStatus] = useState({});
   const guidePromptedRef = useRef(false);
   // Kept in sync below so the capture-result handler - registered once, in an
   // effect with an empty dependency array - can read the *current* client
@@ -1356,6 +1360,27 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
         }
       } else if (message?.type === "triffaudio:templates") {
         setSplashTemplates(Array.isArray(message.templates) ? message.templates : []);
+      } else if (message?.type === "triffaudio:template-audio-result") {
+        const templateId = message.templateId;
+        if (message.found && message.wavBase64) {
+          playSplashAudio(message.wavBase64);
+          setTemplateAudioStatus((current) => {
+            if (!(templateId in current)) return current;
+            const next = { ...current };
+            delete next[templateId];
+            return next;
+          });
+        } else {
+          setTemplateAudioStatus((current) => ({ ...current, [templateId]: "not-found" }));
+          setTimeout(() => {
+            setTemplateAudioStatus((current) => {
+              if (current[templateId] !== "not-found") return current;
+              const next = { ...current };
+              delete next[templateId];
+              return next;
+            });
+          }, 3000);
+        }
       }
     });
 
@@ -1397,6 +1422,11 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
 
   function deleteSplashTemplate(templateId) {
     send("triffaudio:delete-template", { templateId });
+  }
+
+  function playSplashTemplate(templateId) {
+    setTemplateAudioStatus((current) => ({ ...current, [templateId]: "loading" }));
+    send("triffaudio:template-audio", { templateId });
   }
 
   function playSplashAudio(wavBase64) {
@@ -1993,6 +2023,16 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
                 splashTemplates.map((template) => (
                   <div className="triff-splash-template" key={template.id}>
                     <span>{template.name}</span>
+                    <button
+                      type="button"
+                      disabled={templateAudioStatus[template.id] === "loading"}
+                      onClick={() => playSplashTemplate(template.id)}
+                    >
+                      {templateAudioStatus[template.id] === "loading" ? "Loading..." : "Play"}
+                    </button>
+                    {templateAudioStatus[template.id] === "not-found" ? (
+                      <small className="triffview-muted">No longer available</small>
+                    ) : null}
                     {template.builtIn ? <small>Built-in</small> : (
                       <button type="button" onClick={() => deleteSplashTemplate(template.id)}>
                         Delete

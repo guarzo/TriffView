@@ -395,6 +395,11 @@ internal sealed class TriffAudioService : IDisposable
     /// pass-throughs it is always used alongside.</summary>
     public IReadOnlyList<SplashTemplate> ListTemplates() => _templateStore.Value.Templates;
 
+    /// <summary>Pass-through to <see cref="SplashTemplateStore.GetAudio"/>, same reasoning as
+    /// <see cref="DeleteTemplate"/>. This is file IO (or an embedded-resource read) - callers must
+    /// run it off the dispatcher, exactly like <see cref="CaptureTemplateCandidates"/>.</summary>
+    public byte[]? GetTemplateAudio(string id) => _templateStore.Value.GetAudio(id);
+
     /// <summary>
     /// Test-only hook. Runs exactly the decision code the real detection tick runs once it has
     /// a score in hand (character-name rule, threshold comparison, event raising) - not warm-up

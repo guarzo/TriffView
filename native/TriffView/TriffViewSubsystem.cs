@@ -345,6 +345,9 @@ internal sealed class TriffViewController : IDisposable
             case "triffaudio:list-templates":
                 PostSplashTemplates();
                 return true;
+            case "triffaudio:template-audio":
+                GetSplashTemplateAudio(message?["templateId"]?.GetValue<string>());
+                return true;
             default:
                 return false;
         }
@@ -1316,6 +1319,48 @@ internal sealed class TriffViewController : IDisposable
         if (string.IsNullOrWhiteSpace(templateId)) return;
         _audio.DeleteTemplate(templateId);
         PostSplashTemplates();
+    }
+
+    /// <summary>
+    /// Fetches one saved template's WAV audio on demand for the settings UI's play button.
+    /// Deliberately not folded into <see cref="PostSplashTemplates"/> - see that method's payload
+    /// for why shipping audio with every template list would cost roughly 1 MB of base64 per
+    /// refresh for the 11 built-ins alone, for audio a user rarely plays. Reading it is file IO
+    /// (or an embedded-resource read for built-ins), so this runs on the thread pool exactly like
+    /// <see cref="CaptureSplashTemplateCandidates"/>, never on the dispatcher. An unresolvable id -
+    /// the user deleted the template in one place while a play request from another was in flight -
+    /// is an ordinary race, not an error, so this posts found:false rather than throwing.
+    /// </summary>
+    private async void GetSplashTemplateAudio(string? templateId)
+    {
+        if (string.IsNullOrWhiteSpace(templateId))
+        {
+            _postToHud(new { type = "triffaudio:template-audio-result", templateId, wavBase64 = (string?)null, found = false });
+            return;
+        }
+
+        try
+        {
+            var wav = await Task.Run(() => _audio.GetTemplateAudio(templateId));
+            if (_disposed) return;
+
+            _postToHud(new
+            {
+                type = "triffaudio:template-audio-result",
+                templateId,
+                wavBase64 = wav is null ? null : Convert.ToBase64String(wav),
+                found = wav is not null,
+            });
+        }
+        catch (Exception ex)
+        {
+            if (_disposed) return;
+            PostError("triffaudio-template-audio", ex.Message);
+            // Always resolve the pending request, even on failure - otherwise the settings UI's
+            // play button, which flips to "loading" the moment it sends the request, has nothing
+            // telling it to stop.
+            _postToHud(new { type = "triffaudio:template-audio-result", templateId, wavBase64 = (string?)null, found = false });
+        }
     }
 
     private void PostSplashTemplates()

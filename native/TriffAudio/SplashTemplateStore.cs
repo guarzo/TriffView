@@ -56,6 +56,67 @@ internal sealed class SplashTemplateStore
         return id;
     }
 
+    /// <summary>
+    /// Raw WAV bytes for one template, for the settings UI's on-demand play button (deliberately
+    /// not part of the <c>triffaudio:templates</c> listing - see the caller). <see cref="SplashTemplate"/>
+    /// only keeps the derived <see cref="SplashTemplate.Patch"/>, not the original audio, so this
+    /// re-reads it from whichever source the template actually came from - embedded resource for a
+    /// built-in, file for a user template - rather than keeping a second in-memory copy of every
+    /// WAV around for the life of the app. Null if the id is unknown, or (user templates only) if
+    /// the underlying file has since been deleted - an ordinary race with <see cref="Delete"/>, not
+    /// an error.
+    /// </summary>
+    public byte[]? GetAudio(string id)
+    {
+        var current = _templates;
+        var template = current.FirstOrDefault(t => t.Id == id);
+        if (template is null)
+            return null;
+
+        if (template.BuiltIn)
+            return TryReadBuiltInWav(id);
+
+        var wavPath = Path.Combine(_userTemplateDirectory, id + ".wav");
+        try
+        {
+            return File.Exists(wavPath) ? File.ReadAllBytes(wavPath) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            TriffViewDiagnostics.Log("splash-templates", $"failed to read user template audio '{id}': {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Same resource-pairing logic as <see cref="LoadBuiltIns"/>, re-run for one id
+    /// rather than cached alongside <see cref="_templates"/> - this only runs when a user
+    /// actually presses play, not on every load/reload.</summary>
+    private static byte[]? TryReadBuiltInWav(string id)
+    {
+        var assembly = typeof(SplashTemplateStore).Assembly;
+        foreach (var wavName in assembly.GetManifestResourceNames())
+        {
+            if (!wavName.EndsWith(".wav", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var stem = wavName[..^".wav".Length];
+            if (!string.Equals(stem.Split('.')[^1], id, StringComparison.Ordinal))
+                continue;
+
+            try
+            {
+                return ReadResource(assembly, wavName);
+            }
+            catch (Exception ex) when (ex is IOException or NotSupportedException)
+            {
+                TriffViewDiagnostics.Log("splash-templates", $"failed to read built-in template audio '{id}': {ex.Message}");
+                return null;
+            }
+        }
+
+        return null;
+    }
+
     public bool Delete(string id)
     {
         var current = _templates;
