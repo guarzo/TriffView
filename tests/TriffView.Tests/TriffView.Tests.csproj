@@ -53,6 +53,14 @@
     <Compile Include="..\..\native\TriffAudio\SplashDetector.cs" Link="SplashDetector.cs" />
   </ItemGroup>
 
+  <!-- AudioRingBuffer.cs is pure BCL (Array, Span, Math) with no Windows-only dependencies, so
+       it links the same way as the other TriffAudio files above. WasapiProcessCapture.cs, its
+       sibling in native/TriffAudio, is Windows-only WASAPI interop and is deliberately NOT
+       linked here. -->
+  <ItemGroup>
+    <Compile Include="..\..\native\TriffAudio\AudioRingBuffer.cs" Link="AudioRingBuffer.cs" />
+  </ItemGroup>
+
   <!-- Tests run from the build output directory, which has no path back to the source tree,
        so the 11 shipped splash templates are copied alongside the test binaries here; see
        TestTemplates.cs for the loader that resolves them from "templates/". -->
