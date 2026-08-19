@@ -128,7 +128,7 @@ deviations from their own context median, scoring as high as real splashes.
 
 Shipped templates are embedded (`EmbeddedResource`, matching the existing
 `overlay-dist.zip` pattern). User templates live in
-`%APPDATA%\TriffHud\splash-templates\` and are loaded alongside them. A template
+`%APPDATA%\TriffHud\SplashTemplates\` and are loaded alongside them. A template
 whose `version` is unrecognised is skipped with a diagnostics line, never a crash.
 
 ## Alert integration
@@ -264,9 +264,17 @@ re-activation) starts its warm-up again.
 
 ## Concurrency
 
-One capture thread per client (event-driven, ~10 ms wakeups) writing into a lock-free
-ring buffer; one detection timer at 4 Hz reading from it. Detection never runs on
-the capture thread and never on the UI thread. Detection results are queued and
+One capture thread per client (event-driven, ~10 ms wakeups) and one detection timer
+at 4 Hz. **This section originally specified a lock-free ring buffer with detection
+never running on the capture thread; the Task 8 redesign deliberately reversed both
+halves and this describes what was built.** Scoring a whole 30 s ring once per tick
+turned out to mean ~5,600 FFTs per client per tick, so the per-hop FFT work moved
+into the capture callback (`RollingBandBuffer.Append`), leaving the tick to build and
+score one patch from already-computed bands. Both buffers (`AudioRingBuffer`,
+`RollingBandBuffer`) lock rather than being lock-free — with a writer on the capture
+thread and a reader on the timer thread, an unsynchronised race here would present as
+a detection-accuracy problem rather than as the threading bug it is. Detection still
+never runs on the UI thread. Detection results are queued and
 drained with the `Interlocked.CompareExchange` re-entrancy idiom used three times
 already in this codebase (`TriffAlertsService.cs:528-532`, `:873-893`,
 `TriffViewSubsystem.cs:1187-1192`).

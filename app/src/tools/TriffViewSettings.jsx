@@ -1799,6 +1799,12 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
                 onChange={(value) => patchAlerts({ splashDetectionEnabled: value })}
               />
             </div>
+            {alerts.splashDetectionEnabled && !alerts.enabled ? (
+              <p className="triffview-muted">
+                Alerts are switched off, so splash detection will listen but never alert. Turn on "Enable alerts"
+                above.
+              </p>
+            ) : null}
             <SliderControl
               label="Detection threshold"
               min={10}
@@ -1985,6 +1991,10 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
             {splashCapture ? (
               splashCapture.reason === "no-session" ? (
                 <p className="triffview-muted">Enable splash detection first, then capture from this client.</p>
+              ) : splashCapture.reason === "no-client" ? (
+                <p className="triffview-muted">That client is no longer available. Pick another and capture again.</p>
+              ) : splashCapture.reason === "failed" ? (
+                <p className="triffview-muted">Capture failed. See the diagnostics log for details.</p>
               ) : splashCapture.candidates.length ? (
                 <div className="triff-splash-candidate-list">
                   {splashCapture.candidates.map((candidate) => (

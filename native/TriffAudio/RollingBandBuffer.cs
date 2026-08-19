@@ -50,6 +50,16 @@ public sealed class RollingBandBuffer
     /// exactly the one <see cref="SplashFeatures.ComputeBands"/> would otherwise zero-pad, so
     /// nothing here duplicates or drops a frame relative to a single batch call over the same raw
     /// samples - only how the work is spread across calls differs.
+    ///
+    /// Known waste, measured and left in deliberately: this still computes roughly 4x more FFTs
+    /// than strictly necessary. Bounding the span passed to <see cref="SplashFeatures.ComputeBands"/>
+    /// (below) removes most of the overshoot but not all of it - that method's contract is
+    /// "frames = samples.Length / HopSize", so for the n usable frames wanted it always also
+    /// computes about FftSize/HopSize - 1 ~= 12 trailing frames whose windows run off the end of
+    /// the span and are zero-padded, which this then discards. With typical ~10 ms capture chunks
+    /// (one or two usable frames per call) that dominates. Removing it properly needs a
+    /// ComputeBands overload taking an explicit frame count; it is not a matter of tightening the
+    /// arithmetic here.
     /// </summary>
     public void Append(ReadOnlySpan<float> samples)
     {
