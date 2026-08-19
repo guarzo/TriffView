@@ -3,12 +3,14 @@ using Xunit;
 
 public class AlertSoundNormalizationTests
 {
-    // Every id offered by ALERT_SOUND_OPTIONS in app/src/tools/TriffViewSettings.jsx. The three
-    // soft tones were added because the original four all peak in the 2-5 kHz band, where a
-    // repeated alert becomes painful fastest; they are additive, so a user who chose one of the
-    // originals keeps it.
+    // Every id offered by ALERT_SOUND_OPTIONS in app/src/tools/TriffViewSettings.jsx.
     public static readonly TheoryData<string> ShippedSoundIds =
-        new() { "none", "chime", "bell", "pulse", "alarm", "woop", "siren", "ding" };
+        new() { "none", "chime", "bell", "pulse", "ding" };
+
+    // Retired for being harsh: all three peaked in the 2-5 kHz band and ran ~7 dB hotter than the
+    // rest of the set.
+    public static readonly TheoryData<string> RetiredSoundIds =
+        new() { "alarm", "siren", "woop" };
 
     private static string NormalizedSound(string sound)
     {
@@ -33,6 +35,35 @@ public class AlertSoundNormalizationTests
     public void SoundIdIsTrimmedAndLowercased(string stored, string expected)
     {
         Assert.Equal(expected, NormalizedSound(stored));
+    }
+
+    // The point of the remap. These users deliberately chose an audible alert; letting a retired id
+    // fall through to "none" would silently stop alerting them, which is worse than the annoyance
+    // the retirement exists to fix.
+    [Theory]
+    [MemberData(nameof(RetiredSoundIds))]
+    public void RetiredSoundIdMigratesToPulseRatherThanSilence(string retiredId)
+    {
+        Assert.Equal("pulse", NormalizedSound(retiredId));
+    }
+
+    // Settings are normalized on both load and save, so a migrated value is re-normalized on every
+    // subsequent pass. The remap has to be stable or a saved setting could drift.
+    [Theory]
+    [MemberData(nameof(RetiredSoundIds))]
+    public void MigrationIsIdempotent(string retiredId)
+    {
+        Assert.Equal("pulse", NormalizedSound(NormalizedSound(retiredId)));
+    }
+
+    // The retired ids are matched case-insensitively like every other id, so a config written with
+    // different casing still migrates rather than falling through to "none".
+    [Theory]
+    [InlineData("Alarm")]
+    [InlineData("  SIREN ")]
+    public void RetiredSoundIdMigratesRegardlessOfCasingOrWhitespace(string stored)
+    {
+        Assert.Equal("pulse", NormalizedSound(stored));
     }
 
     [Theory]

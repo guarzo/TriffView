@@ -5,8 +5,10 @@ Run with no arguments to regenerate chime.wav, bell.wav and pulse.wav in place:
 
     python3 scripts/generate-alert-sounds.py
 
-The four older sounds (alarm, woop, siren, ding) are not generated here - they
-came from upstream as .ogg assets and are only converted, not synthesised.
+The one older sound still shipped, ding, is not generated here - it came from
+upstream as an .ogg asset and is only converted, not synthesised. The other
+three originals (alarm, siren, woop) were retired for being harsh; saved
+settings naming them are remapped to pulse by NormalizeSound.
 
 These three are committed as .wav rather than produced at build time, so the
 build needs neither Python nor numpy; this script exists so they can be retuned
@@ -15,8 +17,8 @@ a sound is a named constant below.
 
 Why they sound the way they do
 ------------------------------
-The older sounds peak between 2 kHz and 5 kHz, which is where the ear is most
-sensitive and where a repeated alert becomes painful fastest. These sit at
+The retired sounds peaked between 2 kHz and 5 kHz, which is where the ear is
+most sensitive and where a repeated alert becomes painful fastest. These sit at
 600-900 Hz instead - low enough not to pierce, high enough to stay clear of
 EVE's own low-frequency ambience. Attacks are slow enough (10-15 ms) to avoid
 the click that reads as urgency, and each sound decays smoothly to silence
@@ -34,11 +36,12 @@ import numpy as np
 
 SAMPLE_RATE = 48_000
 
-# Loudness targets. The existing four sounds span roughly 9 dB of RMS
+# Loudness targets. The original four sounds spanned roughly 9 dB of RMS
 # (siren/woop at about -11 dBFS against alarm/ding at about -18), so one master
-# volume setting cannot suit all of them. These three are matched to the quieter
-# end of that range, which is also simply a more reasonable level for a sound
-# that fires unprompted while the app is in the background.
+# volume setting could not suit all of them. These three are matched to each
+# other and to the surviving ding at the quieter end of that range, which is
+# also simply a more reasonable level for a sound that fires unprompted while
+# the app is in the background.
 TARGET_RMS_DBFS = -20.0
 
 # Applied only if RMS normalisation pushes the peak this high. Decaying tones
@@ -132,10 +135,11 @@ def make_bell() -> np.ndarray:
 def make_pulse() -> np.ndarray:
     """Two quick low-mid tones - the most attention-getting of the three.
 
-    Intended for splash alerts, where something is actually happening. Two
+    Intended for splash alerts, where something is actually happening, and the
+    landing spot for anyone whose saved setting named a retired sound. Two
     events carry urgency that one does not, but the gap is wide enough (180 ms)
-    to read as two distinct taps rather than the fast warble that makes the
-    existing 'woop' grating - that one has 30 amplitude bursts in 0.7 s.
+    to read as two distinct taps rather than the fast warble that made the
+    retired 'woop' grating - that one had 30 amplitude bursts in 0.7 s.
     """
     duration = 0.70
     out = np.zeros(int(round(duration * SAMPLE_RATE)))

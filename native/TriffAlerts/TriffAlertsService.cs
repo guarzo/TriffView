@@ -316,17 +316,31 @@ public sealed class TriffAlertEventConfig
         };
     }
 
+    // Sounds retired for being harsh - they peaked in the 2-5 kHz band where a repeated alert
+    // grows painful fastest, and ran ~7 dB hotter than the rest of the set. Anyone who had one
+    // saved is moved to "pulse", the most attention-getting of the replacements: they chose an
+    // audible alert, so falling through to "none" would silently stop alerting them, which is a
+    // worse outcome than the annoyance this replaces.
+    //
+    // This cannot use DefaultsVersion/MigrateFromLegacyDefaults - that only rewrites values still
+    // matching an old default, and no event has ever defaulted to a sound. Remapping here instead
+    // catches every persisted value, and is idempotent since the targets are not themselves keys.
+    private static readonly Dictionary<string, string> RetiredSounds = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["alarm"] = "pulse",
+        ["siren"] = "pulse",
+        ["woop"] = "pulse",
+    };
+
     private static string NormalizeSound(string? sound)
     {
         var clean = (sound ?? "none").Trim().ToLowerInvariant();
+        if (RetiredSounds.TryGetValue(clean, out var replacement)) return replacement;
+
         // Must list every id offered by ALERT_SOUND_OPTIONS in the settings UI and resolved by
         // AlertSoundPlayer.SoundResourceUri. An id missing here is not rejected visibly - it is
         // rewritten to "none", so the option appears in the dropdown and then silently never plays.
-        return clean is "none"
-            or "chime" or "bell" or "pulse"
-            or "alarm" or "woop" or "siren" or "ding"
-            ? clean
-            : "none";
+        return clean is "none" or "chime" or "bell" or "pulse" or "ding" ? clean : "none";
     }
 
     private static string NormalizeColor(string? value, string fallback)
