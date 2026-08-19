@@ -3059,6 +3059,18 @@ button:disabled {
   padding: 10px;
 }
 
+/* Splash-only controls share the two-column grid above; these span both
+   columns so the divider heading and the capture/candidate/template lists
+   read as full-width blocks instead of being squeezed into one cell. */
+.triff-alert-splash-full {
+  grid-column: 1 / -1;
+}
+
+.triff-alert-splash-divider {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+}
+
 .triff-alert-color-wheel-row {
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);

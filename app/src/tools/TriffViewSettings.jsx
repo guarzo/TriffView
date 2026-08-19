@@ -1786,35 +1786,15 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
               onChange={(value) => patchAlerts({ persistUntilSelected: value })}
             />
           </div>
-          <div className="triffview-subsection">
-            <h4>Wormhole splash detection</h4>
-            <p className="triffview-muted">
-              Listens to each client's audio for the wormhole-activation sound. A client with detection off, or
-              whose capture could not start, can never raise this alert - see its status in Client management.
-            </p>
-            <div className="triffview-toggle-grid">
-              <Toggle
-                label="Enable wormhole splash detection"
-                checked={alerts.splashDetectionEnabled}
-                onChange={(value) => patchAlerts({ splashDetectionEnabled: value })}
-              />
-            </div>
-            {alerts.splashDetectionEnabled && !alerts.enabled ? (
-              <p className="triffview-muted">
-                Alerts are switched off, so splash detection will listen but never alert. Turn on "Enable alerts"
-                above.
-              </p>
-            ) : null}
-            <SliderControl
-              label="Detection threshold"
-              min={10}
-              max={90}
-              step={5}
-              unit="%"
-              value={Math.round((alerts.splashThreshold ?? 0.35) * 100)}
-              onCommit={(value) => patchAlerts({ splashThreshold: value / 100 })}
-            />
-          </div>
+          <SliderControl
+            label="Master volume"
+            min={0}
+            max={100}
+            step={5}
+            unit="%"
+            value={Math.round((alerts.masterVolume ?? 0.75) * 100)}
+            onCommit={(value) => patchAlerts({ masterVolume: value / 100 })}
+          />
           <div className="triff-alert-event-list">
             {ALERT_EVENT_DEFS.map((eventDef) => {
               const config = alerts.events[eventDef.id] || DEFAULT_ALERT_EVENTS[eventDef.id];
@@ -1928,6 +1908,152 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
                       checked={config.trayNotification}
                       onChange={(value) => patchAlertEvent(eventDef.id, { trayNotification: value })}
                     />
+                    {eventDef.id === "wormhole_splash" ? (
+                      <>
+                        <div className="triffview-subsection triff-alert-splash-divider">
+                          <h4>Splash detection</h4>
+                          <p className="triffview-muted">
+                            Listens to each client's audio for the wormhole-activation sound. A client with
+                            detection off, or whose capture could not start, can never raise this alert - see its
+                            status in Client management.
+                          </p>
+                        </div>
+                        <Toggle
+                          label="Listen to client audio"
+                          checked={alerts.splashDetectionEnabled}
+                          onChange={(value) => patchAlerts({ splashDetectionEnabled: value })}
+                        />
+                        <SliderControl
+                          label="Detection threshold"
+                          min={10}
+                          max={90}
+                          step={5}
+                          unit="%"
+                          value={Math.round((alerts.splashThreshold ?? 0.35) * 100)}
+                          onCommit={(value) => patchAlerts({ splashThreshold: value / 100 })}
+                        />
+                        {alerts.splashDetectionEnabled && !alerts.enabled ? (
+                          <p className="triffview-muted triff-alert-splash-full">
+                            Alerts are switched off, so splash detection will listen but never alert. Turn on
+                            "Enable alerts" above.
+                          </p>
+                        ) : null}
+                        <div className="triffview-subsection triff-alert-splash-divider">
+                          <h4>Splash templates</h4>
+                          <p className="triffview-muted">
+                            Capture the last 30 seconds of a client's audio and save the moments that sound like a
+                            wormhole activating. Candidates are ranked but not filtered - a low score can still be
+                            the splash the detector is missing.
+                          </p>
+                        </div>
+                        <div className="triff-splash-capture-row triff-alert-splash-full">
+                          <Field label="Client">
+                            <select value={splashClientKey} onChange={(event) => setSplashClientKey(event.target.value)}>
+                              <option value="">Select a client...</option>
+                              {clients.map((client) => (
+                                <option value={client.key} key={client.key}>
+                                  {client.characterName || client.title}
+                                </option>
+                              ))}
+                            </select>
+                          </Field>
+                          <button
+                            type="button"
+                            disabled={!splashClientKey || splashCapturing || !alerts.splashDetectionEnabled}
+                            onClick={captureSplashTemplate}
+                          >
+                            {splashCapturing ? "Capturing..." : "Capture recent splash"}
+                          </button>
+                          {!alerts.splashDetectionEnabled ? (
+                            <small className="triffview-muted">
+                              Turn on "Listen to client audio" above to capture.
+                            </small>
+                          ) : null}
+                        </div>
+                        {splashCapture ? (
+                          splashCapture.reason === "no-session" ? (
+                            <p className="triffview-muted triff-alert-splash-full">
+                              Detection is on, but this client hasn't started a listening session yet. Wait a
+                              moment and capture again.
+                            </p>
+                          ) : splashCapture.reason === "no-client" ? (
+                            <p className="triffview-muted triff-alert-splash-full">
+                              That client is no longer available. Pick another and capture again.
+                            </p>
+                          ) : splashCapture.reason === "failed" ? (
+                            <p className="triffview-muted triff-alert-splash-full">
+                              Capture failed. See the diagnostics log for details.
+                            </p>
+                          ) : splashCapture.candidates.length ? (
+                            <div className="triff-splash-candidate-list triff-alert-splash-full">
+                              {splashCapture.candidates.map((candidate) => (
+                                <div className="triff-splash-candidate" key={candidate.id}>
+                                  <span className="triff-splash-candidate-score">
+                                    {Math.round(candidate.score * 100)}%
+                                  </span>
+                                  <button type="button" onClick={() => playSplashAudio(candidate.wavBase64)}>
+                                    Play
+                                  </button>
+                                  <input
+                                    type="text"
+                                    placeholder="Template name"
+                                    value={candidateNameDrafts[candidate.id] || ""}
+                                    onChange={(event) =>
+                                      setCandidateNameDrafts((current) => ({
+                                        ...current,
+                                        [candidate.id]: event.target.value,
+                                      }))
+                                    }
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={!(candidateNameDrafts[candidate.id] || "").trim()}
+                                    onClick={() => saveSplashCandidate(candidate.id)}
+                                  >
+                                    Save as template
+                                  </button>
+                                  <button type="button" onClick={() => discardSplashCandidate(candidate.id)}>
+                                    Discard
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="triffview-muted triff-alert-splash-full">
+                              No candidates found in the last 30 seconds of audio.
+                            </p>
+                          )
+                        ) : null}
+                        <div className="triff-splash-template-list triff-alert-splash-full">
+                          {splashTemplates.length ? (
+                            splashTemplates.map((template) => (
+                              <div className="triff-splash-template" key={template.id}>
+                                <span>{template.name}</span>
+                                <button
+                                  type="button"
+                                  disabled={templateAudioStatus[template.id] === "loading"}
+                                  onClick={() => playSplashTemplate(template.id)}
+                                >
+                                  {templateAudioStatus[template.id] === "loading" ? "Loading..." : "Play"}
+                                </button>
+                                {templateAudioStatus[template.id] === "not-found" ? (
+                                  <small className="triffview-muted">No longer available</small>
+                                ) : null}
+                                {template.builtIn ? (
+                                  <small>Built-in</small>
+                                ) : (
+                                  <button type="button" onClick={() => deleteSplashTemplate(template.id)}>
+                                    Delete
+                                  </button>
+                                )}
+                              </div>
+                            ))
+                          ) : (
+                            <p className="triffview-muted">No saved templates yet.</p>
+                          )}
+                        </div>
+                      </>
+                    ) : null}
                   </div>
                   ) : null}
                 </section>
@@ -1956,104 +2082,6 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
             ) : (
               <p className="triffview-muted">No alerts in this session yet.</p>
             )}
-          </div>
-          <SliderControl
-            label="Master volume"
-            min={0}
-            max={100}
-            step={5}
-            unit="%"
-            value={Math.round((alerts.masterVolume ?? 0.75) * 100)}
-            onCommit={(value) => patchAlerts({ masterVolume: value / 100 })}
-          />
-          <div className="triffview-subsection">
-            <h4>Splash templates</h4>
-            <p className="triffview-muted">
-              Capture the last 30 seconds of a client's audio and save the moments that sound like a wormhole
-              activating. Candidates are ranked but not filtered - a low score can still be the splash the
-              detector is missing.
-            </p>
-            <div className="triff-splash-capture-row">
-              <Field label="Client">
-                <select value={splashClientKey} onChange={(event) => setSplashClientKey(event.target.value)}>
-                  <option value="">Select a client...</option>
-                  {clients.map((client) => (
-                    <option value={client.key} key={client.key}>
-                      {client.characterName || client.title}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <button type="button" disabled={!splashClientKey || splashCapturing} onClick={captureSplashTemplate}>
-                {splashCapturing ? "Capturing..." : "Capture recent splash"}
-              </button>
-            </div>
-            {splashCapture ? (
-              splashCapture.reason === "no-session" ? (
-                <p className="triffview-muted">Enable splash detection first, then capture from this client.</p>
-              ) : splashCapture.reason === "no-client" ? (
-                <p className="triffview-muted">That client is no longer available. Pick another and capture again.</p>
-              ) : splashCapture.reason === "failed" ? (
-                <p className="triffview-muted">Capture failed. See the diagnostics log for details.</p>
-              ) : splashCapture.candidates.length ? (
-                <div className="triff-splash-candidate-list">
-                  {splashCapture.candidates.map((candidate) => (
-                    <div className="triff-splash-candidate" key={candidate.id}>
-                      <span className="triff-splash-candidate-score">{Math.round(candidate.score * 100)}%</span>
-                      <button type="button" onClick={() => playSplashAudio(candidate.wavBase64)}>
-                        Play
-                      </button>
-                      <input
-                        type="text"
-                        placeholder="Template name"
-                        value={candidateNameDrafts[candidate.id] || ""}
-                        onChange={(event) =>
-                          setCandidateNameDrafts((current) => ({ ...current, [candidate.id]: event.target.value }))
-                        }
-                      />
-                      <button
-                        type="button"
-                        disabled={!(candidateNameDrafts[candidate.id] || "").trim()}
-                        onClick={() => saveSplashCandidate(candidate.id)}
-                      >
-                        Save as template
-                      </button>
-                      <button type="button" onClick={() => discardSplashCandidate(candidate.id)}>
-                        Discard
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="triffview-muted">No candidates found in the last 30 seconds of audio.</p>
-              )
-            ) : null}
-            <div className="triff-splash-template-list">
-              {splashTemplates.length ? (
-                splashTemplates.map((template) => (
-                  <div className="triff-splash-template" key={template.id}>
-                    <span>{template.name}</span>
-                    <button
-                      type="button"
-                      disabled={templateAudioStatus[template.id] === "loading"}
-                      onClick={() => playSplashTemplate(template.id)}
-                    >
-                      {templateAudioStatus[template.id] === "loading" ? "Loading..." : "Play"}
-                    </button>
-                    {templateAudioStatus[template.id] === "not-found" ? (
-                      <small className="triffview-muted">No longer available</small>
-                    ) : null}
-                    {template.builtIn ? <small>Built-in</small> : (
-                      <button type="button" onClick={() => deleteSplashTemplate(template.id)}>
-                        Delete
-                      </button>
-                    )}
-                  </div>
-                ))
-              ) : (
-                <p className="triffview-muted">No saved templates yet.</p>
-              )}
-            </div>
           </div>
         </div>
         ) : null}
