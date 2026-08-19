@@ -121,11 +121,13 @@ const DEFAULT_ALERTS = {
   events: DEFAULT_ALERT_EVENTS,
 };
 
+// Every id here must also be accepted by NormalizeSound in TriffAlertsService.cs and resolved in
+// AlertSoundPlayer.cs, or the option shows in the dropdown and silently plays nothing.
 const ALERT_SOUND_OPTIONS = [
   { value: "none", label: "None" },
-  { value: "alarm", label: "Alarm" },
-  { value: "woop", label: "Woop" },
-  { value: "siren", label: "Siren" },
+  { value: "chime", label: "Chime" },
+  { value: "bell", label: "Bell" },
+  { value: "pulse", label: "Pulse" },
   { value: "ding", label: "Ding" },
 ];
 

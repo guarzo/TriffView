@@ -76,8 +76,8 @@ internal sealed class AlertSoundPlayer
     /// <summary>
     /// The alert sounds ship as WPF <c>&lt;Resource&gt;</c> entries, which is what the
     /// single-file release build needs - but <see cref="MediaPlayer"/> cannot open them in place.
-    /// Verified against the real built assembly: opening
-    /// <c>pack://application:,,,/TriffView;component/Assets/sounds/alarm.wav</c> raises
+    /// Verified against the real built assembly: opening a sound as
+    /// <c>pack://application:,,,/TriffView;component/Assets/sounds/&lt;id&gt;.wav</c> raises
     /// <c>MediaFailed</c> with <c>NotSupportedException: "Only site-of-origin pack URIs are
     /// supported for media."</c>, while the same bytes written to a temp file and opened as a
     /// file URI open fine. Only <c>pack://siteoforigin:</c> works for media, and
@@ -135,9 +135,9 @@ internal sealed class AlertSoundPlayer
     /// </summary>
     private static Uri? SoundResourceUri(string soundId) => soundId.ToLowerInvariant() switch
     {
-        "alarm" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/alarm.wav", UriKind.Absolute),
-        "woop" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/woop.wav", UriKind.Absolute),
-        "siren" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/siren.wav", UriKind.Absolute),
+        "chime" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/chime.wav", UriKind.Absolute),
+        "bell" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/bell.wav", UriKind.Absolute),
+        "pulse" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/pulse.wav", UriKind.Absolute),
         "ding" => new Uri("pack://application:,,,/TriffView;component/Assets/sounds/ding.wav", UriKind.Absolute),
         _ => null,
     };
