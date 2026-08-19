@@ -4096,7 +4096,7 @@ button:disabled {
 
 .triffview-client {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   border: 1px solid var(--tv-border-muted);
@@ -4115,6 +4115,81 @@ button:disabled {
   color: var(--tv-accent);
   font-size: 10px;
   text-transform: uppercase;
+}
+
+.triff-audio-status {
+  border: 1px solid var(--tv-border);
+  background: var(--tv-control-bg);
+  padding: 3px 7px;
+  font-weight: 700;
+}
+
+.triff-audio-status.is-monitoring {
+  color: var(--tv-success);
+  border-color: var(--tv-success-border);
+}
+
+.triff-audio-status.is-unavailable {
+  color: var(--tv-muted);
+}
+
+.triff-audio-status.is-off {
+  color: var(--tv-muted);
+}
+
+/* Silent is the failure mode this feature exists to surface - a client that will
+   never alert must not read as just another grey status label. */
+.triff-audio-status.is-silent {
+  color: var(--tv-danger-text);
+  border-color: var(--tv-danger-border);
+  background: rgba(var(--tv-danger-bg-rgb), 0.35);
+}
+
+.triff-splash-capture-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.triff-splash-candidate-list,
+.triff-splash-template-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.triff-splash-candidate {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--tv-border-muted);
+  background: rgba(var(--tv-surface-rgb), 0.72);
+  padding: 8px 10px;
+  font-size: 11px;
+}
+
+.triff-splash-candidate-score {
+  flex: 0 0 auto;
+  min-width: 40px;
+  color: var(--tv-accent);
+  font-weight: 700;
+}
+
+.triff-splash-candidate input[type="text"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.triff-splash-template {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--tv-border-muted);
+  background: rgba(var(--tv-surface-rgb), 0.72);
+  padding: 8px 10px;
+  font-size: 11px;
 }
 
 @media (max-width: 900px) {
