@@ -189,6 +189,18 @@ Today `App.jsx` plays sound by diffing `alertHistory[0].id` out of
 is precisely the situation this feature targets. The web-side playback is
 removed to avoid double-play.
 
+It hangs off a **new** `AlertSoundRequested` event with its own gate on
+`config.Sound != "none"`, not off the existing `AlertNotificationRequested`.
+That callback is raised only when `config.TrayNotification` is enabled
+(`TriffViewSubsystem.cs:1216-1218`), while web playback today is independent of
+tray configuration — reusing it would silently remove sound for any alert with
+sound on and tray off.
+
+Playback uses WPF's `MediaPlayer` (which exposes `Volume`, unlike
+`System.Media.SoundPlayer`) against the sound assets converted from `.ogg` to
+16-bit PCM WAV and added as `<Resource>`. It is fire-and-forget: the raising
+path runs on the WPF dispatcher and must never block on audio.
+
 This is a deliberate behaviour change for existing combat alerts; the user
 approved it.
 
@@ -303,8 +315,11 @@ independent grounds. Recorded here so it is not re-proposed.
 ## Documentation correction
 
 `CLAUDE.md` states there is one test project with a `<Compile Include>`
-constraint. There are two: `tests/TriffView.Tests` (net8.0, cross-platform,
-individually linked — as documented) and `native/TriffView.Tests` (net8.0-windows,
-`ProjectReference` + `InternalsVisibleTo`, 27 test files). The documented
+constraint. There are three targets: `tests/TriffView.Tests` (net8.0,
+cross-platform, individually linked — as documented, run by
+`.github/workflows/build.yml:29-30`), `native/TriffView.Tests` (net8.0-windows,
+`ProjectReference` + `InternalsVisibleTo`, 27 test files, run by
+`.github/workflows/ci.yml:49-55`), and the `tests/TriffAlerts.Tests` regression
+harness invoked via `dotnet run` (`.github/workflows/ci.yml:58`). The documented
 constraint applies only to the first. This should be corrected as part of this
 work.

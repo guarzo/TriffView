@@ -172,7 +172,7 @@ git commit -m "feat(audio): pure spectral feature extraction for splash detectio
 
       public static SplashTemplate? FromWav(string id, string name, bool builtIn,
                                             ReadOnlySpan<byte> wav, ReadOnlySpan<byte> statsJson);
-      public static byte[] WriteWav(ReadOnlySpan<float> samples);          // 16 kHz mono 16-bit
+      public static byte[] WriteWav(ReadOnlySpan<float> samples, out double gain);  // 16 kHz mono 16-bit
       public static byte[] WriteStatsJson(double gain, float[] median, float[] mad);
       public static float[] ReadWavMono16(ReadOnlySpan<byte> wav);         // returns -1..1 samples
       // NOTE: callers MUST divide samples by the stats file's `gain` before feature
@@ -199,9 +199,11 @@ public class SplashTemplateTests
     public void WavRoundTripsWithinQuantisationError()
     {
         var src = Ramp(16000);
-        var round = SplashTemplate.ReadWavMono16(SplashTemplate.WriteWav(src));
+        var wav = SplashTemplate.WriteWav(src, out var gain);
+        var round = SplashTemplate.ReadWavMono16(wav);
         Assert.Equal(src.Length, round.Length);
-        for (var i = 0; i < src.Length; i++) Assert.InRange(round[i] - src[i], -0.001f, 0.001f);
+        for (var i = 0; i < src.Length; i++)
+            Assert.InRange(round[i] / gain - src[i], -0.001f, 0.001f);   // undo the write gain
     }
 
     [Fact]
@@ -211,8 +213,9 @@ public class SplashTemplateTests
         var bands = SplashFeatures.ComputeBands(samples);
         SplashFeatures.ComputeContextStats(bands, bands.GetLength(1), out var med, out var mad);
 
+        var wav = SplashTemplate.WriteWav(samples, out var gain);
         var t = SplashTemplate.FromWav("splash-01", "test", true,
-                    SplashTemplate.WriteWav(samples), SplashTemplate.WriteStatsJson(med, mad));
+                    wav, SplashTemplate.WriteStatsJson(gain, med, mad));
 
         Assert.NotNull(t);
         Assert.Equal(SplashFeatures.BandCount * SplashFeatures.WindowFrames, t!.Patch.Length);
@@ -224,15 +227,18 @@ public class SplashTemplateTests
     {
         var samples = Ramp(32000);
         var bad = System.Text.Encoding.UTF8.GetBytes(
-            "{\"version\":99,\"sampleRate\":16000,\"median\":[],\"mad\":[]}");
-        Assert.Null(SplashTemplate.FromWav("x", "x", false, SplashTemplate.WriteWav(samples), bad));
+            "{\"version\":99,\"sampleRate\":16000,\"gain\":1.0,\"median\":[],\"mad\":[]}");
+        Assert.Null(SplashTemplate.FromWav("x", "x", false,
+            SplashTemplate.WriteWav(samples, out _), bad));
     }
 }
 ```
 
 - [ ] **Step 2: Run to verify it fails.** Expected: FAIL — `SplashTemplate` does not exist.
 
-- [ ] **Step 3: Implement.** Parse RIFF chunks properly (do not assume the `data` chunk is at a fixed offset — walk the chunk list). Reject anything that is not 16 kHz mono 16-bit PCM. Reject `version != 1`, or `median`/`mad` arrays whose length is not `BandCount`, by returning `null` — never throwing.
+- [ ] **Step 3: Implement.** Parse RIFF chunks properly (do not assume the `data` chunk is at a fixed offset — walk the chunk list). Reject anything that is not 16 kHz mono 16-bit PCM. Reject `version != 1`, a missing or zero `gain`, or `median`/`mad` arrays whose length is not `BandCount`, by returning `null` — never throwing.
+
+`FromWav` **must divide the decoded samples by `gain`** before computing bands. Clips are peak-normalised on write so quiet ones survive 16-bit quantisation; skipping the division was measured to destroy class separation entirely (quiet negatives get amplified ~200x and score as high as real splashes).
 
 - [ ] **Step 4: Run tests.** Expected: PASS.
 
@@ -261,7 +267,8 @@ git commit -m "feat(audio): splash template model and on-disk format"
   {
       public SplashDetector(IReadOnlyList<SplashTemplate> templates);
       public int TemplateCount { get; }
-      public double Score(ReadOnlySpan<float> samples);                    // best score over the buffer
+      public double Score(ReadOnlySpan<float> samples);                    // derives context from the buffer
+      public double Score(ReadOnlySpan<float> samples, float[] median, float[] mad);  // caller-supplied context
       public IReadOnlyList<(double Score, double OffsetSeconds)> RankWindows(
           ReadOnlySpan<float> samples, int maxResults, double minSeparationSeconds);
   }
@@ -334,7 +341,7 @@ git commit -m "feat(audio): splash detector with template matching"
 
 **Files:**
 - Create: `tests/TriffView.Tests/SplashAccuracyTests.cs`
-- Create: `tests/TriffView.Tests/fixtures/splash-accuracy/README.md`
+- Modify: `tests/TriffView.Tests/TriffView.Tests.csproj` (copy fixtures to the output directory)
 
 **Interfaces:**
 - Consumes: `SplashDetector`
@@ -346,9 +353,22 @@ The fixtures are **already committed** at `tests/TriffView.Tests/fixtures/splash
 
 A 3-second clip has no 30 s context of its own, so the fixture's stored statistics **must** be used rather than recomputed from the clip. Recomputing collapses the separation — measured.
 
-- [ ] **Step 1: Write the test**
+- [ ] **Step 1: Make the fixtures reachable from the test binary**
+
+Tests run from the output directory, which does not contain the fixtures unless the csproj copies them. Add to `tests/TriffView.Tests/TriffView.Tests.csproj`:
+
+```xml
+<ItemGroup>
+  <None Include="fixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+</ItemGroup>
+```
+
+Without this the test throws `FileNotFoundException` rather than failing meaningfully.
+
+- [ ] **Step 2: Write the test**
 
 ```csharp
+using System.Text.Json;
 using TriffView.Audio;
 using Xunit;
 
@@ -366,22 +386,36 @@ public class SplashAccuracyTests
     public void ClassifiesFixturesCorrectlyAtDefaultThreshold(string file, bool isSplash)
     {
         var det = new SplashDetector(TestTemplates.LoadShipped());
-        var samples = SplashTemplate.ReadWavMono16(
-            File.ReadAllBytes(Path.Combine("fixtures", "splash-accuracy", file)));
-        var score = det.Score(samples);
+        var dir = Path.Combine("fixtures", "splash-accuracy");
+
+        // A 3 s fixture has no 30 s context of its own. Its stored statistics MUST be
+        // used; recomputing them from the clip collapses the separation (measured).
+        using var meta = JsonDocument.Parse(
+            File.ReadAllText(Path.Combine(dir, Path.ChangeExtension(file, ".json"))));
+        var root = meta.RootElement;
+        var gain = root.GetProperty("gain").GetDouble();
+        var median = root.GetProperty("median").EnumerateArray().Select(e => (float)e.GetDouble()).ToArray();
+        var mad = root.GetProperty("mad").EnumerateArray().Select(e => (float)e.GetDouble()).ToArray();
+
+        var samples = SplashTemplate.ReadWavMono16(File.ReadAllBytes(Path.Combine(dir, file)));
+        for (var i = 0; i < samples.Length; i++) samples[i] = (float)(samples[i] / gain);
+
+        var score = det.Score(samples, median, mad);
         if (isSplash) Assert.True(score >= 0.35, $"{file} scored {score:F3}, expected >= 0.35");
         else          Assert.True(score <  0.35, $"{file} scored {score:F3}, expected < 0.35");
     }
 }
 ```
 
-- [ ] **Step 3: Run tests.** Expected: PASS. If a fixture fails, do **not** move the threshold to make it pass — report it; it means the port differs from the validated Python implementation.
+- [ ] **Step 3: Run tests.** Expected: PASS, all eight. Reference scores from the validated implementation, for comparison if a case fails: splashes 0.62, 0.69, 0.69, 0.71; non-splashes 0.06, 0.15, 0.19, 0.30.
+
+If a fixture fails, do **not** move the threshold to make it pass — report it. It means the C# port differs from the validated implementation, and the threshold is the one thing that must not absorb that difference.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add tests/TriffView.Tests/SplashAccuracyTests.cs tests/TriffView.Tests/fixtures
-git commit -m "test(audio): accuracy regression fixtures for splash detection"
+git add tests/TriffView.Tests/SplashAccuracyTests.cs tests/TriffView.Tests/TriffView.Tests.csproj
+git commit -m "test(audio): accuracy regression test against committed fixtures"
 ```
 
 ---
@@ -411,7 +445,10 @@ git commit -m "test(audio): accuracy regression fixtures for splash detection"
 
   internal sealed class WasapiProcessCapture : IDisposable  // Windows-only
   {
-      public WasapiProcessCapture(uint processId, Action<ReadOnlySpan<float>> onSamples);
+      // ReadOnlySpan<T> is a ref struct and cannot be a generic type argument on
+      // .NET 8, so Action<ReadOnlySpan<float>> does not compile. Use a custom delegate.
+      public delegate void SampleCallback(ReadOnlySpan<float> samples);
+      public WasapiProcessCapture(uint processId, SampleCallback onSamples);
       public bool Start(out string? error);                 // false on failure; never throws
       public DateTime LastPacketUtc { get; }
       public void Dispose();
@@ -622,15 +659,21 @@ public class ExternalAlertTests
         return svc;
     }
 
+    // AlertTriggered is raised from a thread-pool drain (TriffAlertsService.cs:873-885),
+    // never synchronously. Every test here must wait rather than assert immediately.
+    private static bool Wait(ManualResetEventSlim gate) => gate.Wait(TimeSpan.FromSeconds(5));
+
     [Fact]
     public void RaisesAndRecordsHistory()
     {
         var svc = NewService(out _);
         TriffAlertEvent? seen = null;
-        svc.AlertTriggered += (_, e) => seen = e;
+        using var gate = new ManualResetEventSlim();
+        svc.AlertTriggered += (_, e) => { seen = e; gate.Set(); };
 
         svc.RaiseExternalAlert("wormhole_splash", "Pilot", "audio", "Wormhole activated");
 
+        Assert.True(Wait(gate), "AlertTriggered did not fire within 5s");
         Assert.NotNull(seen);
         Assert.Equal("wormhole_splash", seen!.Type);
         Assert.Equal("Pilot", seen.CharacterName);
@@ -642,12 +685,15 @@ public class ExternalAlertTests
     {
         var svc = NewService(out _);
         var count = 0;
-        svc.AlertTriggered += (_, _) => count++;
+        using var gate = new ManualResetEventSlim();
+        svc.AlertTriggered += (_, _) => { Interlocked.Increment(ref count); gate.Set(); };
 
         svc.RaiseExternalAlert("wormhole_splash", "Pilot", "audio", "one");
         svc.RaiseExternalAlert("wormhole_splash", "Pilot", "audio", "two");
 
-        Assert.Equal(1, count);              // second suppressed by the 15 s cooldown
+        Assert.True(Wait(gate), "AlertTriggered did not fire within 5s");
+        Thread.Sleep(500);                   // allow a second (incorrect) raise to arrive
+        Assert.Equal(1, Volatile.Read(ref count));   // second suppressed by the 15 s cooldown
     }
 
     [Fact]
@@ -660,9 +706,10 @@ public class ExternalAlertTests
         svc.UpdateSettings(settings);
 
         var count = 0;
-        svc.AlertTriggered += (_, _) => count++;
+        svc.AlertTriggered += (_, _) => Interlocked.Increment(ref count);
         svc.RaiseExternalAlert("wormhole_splash", "Pilot", "audio", "x");
-        Assert.Equal(0, count);
+        Thread.Sleep(500);                   // a disabled event must produce nothing at all
+        Assert.Equal(0, Volatile.Read(ref count));
     }
 
     [Fact]
@@ -731,7 +778,7 @@ public class TriffAudioServiceTests
     public void ReportsOffForEveryClientWhenDisabled()
     {
         using var svc = new TriffAudioService();
-        svc.UpdateSettings(enabled: false, threshold: 0.30);
+        svc.UpdateSettings(enabled: false, threshold: 0.35);
         svc.SetClients(new[] { (1234u, "Pilot") });
         Assert.All(svc.Statuses, s => Assert.Equal("off", s.Status));
     }
@@ -740,7 +787,7 @@ public class TriffAudioServiceTests
     public void DroppingAClientRemovesItsStatus()
     {
         using var svc = new TriffAudioService();
-        svc.UpdateSettings(enabled: true, threshold: 0.30);
+        svc.UpdateSettings(enabled: true, threshold: 0.35);
         svc.SetClients(new[] { (1234u, "Pilot"), (5678u, "Other") });
         Assert.Equal(2, svc.Statuses.Count);
         svc.SetClients(new[] { (1234u, "Pilot") });
@@ -751,11 +798,15 @@ public class TriffAudioServiceTests
     public void NeverAlertsForAClientWithNoCharacterName()
     {
         using var svc = new TriffAudioService();
-        svc.UpdateSettings(enabled: true, threshold: 0.30);
+        svc.UpdateSettings(enabled: true, threshold: 0.35);
         var raised = 0;
         svc.SplashDetected += (_, _) => raised++;
+        // Deliberately NOT using TestTemplates: that helper lives in tests/TriffView.Tests,
+        // which native/TriffView.Tests cannot see (it references only TriffView.csproj).
+        // This test is about the no-character-name rule, not about detection quality, so
+        // any audio that would score above threshold will do.
         svc.SetClients(new[] { (1234u, "") });          // character-select screen
-        svc.ForceDetectionPassForTests(1234u, TestTemplates.LoadShippedSamples(0));
+        svc.ForceDetectionPassForTests(1234u, score: 0.99);
         Assert.Equal(0, raised);
     }
 }
@@ -769,7 +820,7 @@ public class TriffAudioServiceTests
   - Status rules: `off` when disabled; `unavailable` when `Start` failed or no packet for 10 s (then tear down and retry on the next `SetClients`); `silent` when capture is alive but no non-zero sample in 60 s; otherwise `monitoring`.
   - Detections are queued and drained with the `Interlocked.CompareExchange` idiom used at `TriffAlertsService.cs:873-893`.
   - `SplashDetected` is raised off any lock, never on the UI thread.
-  - Expose `ForceDetectionPassForTests` as `internal` so the test above can drive one pass without real audio.
+  - Expose `internal void ForceDetectionPassForTests(uint processId, double score)` so the tests above can drive the post-detection decision path (character-name rule, threshold comparison, event raising) without real audio or templates. It must run the same code the real detection loop runs after scoring — not a parallel copy, or the test proves nothing.
 
 - [ ] **Step 4: Run tests.** Expected: PASS.
 
@@ -787,8 +838,10 @@ git commit -m "feat(audio): capture lifecycle, detection loop and per-client hea
 **Files:**
 - Modify: `native/TriffView/TriffViewSubsystem.cs` — construct the service near `:85`, wire `SplashDetected`, feed `SetClients` from the client refresh at `:536`, add `audioStatus` to the client projection at `:2514`, handle the new `triffaudio:*` messages in `HandleWebMessage` at `:240`, add `case`s to `ApplyAlertsPatch` at `:1089`
 - Create: `native/TriffAudio/AlertSoundPlayer.cs`
-- Modify: `native/MainWindow.xaml.cs` — play alert sound natively
-- Modify: `app/src/App.jsx:280-306` — remove web-side sound playback
+- Modify: `native/MainWindow.xaml.cs` — subscribe to the new sound event and play
+- Modify: `native/TriffView.csproj` — add the converted WAV sound assets as `<Resource>`
+- Create: `native/TriffView/Assets/sounds/{alarm,woop,siren,ding}.wav`
+- Modify: `app/src/App.jsx` — remove web-side sound playback (block at `:280-306`, imports at `:3-6`)
 - Test: `native/TriffView.Tests/AudioStateProjectionTests.cs`
 
 **Interfaces:**
@@ -824,14 +877,41 @@ public class AudioStateProjectionTests
 
 - [ ] **Step 3: Implement the wiring.** On `SplashDetected`, resolve the character name and call `_alerts.RaiseExternalAlert("wormhole_splash", characterName, "Audio", "Wormhole activated nearby")`, marshalling to the dispatcher exactly as `OnAlertTriggered` does at `:1180`.
 
-- [ ] **Step 4: Implement `AlertSoundPlayer`** and call it from `MainWindow.OnTriffAlertNotification` (`:1053`) for every alert whose `config.Sound != "none"`, honouring `MasterVolume`. Then delete the sound playback block in `App.jsx:280-306` and its now-unused `.ogg` imports at `:22-25`, moving the sound assets to native resources. Verify no other JS references them.
+- [ ] **Step 4: Add a sound event with its own gate.**
 
-- [ ] **Step 5: Run tests and build.** Expected: PASS, and the native build succeeds.
+**Do not reuse `AlertNotificationRequested`.** That event is raised only when `config.TrayNotification` is enabled (`TriffViewSubsystem.cs:1216-1218`), whereas web playback today is independent of tray configuration (`App.jsx:280-306`). Hanging sound off it would silently remove sound for any alert configured with sound on and tray off — a regression in the behaviour this change exists to improve.
 
-- [ ] **Step 6: Commit**
+Add a sibling branch in `ProcessPendingAlerts`, next to the flash and tray branches:
+
+```csharp
+if (!string.Equals(config.Sound, "none", StringComparison.OrdinalIgnoreCase))
+{
+    AlertSoundRequested?.Invoke(alert, config.Sound, Settings.Alerts.MasterVolume);
+}
+```
+
+with `public event Action<TriffAlertEvent, string, double>? AlertSoundRequested;` on the controller, mirroring `AlertNotificationRequested`.
+
+- [ ] **Step 5: Implement `AlertSoundPlayer` and convert the assets.**
+
+The four existing assets are `.ogg`, which WPF's `MediaPlayer` does not reliably decode. Convert each to 16-bit PCM WAV and add them as `<Resource>` in `native/TriffView.csproj` — the same build action already used for `Assets\TriffView.ico` at `:38` — then reference them by `pack://application:,,,/Assets/sounds/{id}.wav`.
+
+Use `System.Windows.Media.MediaPlayer`, not `System.Media.SoundPlayer`: only the former exposes `Volume`, and `MasterVolume` is a real user-facing setting that would otherwise be silently dropped.
+
+Two properties to implement deliberately rather than discover:
+- `ProcessPendingAlerts` runs on the WPF dispatcher, so playback must be fire-and-forget. Never block the dispatcher on audio.
+- A single `MediaPlayer` cuts off the previous sound when two alerts land close together. That is acceptable given per-event cooldowns; keep one instance and accept the cutoff rather than building a pool.
+
+Subscribe in `MainWindow` alongside the existing `AlertNotificationRequested` subscription at `:241`.
+
+- [ ] **Step 6: Remove web-side playback.** Delete the block at `App.jsx:280-306` and the now-unused `.ogg` imports at `App.jsx:3-6`, plus `playedAlertIdsRef` / `alertAudioReadyRef` if nothing else uses them. Grep for any other reference to the `.ogg` assets before deleting the files.
+
+- [ ] **Step 7: Run tests and build.** Expected: PASS, and the native build succeeds.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add native/TriffView/TriffViewSubsystem.cs native/TriffAudio/AlertSoundPlayer.cs native/MainWindow.xaml.cs app/src/App.jsx native/TriffView.Tests/AudioStateProjectionTests.cs
+git add native/TriffView/TriffViewSubsystem.cs native/TriffAudio/AlertSoundPlayer.cs native/MainWindow.xaml.cs native/TriffView.csproj native/TriffView/Assets/sounds app/src/App.jsx native/TriffView.Tests/AudioStateProjectionTests.cs
 git commit -m "feat: wire splash detection into alerts and move alert sound native"
 ```
 
@@ -842,13 +922,15 @@ git commit -m "feat: wire splash detection into alerts and move alert sound nati
 **Files:**
 - Modify: `app/src/tools/TriffViewSettings.jsx` — add `wormhole_splash` to `ALERT_EVENT_DEFS` (`:25`), `ALERT_EVENT_DEFAULTS` (`:34`) and `DEFAULT_ALERT_EVENTS` (`:85`); add the splash toggle and threshold to the alerts panel (`:1636-1810`); add the Splash templates section; add `audioStatus` to the Clients panel (`:2003-2013`)
 
+Line anchors in this task are approximate and will drift once earlier edits land — locate by symbol name, not by line.
+
 **Interfaces:**
 - Consumes: `triffview:state` (`clients[].audioStatus`, `alerts.splashDetectionEnabled`, `alerts.splashThreshold`), the `triffaudio:*` messages
 - Produces: nothing consumed by later tasks
 
 - [ ] **Step 1: Add the event type to all three JS constants.** All four copies (three JS, one C#) must agree; nothing enforces this.
 
-- [ ] **Step 2: Add the splash controls** to the alerts panel: an enable toggle and a threshold slider (0.10–0.90, default 0.30), committing via the existing `patchAlerts` helper at `:137`.
+- [ ] **Step 2: Add the splash controls** to the alerts panel: an enable toggle and a threshold slider (0.10–0.90, default 0.35), committing via the existing `patchAlerts` helper at `:133-135` (note `:137` is `patchAlertEvent`, which is a different function).
 
 - [ ] **Step 3: Add the Splash templates section.** Client picker plus **Capture recent splash**, which sends `triffaudio:capture`. On `triffaudio:capture-result`, render three candidates each with a play button (`new Audio("data:audio/wav;base64," + wavBase64)`), a **Save as template** button sending `triffaudio:save-template`, and a discard. Below it, the template list from `triffaudio:templates` with play and delete; delete is hidden for `builtIn` templates.
 
@@ -877,7 +959,15 @@ git commit -m "feat(ui): splash alert settings, template capture, and audio stat
 - Modify: `CLAUDE.md` — correct the testing section
 - Modify: `docs/DIAGNOSTICS.md` — note the new audio diagnostics lines
 
-- [ ] **Step 1: Correct the testing section of CLAUDE.md.** It currently describes only `tests/TriffView.Tests` and its `<Compile Include>` constraint. Record that `native/TriffView.Tests` also exists (net8.0-windows, `ProjectReference` + `InternalsVisibleTo`, 27 test files, run by `.github/workflows/ci.yml:49-55`), and that the Windows-free constraint applies only to the first.
+- [ ] **Step 1: Correct the testing section of CLAUDE.md.** It currently describes only `tests/TriffView.Tests` and its `<Compile Include>` constraint. There are in fact **three** test targets:
+
+| Project | Framework | Style | CI |
+|---|---|---|---|
+| `tests/TriffView.Tests` | net8.0 | `<Compile Include>` links, cross-platform | `.github/workflows/build.yml:29-30` |
+| `native/TriffView.Tests` | net8.0-windows | `ProjectReference` + `InternalsVisibleTo`, 27 test files | `.github/workflows/ci.yml:49-55` |
+| `tests/TriffAlerts.Tests` | regression harness, run via `dotnet run` | — | `.github/workflows/ci.yml:58` |
+
+Record that the Windows-free `<Compile Include>` constraint applies only to the first.
 
 - [ ] **Step 2: Add a short audio section to CLAUDE.md** covering the fixed detector constants, the fact that changing them invalidates the shipped templates, and the muted-client silent-failure mode.
 
@@ -896,7 +986,7 @@ git commit -m "docs: correct test project description, document audio subsystem"
 
 Nothing in this plan proves runtime behaviour. This project cannot be run from WSL, so everything above is a claim until exercised on Windows with real EVE clients.
 
-- [ ] **Step 1: Build and run the full test suite.** Both test projects. Paste the output; do not summarise it.
+- [ ] **Step 1: Build and run the full test suite.** All three targets — `tests/TriffView.Tests`, `native/TriffView.Tests`, and the `tests/TriffAlerts.Tests` regression harness (`dotnet run --project tests/TriffAlerts.Tests/TriffAlerts.Tests.csproj -c Release`). Paste the output; do not summarise it.
 
 - [ ] **Step 2: Copy `native/Assets/overlay-dist.zip` from the main checkout** and rebuild, or the app serves the "missing overlay" page and no UI check is valid. Confirm with `[Reflection.Assembly]::LoadFrom(...).GetManifestResourceNames()`.
 
