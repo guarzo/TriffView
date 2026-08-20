@@ -109,10 +109,7 @@ public partial class MainWindow : Window
     private const string VirtualHostName = "app.triffview.local";
     private const string EmbeddedOverlayResourceName = "TriffView.Assets.overlay-dist.zip";
     private const int MaxWebMessageCharacters = 1_200_000;
-    private static readonly JsonSerializerOptions WebMessageJsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-    };
+    private static readonly JsonSerializerOptions WebMessageJsonOptions = WebMessageJson.Options;
     private static readonly nint HwndTopmost = new(-1);
     private static readonly nint HwndNotTopmost = new(-2);
     private const uint SwpNoSize = 0x0001;
@@ -128,6 +125,7 @@ public partial class MainWindow : Window
     private readonly string[] _args;
     private readonly TriffViewUpdateChecker _updateChecker;
     private readonly System.Windows.Threading.DispatcherTimer _conflictTimer;
+    private int _conflictCheckInProgress;
     private Forms.NotifyIcon? _trayIcon;
     private Forms.ContextMenuStrip? _trayMenu;
     private Drawing.Icon? _trayIconImage;
@@ -238,7 +236,8 @@ public partial class MainWindow : Window
             Dispatcher,
             PostAppEvent,
             () => Dispatcher.InvokeAsync(BringSettingsAbovePreviews),
-            alwaysOnTop => Dispatcher.InvokeAsync(() => ApplySettingsAlwaysOnTop(alwaysOnTop))
+            alwaysOnTop => Dispatcher.InvokeAsync(() => ApplySettingsAlwaysOnTop(alwaysOnTop)),
+            postJsonToHud: PostAppEventJson
         );
         _triffView.AlertNotificationRequested += OnTriffAlertNotification;
         _triffView.AlertSoundRequested += OnTriffAlertSoundRequested;
@@ -928,7 +927,23 @@ public partial class MainWindow : Window
     {
         try
         {
-            var json = JsonSerializer.Serialize(message, WebMessageJsonOptions);
+            PostAppEventJson(JsonSerializer.Serialize(message, WebMessageJsonOptions));
+        }
+        catch
+        {
+            // The UI can miss a state event during startup/shutdown without breaking native control.
+        }
+    }
+
+    /// <summary>
+    /// Posts a payload that has already been serialized. Used by the state post, which needs the
+    /// JSON anyway to tell whether anything changed since the last one - serializing it a second
+    /// time here would double the cost of the largest and most frequent message the app sends.
+    /// </summary>
+    private void PostAppEventJson(string json)
+    {
+        try
+        {
             Dispatcher.InvokeAsync(() => AppWebView.CoreWebView2?.PostWebMessageAsJson(json));
         }
         catch
@@ -1138,11 +1153,48 @@ public partial class MainWindow : Window
         });
     }
 
-    private void CheckRuntimeTriffHudConflict()
+    private async void CheckRuntimeTriffHudConflict()
     {
-        if (_conflictWarningShown || !App.IsTriffHudRunning()) return;
+        if (_conflictWarningShown) return;
+
+        // Process.GetProcessesByName snapshots the whole process table. On the UI thread, every
+        // two seconds, for the entire session, that is a periodic stall on the one thread that
+        // must stay responsive - and for almost every user the answer is "no conflict" forever,
+        // so the cheap _conflictWarningShown guard never starts short-circuiting it. Do the
+        // enumeration on a pool thread and come back to the UI only when there is something to
+        // say. The re-entrancy guard matters because the timer keeps ticking while the await is
+        // outstanding.
+        if (Interlocked.CompareExchange(ref _conflictCheckInProgress, 1, 0) != 0) return;
+
+        bool conflict;
+        try
+        {
+            conflict = await Task.Run(App.IsTriffHudRunning);
+        }
+        catch
+        {
+            // A failed probe is not evidence of a conflict; try again on the next tick.
+            return;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _conflictCheckInProgress, 0);
+        }
+
+        if (_conflictWarningShown || !conflict) return;
+
+        // Shutdown guard. Making this probe asynchronous introduced a yield point that did not
+        // exist when it ran synchronously inside the timer tick: Cleanup() can now run while the
+        // probe is in flight, tearing down the tray menu and the controller this method is about
+        // to touch. Cleanup stops this timer first, so a stopped timer is the signal that the
+        // window is going away and the continuation must not resume into UI work.
+        if (!_conflictTimer.IsEnabled) return;
 
         _conflictWarningShown = true;
+
+        // Nothing left to detect: the warning shows once and the state it reports cannot be
+        // un-shown, so the timer has no further work to do.
+        _conflictTimer.Stop();
         _triffView?.SetEnabled(false);
         _triffView?.SetHotkeysSuspended(true);
         UpdateControlState();
@@ -1166,6 +1218,11 @@ public partial class MainWindow : Window
     private void Cleanup()
     {
         _conflictTimer.Stop();
+
+        // Before anything is torn down: a session shorter than the flush interval would
+        // otherwise discard every counter it gathered, and short annoyed sessions are the ones
+        // worth reading.
+        TriffViewPerfLog.FlushFinal();
 
         if (_triffView != null)
         {

@@ -53,8 +53,27 @@ public partial class App : System.Windows.Application
 
     internal static bool IsTriffHudRunning()
     {
-        return System.Diagnostics.Process.GetProcessesByName("TriffHud")
-            .Any(process =>
+        // Enumerating processes can fail - a process exiting mid-enumeration, or a policy that
+        // denies the query. This runs during OnStartup, before any window exists, so an escaping
+        // exception is a launch failure with nothing on screen to explain it. "Cannot tell" is
+        // resolved to "no conflict", which preserves what the app does today when no TriffHud is
+        // found: carry on starting. The periodic probe simply asks again on its next tick.
+        System.Diagnostics.Process[] processes;
+        try
+        {
+            processes = System.Diagnostics.Process.GetProcessesByName("TriffHud");
+        }
+        catch
+        {
+            return false;
+        }
+
+        // Process objects returned here own OS handles. This runs on a timer for the whole
+        // session, so leaving them to finalization churns handles for no reason - dispose each
+        // one as it is examined.
+        try
+        {
+            return processes.Any(process =>
             {
                 try
                 {
@@ -65,5 +84,10 @@ public partial class App : System.Windows.Application
                     return false;
                 }
             });
+        }
+        finally
+        {
+            foreach (var process in processes) process.Dispose();
+        }
     }
 }
