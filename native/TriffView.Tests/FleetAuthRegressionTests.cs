@@ -119,7 +119,7 @@ public sealed class FleetAuthRegressionTests
     }
 
     [Fact]
-    public void RefreshedIdentityMustMatchStoredBoss()
+    public void RefreshedIdentityMismatchDeletesStoredCredential()
     {
         var state = StateWithBoss();
         var credentials = new FleetCredentials((Target(), "old-refresh"));
@@ -130,7 +130,7 @@ public sealed class FleetAuthRegressionTests
         controller.HandleWebMessage("trifffleets:detect-fleet", null);
 
         Assert.True(SpinWait.SpinUntil(() => messages.Any(message => message.Contains("different character", StringComparison.Ordinal)), TimeSpan.FromSeconds(2)));
-        Assert.Equal("old-refresh", credentials.Read(Target()));
+        Assert.Null(credentials.Read(Target()));
         Assert.Equal(CharacterId, Assert.Single(state.Bosses).CharacterId);
     }
 
@@ -149,7 +149,7 @@ public sealed class FleetAuthRegressionTests
     }
 
     [Fact]
-    public void OwnerMismatchKeepsPriorCredentialAndOwner()
+    public void OwnerMismatchDeletesStoredCredentialAndKeepsOwner()
     {
         var state = StateWithBoss();
         var credentials = new FleetCredentials((Target(), "old-refresh"));
@@ -160,8 +160,38 @@ public sealed class FleetAuthRegressionTests
         controller.HandleWebMessage("trifffleets:detect-fleet", null);
 
         Assert.True(SpinWait.SpinUntil(() => messages.Any(message => message.Contains("ownership changed", StringComparison.Ordinal)), TimeSpan.FromSeconds(2)));
-        Assert.Equal("old-refresh", credentials.Read(Target()));
+        Assert.Null(credentials.Read(Target()));
         Assert.Equal("owner-123456", Assert.Single(state.Bosses).OwnerHash);
+    }
+
+    [Fact]
+    public void DefinitiveSsoRefreshFailureDeletesStoredCredential()
+    {
+        var state = StateWithBoss();
+        var credentials = new FleetCredentials((Target(), "old-refresh"));
+        var sso = new FleetSso { Refresh = Task.FromException<EveValidatedToken>(new OAuthTokenException(HttpStatusCode.BadRequest, "invalid_grant", "EVE SSO token request returned 400 (invalid_grant).")) };
+        var messages = new ConcurrentQueue<string>();
+        using var controller = Controller(state, credentials, sso, new UnauthorizedThenMissingFleetHandler(), messages);
+
+        controller.HandleWebMessage("trifffleets:detect-fleet", null);
+
+        Assert.True(SpinWait.SpinUntil(() => messages.Any(message => message.Contains("invalid_grant", StringComparison.Ordinal)), TimeSpan.FromSeconds(2)));
+        Assert.Null(credentials.Read(Target()));
+    }
+
+    [Fact]
+    public void NonDefinitiveSsoRefreshFailurePreservesStoredCredential()
+    {
+        var state = StateWithBoss();
+        var credentials = new FleetCredentials((Target(), "old-refresh"));
+        var sso = new FleetSso { Refresh = Task.FromException<EveValidatedToken>(new OAuthTokenException(HttpStatusCode.ServiceUnavailable, "temporarily_unavailable", "EVE SSO token request returned 503 (temporarily_unavailable).")) };
+        var messages = new ConcurrentQueue<string>();
+        using var controller = Controller(state, credentials, sso, new UnauthorizedThenMissingFleetHandler(), messages);
+
+        controller.HandleWebMessage("trifffleets:detect-fleet", null);
+
+        Assert.True(SpinWait.SpinUntil(() => messages.Any(message => message.Contains("temporarily_unavailable", StringComparison.Ordinal)), TimeSpan.FromSeconds(2)));
+        Assert.Equal("old-refresh", credentials.Read(Target()));
     }
 
     [Fact]
