@@ -113,7 +113,7 @@ public class ControllerLifecycleTests : IDisposable
     }
 
     [Fact]
-    public void OwnerMismatchRequiresReauthenticationWithoutReplacingCredential()
+    public void OwnerMismatchDeletesStoredCredentialAndKeepsOwner()
     {
         SaveCharacter();
         var credentials = new MemoryCredentials((Target(), "old-refresh"));
