@@ -92,6 +92,11 @@ const ALERT_EVENT_DEFAULTS = {
   },
 };
 
+const CYCLE_MEMORY_HELP = [
+  "When enabled, each cycle group remembers the last successfully activated client. You can switch to another group and later continue where you stopped.",
+  "When disabled, cycling behaves like EVE-O Preview. If the active client is outside the requested group, Forward starts at the first available client and Backward starts at the last available client. Cycling continues normally while the active client remains in that group.",
+];
+
 const DEFAULT_ALERT_EVENTS = ALERT_EVENT_DEFS.reduce((events, event) => {
   const defaults = ALERT_EVENT_DEFAULTS[event.id];
   events[event.id] = {
@@ -783,14 +788,16 @@ function parseCycleGroups(profile) {
   return groups.length ? groups : [{ id: "all", name: "All", forwardGestures: [], backwardGestures: [], charactersText: "", enabled: true }];
 }
 
-function cycleGroupsTextFromGroups(groups) {
+function cycleGroupsPatchFromGroups(groups) {
   return groups
-    .filter((group) => String(group.name || "").trim())
-    .map((group) => {
-      const members = splitNames(group.charactersText).join(",");
-      return [group.name.trim(), splitGestures(group.forwardGestures).join(", "), splitGestures(group.backwardGestures).join(", "), members].join("|");
-    })
-    .join("\n");
+    .map((group) => ({
+      id: group.id || cycleGroupId(group.name),
+      name: String(group.name || "").trim() || "Cycle group",
+      forwardGestures: splitGestures(group.forwardGestures),
+      backwardGestures: splitGestures(group.backwardGestures),
+      charactersText: splitNames(group.charactersText).join("\n"),
+      enabled: group.enabled !== false,
+    }));
 }
 
 function HotkeySummaryButton({ label, gestures, onOpen }) {
@@ -1080,6 +1087,7 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
   // triffaudio:template-audio request is in flight, "not-found" briefly after a
   // found:false result (the template was deleted elsewhere while the request was in flight).
   const [templateAudioStatus, setTemplateAudioStatus] = useState({});
+  const [cycleMemoryHelpOpen, setCycleMemoryHelpOpen] = useState(false);
   const guidePromptedRef = useRef(false);
   // Kept in sync below so the capture-result handler - registered once, in an
   // effect with an empty dependency array - can read the *current* client
@@ -1176,7 +1184,7 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
 
   function updateCycleGroups(nextGroups, selectedId = profile.selectedCycleGroupId) {
     patchProfile({
-      cycleGroupsText: cycleGroupsTextFromGroups(nextGroups),
+      cycleGroups: cycleGroupsPatchFromGroups(nextGroups),
       selectedCycleGroupId: selectedId || nextGroups[0]?.id || "",
     });
   }
@@ -2134,11 +2142,14 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
         {activeSection === "cycles" ? (
         <div className="triffview-panel">
           <TextAreaSetting
-            label="Character order"
+            label="Default character order"
             value={profile.characterOrderText}
             placeholder={"Character One\nCharacter Two"}
             onCommit={(value) => patchProfile({ characterOrderText: value })}
           />
+          <p className="triffview-muted">
+            Controls preview order and is used by cycle groups whose Members list is empty.
+          </p>
           <CharacterListTools
             value={profile.characterOrderText}
             availableNames={openCharacterNames}
@@ -2146,23 +2157,97 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
           />
           <div className="triffview-subsection">
             <h4>Cycle Groups</h4>
-            <Field label="Active group">
-              <select
-                value={profile.selectedCycleGroupId || cycleGroups[0]?.id || ""}
-                onChange={(event) => patchProfile({ selectedCycleGroupId: event.target.value })}
+            <div className="triffview-cycle-memory-row">
+              <Toggle
+                label="Remember each cycle group's position"
+                checked={profile.rememberCycleGroupPositions !== false}
+                onChange={(value) => patchProfile({ rememberCycleGroupPositions: value })}
+              />
+              <button
+                type="button"
+                className="triffview-info-button"
+                aria-label="About cycle group position memory"
+                aria-expanded={cycleMemoryHelpOpen}
+                title={CYCLE_MEMORY_HELP.join("\n\n")}
+                onClick={() => setCycleMemoryHelpOpen((current) => !current)}
               >
-                {cycleGroups.map((group) => (
-                  <option value={group.id} key={group.id}>
-                    {group.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
+                <span aria-hidden="true">i</span>
+              </button>
+            </div>
+            {cycleMemoryHelpOpen ? (
+              <div className="triffview-cycle-memory-help" role="note">
+                {CYCLE_MEMORY_HELP.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
+              </div>
+            ) : null}
+            <div className="triffview-cycle-table-wrap">
+              <table className="triffview-cycle-table">
+                <thead>
+                  <tr>
+                    <th className="is-active-column">Active</th>
+                    <th>Group</th>
+                    <th>Forward</th>
+                    <th>Backward</th>
+                    <th className="is-members-column">Members</th>
+                    <th className="is-action-column">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cycleGroups.map((group) => (
+                    <tr
+                      className={group.id === selectedCycleGroup?.id ? "is-selected" : ""}
+                      key={group.id}
+                      onClick={() => patchProfile({ selectedCycleGroupId: group.id })}
+                    >
+                      <td className="is-active-column">
+                        <input
+                          type="checkbox"
+                          checked={group.enabled !== false}
+                          aria-label={`${group.enabled !== false ? "Disable" : "Enable"} ${group.name}`}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) => updateCycleGroup(group.id, { enabled: event.target.checked })}
+                        />
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="triffview-cycle-name"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            patchProfile({ selectedCycleGroupId: group.id });
+                          }}
+                        >
+                          {group.name}
+                        </button>
+                      </td>
+                      <td title={splitGestures(group.forwardGestures).join(", ")}>{gestureSummary(group.forwardGestures)}</td>
+                      <td title={splitGestures(group.backwardGestures).join(", ")}>{gestureSummary(group.backwardGestures)}</td>
+                      <td className="is-members-column">
+                        {splitNames(group.charactersText).length || "All"}
+                      </td>
+                      <td className="is-action-column">
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            patchProfile({ selectedCycleGroupId: group.id });
+                          }}
+                        >
+                          Edit
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
             <div className="triffview-actions">
               <button
                 type="button"
                 onClick={() => {
-                  const name = `Group ${cycleGroups.length + 1}`;
+                  const existingNames = new Set(cycleGroups.map((group) => group.name.toLowerCase()));
+                  let groupNumber = cycleGroups.length + 1;
+                  while (existingNames.has(`group ${groupNumber}`)) groupNumber += 1;
+                  const name = `Group ${groupNumber}`;
                   const nextGroups = [
                     ...cycleGroups,
                     {
@@ -2182,6 +2267,7 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
             </div>
             {selectedCycleGroup ? (
               <div className="triffview-cycle-card" key={selectedCycleGroup.id}>
+                <h5>Editing {selectedCycleGroup.name}</h5>
                 <DraftControl
                   label="Name"
                   value={selectedCycleGroup.name}
@@ -2200,7 +2286,7 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
                 <TextAreaSetting
                   label="Members"
                   value={selectedCycleGroup.charactersText}
-                  placeholder={"Leave blank for all characters in Character order"}
+                  placeholder={"Leave blank for all characters in Default character order"}
                   onCommit={(value) => updateCycleGroup(selectedCycleGroup.id, { charactersText: value })}
                 />
                 <CharacterListTools
@@ -2213,8 +2299,10 @@ function TriffViewSettings({ open = true, initialSection = null, onInitialSectio
                   <button
                     type="button"
                     onClick={() => {
+                      const selectedIndex = cycleGroups.findIndex((item) => item.id === selectedCycleGroup.id);
                       const nextGroups = cycleGroups.filter((item) => item.id !== selectedCycleGroup.id);
-                      updateCycleGroups(nextGroups, nextGroups[0]?.id || "");
+                      const nextSelection = nextGroups[Math.min(selectedIndex, nextGroups.length - 1)]?.id || "";
+                      updateCycleGroups(nextGroups, nextSelection);
                     }}
                     disabled={cycleGroups.length <= 1}
                   >

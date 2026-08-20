@@ -1,6 +1,6 @@
 using System.Drawing;
 
-namespace TriffView;
+namespace TriffView.Preview;
 
 /// <summary>
 /// Distinguishes a click from a drag for preview interactions.
