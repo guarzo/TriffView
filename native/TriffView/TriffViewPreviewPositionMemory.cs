@@ -95,7 +95,13 @@ internal sealed class TriffViewPreviewPositionMemory
         return slotIndex;
     }
 
-    private bool IsHeldByAnother(Rectangle rect, PreviewClientIdentity requester)
+    /// <summary>
+    /// True if some client other than <paramref name="requester"/> is remembered at exactly
+    /// <paramref name="rect"/>. Exposed (not just used internally by <see cref="FindFreeSlot"/>)
+    /// because callers resolving a non-default-stack candidate - e.g. a title-derived fallback -
+    /// need the same collision check before trusting that candidate.
+    /// </summary>
+    public bool IsHeldByAnother(Rectangle rect, PreviewClientIdentity requester)
     {
         foreach (var (identity, position) in _positions)
         {

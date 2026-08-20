@@ -188,4 +188,55 @@ public class PreviewPositionMemoryTests
 
         Assert.Equal(7, memory.FindFreeSlot(7, Window(1), _ => Slot(0)));
     }
+
+    // ---- Title-fallback collision (character-select clients) ----
+    //
+    // ResolveFrameRect (TriffViewSubsystem.cs) derives a title-based candidate rectangle for
+    // nameless (character-select) clients from a same-title index that only sees the live client
+    // list. That index can't see who currently holds a rectangle in _positionMemory, so a client
+    // further down the order can land on a rect another client is already pinned to. ResolveFrameRect
+    // discards the candidate in that case via IsHeldByAnother and falls through to the
+    // collision-probed default stack instead - these tests exercise that same decision.
+
+    [Fact]
+    public void ATitleFallbackHeldByAnotherClientFallsThroughToTheDefaultStack()
+    {
+        var memory = new TriffViewPreviewPositionMemory();
+        memory.Remember(Window(2), Title);
+
+        Rectangle? titleFallback = Title;
+        if (memory.IsHeldByAnother(titleFallback.Value, Window(1))) titleFallback = null;
+
+        Assert.Equal(Default, TriffViewPreviewPositionMemory.Resolve(null, null, titleFallback, Default));
+    }
+
+    [Fact]
+    public void ATitleFallbackHeldByNobodyIsStillUsed()
+    {
+        var memory = new TriffViewPreviewPositionMemory();
+
+        Rectangle? titleFallback = Title;
+        if (memory.IsHeldByAnother(titleFallback.Value, Window(1))) titleFallback = null;
+
+        Assert.Equal(Title, TriffViewPreviewPositionMemory.Resolve(null, null, titleFallback, Default));
+    }
+
+    [Fact]
+    public void TheFirstClientOntoATitleRectKeepsItsTitlePosition()
+    {
+        // Window(1) is the first client onto this rect - nobody else is remembered there yet, so
+        // it must keep the title-derived position rather than being pushed to the default stack.
+        var memory = new TriffViewPreviewPositionMemory();
+
+        Rectangle? titleFallback = Title;
+        if (memory.IsHeldByAnother(titleFallback.Value, Window(1))) titleFallback = null;
+        Assert.Equal(Title, TriffViewPreviewPositionMemory.Resolve(null, null, titleFallback, Default));
+
+        // Once Window(1) is remembered there, a second client computing the same title rect must
+        // fall through instead of doubling up on it.
+        memory.Remember(Window(1), Title);
+        Rectangle? secondTitleFallback = Title;
+        if (memory.IsHeldByAnother(secondTitleFallback.Value, Window(2))) secondTitleFallback = null;
+        Assert.Equal(Default, TriffViewPreviewPositionMemory.Resolve(null, null, secondTitleFallback, Default));
+    }
 }
