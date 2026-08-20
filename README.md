@@ -97,7 +97,7 @@ It does not broadcast input, forward input, read game memory, inject into the EV
 
 TriffView is licensed under the GNU General Public License, version 3 only (`GPL-3.0-only`). See `LICENSE`.
 
-Third-party dependency, font, WebView2, and EVE/CCP trademark notices are listed in `THIRD_PARTY_NOTICES.md`.
+Third-party dependency, font, alert sound, WebView2, and EVE/CCP trademark notices are listed in `THIRD_PARTY_NOTICES.md`. The alert sounds are CC BY 4.0 and require that the credit there travels with any redistribution.
 
 ## Release Verification
 
