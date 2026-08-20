@@ -16,10 +16,7 @@ namespace TriffView.TriffFleets;
 
 internal sealed class TriffFleetsController : IDisposable
 {
-    private const string ClientId = "7d2454c3191c4254a4b67d8f71f2b972";
-    private const string RedirectUri = "http://127.0.0.1:51777/trifffleets/callback/";
     internal const string CredentialPrefix = "TriffView.TriffFleets.RefreshToken.";
-    private const string UserAgent = "TriffView/1.6.2 (+https://github.com/NarcisussX/TriffView)";
     private const string Scopes = "esi-fleets.read_fleet.v1 esi-fleets.write_fleet.v1";
     private static readonly HashSet<string> RequiredScopes = new(Scopes.Split(' '), StringComparer.Ordinal);
     private static readonly TimeSpan AuthTimeout = TimeSpan.FromMinutes(5);
@@ -87,7 +84,7 @@ internal sealed class TriffFleetsController : IDisposable
         RecoverOwnCredentials();
     }
 
-    private static EsiClient CreateEsiClient() => new(Http, JsonOptions, UserAgent);
+    private static EsiClient CreateEsiClient() => new(Http, JsonOptions, EveApplication.UserAgent);
 
     private void RecoverOwnCredentials()
     {
@@ -124,8 +121,8 @@ internal sealed class TriffFleetsController : IDisposable
     private static IEveSsoClient CreateSsoClient()
     {
         var keys = new EveSigningKeySource(Http);
-        var validator = new EveJwtValidator(ClientId, RequiredScopes, keys);
-        return new EveSsoClient(Http, new EveSsoOptions(ClientId, RedirectUri, RequiredScopes, UserAgent), validator);
+        var validator = new EveJwtValidator(EveApplication.ClientId, RequiredScopes, keys);
+        return new EveSsoClient(Http, new EveSsoOptions(EveApplication.ClientId, EveApplication.RedirectUri, RequiredScopes, EveApplication.UserAgent), validator);
     }
 
     public bool HandleWebMessage(string type, JsonObject? message)
@@ -475,7 +472,7 @@ internal sealed class TriffFleetsController : IDisposable
         }
         catch (SocketException exception)
         {
-            PostError("auth", $"Could not open the local SSO callback listener at {RedirectUri}. {exception.Message}");
+            PostError("auth", $"Could not open the local SSO callback listener at {EveApplication.RedirectUri}. {exception.Message}");
         }
         catch (Exception exception)
         {
@@ -569,14 +566,24 @@ internal sealed class TriffFleetsController : IDisposable
             var target = RefreshTokenTarget(characterId);
             var oldRefresh = _credentials.Read(target);
             if (string.IsNullOrWhiteSpace(oldRefresh)) throw new OAuthTokenException(HttpStatusCode.Unauthorized, "invalid_grant", "This fleet boss needs to authenticate again.");
-            var token = await _sso.RefreshAsync(oldRefresh, _lifetime.Token);
-            if (_state.Bosses.All(item => item.CharacterId != characterId)) throw new OperationCanceledException("Fleet boss was forgotten.");
-            if (token.Identity.CharacterId != characterId) throw new OAuthTokenException(HttpStatusCode.Unauthorized, "identity_mismatch", "Refreshed token belongs to a different character.");
-            if (!string.IsNullOrWhiteSpace(boss.OwnerHash)
-                && !string.IsNullOrWhiteSpace(token.Identity.OwnerHash)
-                && !string.Equals(boss.OwnerHash, token.Identity.OwnerHash, StringComparison.Ordinal))
+            EveValidatedToken token;
+            try
             {
-                throw new OAuthTokenException(HttpStatusCode.Unauthorized, "owner_changed", "Character ownership changed; authenticate again.");
+                token = await _sso.RefreshAsync(oldRefresh, _lifetime.Token);
+                if (_state.Bosses.All(item => item.CharacterId != characterId)) throw new OperationCanceledException("Fleet boss was forgotten.");
+                if (token.Identity.CharacterId != characterId) throw new OAuthTokenException(HttpStatusCode.Unauthorized, "identity_mismatch", "Refreshed token belongs to a different character.");
+                if (!string.IsNullOrWhiteSpace(boss.OwnerHash)
+                    && !string.IsNullOrWhiteSpace(token.Identity.OwnerHash)
+                    && !string.Equals(boss.OwnerHash, token.Identity.OwnerHash, StringComparison.Ordinal))
+                {
+                    throw new OAuthTokenException(HttpStatusCode.Unauthorized, "owner_changed", "Character ownership changed; authenticate again.");
+                }
+            }
+            catch (OAuthTokenException exception)
+            {
+                LogRefreshFailure(characterId, exception);
+                if (exception.IsDefinitiveAuthorizationFailure) DeleteRefreshTokenSafely(target);
+                throw;
             }
             var rotated = string.IsNullOrWhiteSpace(token.RefreshToken) ? oldRefresh : token.RefreshToken;
             var credentialChanged = !string.Equals(rotated, oldRefresh, StringComparison.Ordinal);
@@ -1601,10 +1608,10 @@ internal sealed class TriffFleetsController : IDisposable
             var state = new
             {
                 type = "trifffleets:state",
-                authConfigured = !string.IsNullOrWhiteSpace(ClientId),
+                authConfigured = !string.IsNullOrWhiteSpace(EveApplication.ClientId),
                 authInProgress = _authInProgress,
                 requiredScopes = Scopes.Split(' '),
-                redirectUri = RedirectUri,
+                redirectUri = EveApplication.RedirectUri,
                 selectedBossCharacterId = selectedBoss?.CharacterId ?? 0,
                 bosses = _state.Bosses.Select(boss => new
                 {
@@ -1652,6 +1659,28 @@ internal sealed class TriffFleetsController : IDisposable
 
     private static string RefreshTokenTarget(long characterId) => CredentialPrefix + characterId;
     private SemaphoreSlim TokenLock(long characterId) => _tokenLocks.GetOrAdd(characterId, _ => new SemaphoreSlim(1, 1));
+
+    // invalid_grant/identity_mismatch/owner_changed on the refresh path mean EVE will never
+    // accept this refresh token again; keeping it around only accumulates dead Credential
+    // Manager entries. Best-effort: a delete failure must not mask the auth error that caused it.
+    private void DeleteRefreshTokenSafely(string target)
+    {
+        try
+        {
+            _credentials.Delete(target);
+        }
+        catch
+        {
+            // Ignored: the caller is already about to surface the definitive auth failure.
+        }
+    }
+
+    private static void LogRefreshFailure(long characterId, OAuthTokenException exception)
+    {
+        TriffViewDiagnostics.Log(
+            "trifffleets-sso",
+            $"characterId={characterId} clientId={EveApplication.ClientId} status={(int)exception.StatusCode} error={exception.ErrorCode}");
+    }
 }
 
 internal sealed class TriffFleetsLocalState

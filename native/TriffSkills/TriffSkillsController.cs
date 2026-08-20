@@ -13,9 +13,6 @@ namespace TriffView.TriffSkills;
 
 internal sealed class TriffSkillsController : IDisposable
 {
-    private const string DefaultClientId = "7d2454c3191c4254a4b67d8f71f2b972";
-    private const string RedirectUri = "http://127.0.0.1:51777/trifffleets/callback/";
-    private const string UserAgent = "TriffView/1.6.2 (+https://github.com/NarcisussX/TriffView)";
     private const int SkillCategoryId = 16;
     private static readonly TimeSpan AuthTimeout = TimeSpan.FromMinutes(5);
     private static readonly HashSet<string> RequiredScopes = new(StringComparer.Ordinal)
@@ -23,14 +20,6 @@ internal sealed class TriffSkillsController : IDisposable
         "esi-skills.read_skills.v1",
         "esi-skills.read_skillqueue.v1",
     };
-
-#if DEBUG
-    private static readonly string ClientId = Environment.GetEnvironmentVariable("TRIFFVIEW_TRIFFSKILLS_CLIENT_ID")?.Trim() is { Length: > 0 } value
-        ? value
-        : DefaultClientId;
-#else
-    private const string ClientId = DefaultClientId;
-#endif
 
     private static readonly HttpClient SharedHttp = new() { Timeout = TimeSpan.FromSeconds(20) };
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -97,15 +86,15 @@ internal sealed class TriffSkillsController : IDisposable
         LoadPlans();
     }
 
-    private static EsiClient CreateEsiClient() => new(SharedHttp, JsonOptions, UserAgent);
+    private static EsiClient CreateEsiClient() => new(SharedHttp, JsonOptions, EveApplication.UserAgent);
 
     private static IEveSsoClient CreateSsoClient()
     {
         var keys = new EveSigningKeySource(SharedHttp);
-        var validator = new EveJwtValidator(ClientId, RequiredScopes, keys);
+        var validator = new EveJwtValidator(EveApplication.ClientId, RequiredScopes, keys);
         return new EveSsoClient(
             SharedHttp,
-            new EveSsoOptions(ClientId, RedirectUri, RequiredScopes, UserAgent),
+            new EveSsoOptions(EveApplication.ClientId, EveApplication.RedirectUri, RequiredScopes, EveApplication.UserAgent),
             validator);
     }
 
@@ -188,7 +177,7 @@ internal sealed class TriffSkillsController : IDisposable
         }
         catch (SocketException exception)
         {
-            PostError("auth", $"Could not open the local SSO callback listener at {RedirectUri}. {exception.Message}");
+            PostError("auth", $"Could not open the local SSO callback listener at {EveApplication.RedirectUri}. {exception.Message}");
         }
         catch (OAuthTokenException exception)
         {
@@ -621,7 +610,7 @@ internal sealed class TriffSkillsController : IDisposable
         var state = new
         {
             type = "triffskills:state",
-            authConfigured = !string.IsNullOrWhiteSpace(ClientId),
+            authConfigured = !string.IsNullOrWhiteSpace(EveApplication.ClientId),
             authInProgress = _authInProgress,
             refreshInFlight = _refreshGate.CurrentCount == 0,
             characters = _state.Characters.Select(character => new

@@ -113,7 +113,7 @@ public class ControllerLifecycleTests : IDisposable
     }
 
     [Fact]
-    public void OwnerMismatchRequiresReauthenticationWithoutReplacingCredential()
+    public void OwnerMismatchDeletesStoredCredentialAndKeepsOwner()
     {
         SaveCharacter();
         var credentials = new MemoryCredentials((Target(), "old-refresh"));
@@ -123,8 +123,46 @@ public class ControllerLifecycleTests : IDisposable
         controller.HandleWebMessage("triffskills:refresh-characters", null);
 
         Assert.True(SpinWait.SpinUntil(() => TriffSkillsState.Load().State.Characters.Single().NeedsReauth, SettleTimeout));
-        Assert.Equal("old-refresh", credentials.Read(Target()));
+        Assert.Null(credentials.Read(Target()));
         Assert.Equal("owner-123456", TriffSkillsState.Load().State.Characters.Single().OwnerHash);
+    }
+
+    [Fact]
+    public void DefinitiveSsoRefreshFailureDeletesStoredCredential()
+    {
+        SaveCharacter();
+        var credentials = new MemoryCredentials((Target(), "old-refresh"));
+        var sso = new ControlledSso
+        {
+            RefreshTask = Task.FromException<EveValidatedToken>(
+                new OAuthTokenException(HttpStatusCode.BadRequest, "invalid_grant", "EVE SSO token request returned 400 (invalid_grant)."))
+        };
+        using var controller = Controller(credentials, sso, new SkillHandler(), new());
+
+        controller.HandleWebMessage("triffskills:refresh-characters", null);
+
+        Assert.True(SpinWait.SpinUntil(() => TriffSkillsState.Load().State.Characters.Single().NeedsReauth, SettleTimeout));
+        Assert.Null(credentials.Read(Target()));
+    }
+
+    [Fact]
+    public void NonDefinitiveSsoRefreshFailurePreservesStoredCredential()
+    {
+        SaveCharacter();
+        var credentials = new MemoryCredentials((Target(), "old-refresh"));
+        var sso = new ControlledSso
+        {
+            RefreshTask = Task.FromException<EveValidatedToken>(
+                new OAuthTokenException(HttpStatusCode.ServiceUnavailable, "temporarily_unavailable", "EVE SSO token request returned 503 (temporarily_unavailable)."))
+        };
+        var messages = new ConcurrentQueue<string>();
+        using var controller = Controller(credentials, sso, new SkillHandler(), messages);
+
+        controller.HandleWebMessage("triffskills:refresh-characters", null);
+
+        Assert.True(SpinWait.SpinUntil(() => messages.Any(message => message.Contains("temporarily_unavailable", StringComparison.Ordinal)), SettleTimeout));
+        Assert.False(TriffSkillsState.Load().State.Characters.Single().NeedsReauth);
+        Assert.Equal("old-refresh", credentials.Read(Target()));
     }
 
     [Fact]

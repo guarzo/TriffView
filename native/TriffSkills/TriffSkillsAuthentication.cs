@@ -141,16 +141,26 @@ internal sealed class TriffSkillsAuthentication
                 throw new OAuthTokenException(HttpStatusCode.Unauthorized, "invalid_grant", "No TriffSkills refresh token is stored for this character.");
             }
 
-            var token = await _sso.RefreshAsync(previousRefresh, cancellationToken);
-            if (token.Identity.CharacterId != characterId)
+            EveValidatedToken token;
+            try
             {
-                throw new OAuthTokenException(HttpStatusCode.Unauthorized, "identity_mismatch", "Refreshed token belongs to a different character.");
+                token = await _sso.RefreshAsync(previousRefresh, cancellationToken);
+                if (token.Identity.CharacterId != characterId)
+                {
+                    throw new OAuthTokenException(HttpStatusCode.Unauthorized, "identity_mismatch", "Refreshed token belongs to a different character.");
+                }
+                if (!string.IsNullOrWhiteSpace(character.OwnerHash)
+                    && !string.IsNullOrWhiteSpace(token.Identity.OwnerHash)
+                    && !string.Equals(character.OwnerHash, token.Identity.OwnerHash, StringComparison.Ordinal))
+                {
+                    throw new OAuthTokenException(HttpStatusCode.Unauthorized, "owner_changed", "Character ownership changed.");
+                }
             }
-            if (!string.IsNullOrWhiteSpace(character.OwnerHash)
-                && !string.IsNullOrWhiteSpace(token.Identity.OwnerHash)
-                && !string.Equals(character.OwnerHash, token.Identity.OwnerHash, StringComparison.Ordinal))
+            catch (OAuthTokenException exception)
             {
-                throw new OAuthTokenException(HttpStatusCode.Unauthorized, "owner_changed", "Character ownership changed.");
+                LogRefreshFailure(characterId, exception);
+                if (exception.IsDefinitiveAuthorizationFailure) DeleteRefreshTokenSafely(target);
+                throw;
             }
 
             var replacement = string.IsNullOrWhiteSpace(token.RefreshToken) ? previousRefresh : token.RefreshToken;
@@ -316,6 +326,28 @@ internal sealed class TriffSkillsAuthentication
 
     private AccessTokenCache Cache(EveValidatedToken token)
         => new(token.AccessToken, _time.GetUtcNow().AddSeconds(Math.Max(30, token.ExpiresIn - 60)));
+
+    // invalid_grant/identity_mismatch/owner_changed on the refresh path mean EVE will never
+    // accept this refresh token again; keeping it around only accumulates dead Credential
+    // Manager entries. Best-effort: a delete failure must not mask the auth error that caused it.
+    private void DeleteRefreshTokenSafely(string target)
+    {
+        try
+        {
+            _credentials.Delete(target);
+        }
+        catch
+        {
+            // Ignored: the caller is already about to surface the definitive auth failure.
+        }
+    }
+
+    private static void LogRefreshFailure(long characterId, OAuthTokenException exception)
+    {
+        TriffViewDiagnostics.Log(
+            "triffskills-sso",
+            $"characterId={characterId} clientId={EveApplication.ClientId} status={(int)exception.StatusCode} error={exception.ErrorCode}");
+    }
 
     private sealed record AccessTokenCache(string AccessToken, DateTimeOffset ExpiresUtc);
 }
