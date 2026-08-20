@@ -551,8 +551,28 @@ internal sealed class TriffViewController : IDisposable
 
             // Piggy-backed on work the app already does rather than given a timer of its own: a
             // diagnostics feature that wakes an idle app would be reporting a cost it created.
-            // The call is a clock comparison until the flush interval is actually due.
-            TriffViewPerfLog.FlushIfDue();
+            //
+            // This finally runs on the UI thread - the await above resumes there - and flushing
+            // ends in a synchronous file write, so only the cheap clock comparison happens here
+            // and the write itself goes to a pool thread. Counters that measure UI-thread stalls
+            // must not cause one. Flush re-checks under its own gate, so a racing dispatch just
+            // no-ops.
+            if (TriffViewPerfLog.IsFlushDue())
+            {
+                _ = Task.Run(() =>
+                {
+                    // Diagnostics must never take the app down, and an unhandled exception on a
+                    // pool thread is one of the few things that still can.
+                    try
+                    {
+                        TriffViewPerfLog.FlushIfDue();
+                    }
+                    catch
+                    {
+                        // Ignored deliberately: see above.
+                    }
+                });
+            }
         }
     }
 
@@ -4638,8 +4658,32 @@ internal sealed class EveWindowTracker
 {
     private readonly Dictionary<uint, string> _processNames = new();
 
+    /// <summary>
+    /// Sweeps between full rebuilds of <see cref="_processNames"/>.
+    ///
+    /// Windows reuses process ids, and this cache is keyed by id alone, so an entry can outlive
+    /// the process it describes. The consequence is not theoretical: a recycled id whose cached
+    /// name is still "exefile" would let an unrelated titled window through the process filter
+    /// and be tracked as an EVE client.
+    ///
+    /// Validating each cached entry against the live process before reuse would remove the risk
+    /// and the cache with it - a GetProcessById per hit is exactly the cost the cache exists to
+    /// avoid, and this sweep visits every visible window on the desktop. So the entries are
+    /// bounded in time instead: about six minutes at the 700ms sweep cadence, after which the
+    /// next sweep pays one lookup per process it actually sees and everything stale is gone.
+    /// </summary>
+    private const int ProcessNameCacheSweeps = 512;
+
+    private int _sweepsSinceProcessNameRefresh;
+
     public IReadOnlyList<EveClientWindow> GetClients(nint foreground)
     {
+        if (++_sweepsSinceProcessNameRefresh >= ProcessNameCacheSweeps)
+        {
+            _sweepsSinceProcessNameRefresh = 0;
+            _processNames.Clear();
+        }
+
         var clients = new List<EveClientWindow>();
         TriffViewNativeMethods.EnumWindows((hwnd, _) =>
         {

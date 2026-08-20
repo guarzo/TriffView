@@ -78,6 +78,21 @@ internal static class TriffViewPerfLog
     internal static void FlushIfDue() => Flush(force: false);
 
     /// <summary>
+    /// Whether a flush is due, without taking the gate or writing anything.
+    ///
+    /// Callers on the UI thread use this to decide whether to hand the actual write to a pool
+    /// thread: <see cref="Flush"/> ends in file I/O, and the point of these counters is to find
+    /// UI-thread stalls, not add one. Deliberately unsynchronized - an aligned 64-bit read is
+    /// atomic, and a stale answer only costs a dispatch that <see cref="Flush"/> then re-checks
+    /// under the gate and no-ops.
+    /// </summary>
+    internal static bool IsFlushDue()
+    {
+        var elapsed = (Stopwatch.GetTimestamp() - _lastFlushTicks) / (double)Stopwatch.Frequency;
+        return elapsed >= FlushInterval.TotalSeconds;
+    }
+
+    /// <summary>
     /// Writes whatever has accumulated regardless of the interval. Called on shutdown so a
     /// session shorter than one flush interval still reports something - a user who launches
     /// the app, sees it stutter and quits in irritation is exactly the person whose counters

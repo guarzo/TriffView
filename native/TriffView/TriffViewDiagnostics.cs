@@ -234,11 +234,6 @@ internal static class TriffViewDiagnostics
     }
 
     /// <summary>
-    /// Records a preview layout write and the call path that produced it. The stack trace is
-    /// the point of the exercise: preview positions have been observed changing to values the
-    /// user did not choose, and this identifies which code did it.
-    /// </summary>
-    /// <summary>
     /// The application frames of the current call stack, without the framework plumbing.
     ///
     /// A raw <see cref="Environment.StackTrace"/> from a UI event handler is mostly WinForms
@@ -276,6 +271,11 @@ internal static class TriffViewDiagnostics
             : string.Join(Environment.NewLine, kept);
     }
 
+    /// <summary>
+    /// Records a preview layout write and the call path that produced it. The stack trace is
+    /// the point of the exercise: preview positions have been observed changing to values the
+    /// user did not choose, and this identifies which code did it.
+    /// </summary>
     public static void RecordLayoutWrite(string source, string key, Rectangle rect)
     {
         Log(
