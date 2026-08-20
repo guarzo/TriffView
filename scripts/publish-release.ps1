@@ -37,6 +37,15 @@ $releaseExe = Join-Path $releaseDir "TriffView.exe"
 $releaseZip = Join-Path $releaseDir "TriffView-$Runtime-portable.zip"
 $localDotnet = Join-Path $root ".dotnet\dotnet.exe"
 $dotnet = if (Test-Path $localDotnet) { $localDotnet } else { "dotnet" }
+
+# The bundled alert sounds are CC BY 4.0, so shipping this file is a licence
+# condition rather than a courtesy - the credit has to reach whoever receives
+# the binary. A single-file exe carries nothing alongside it, so the notices go
+# next to the exe in the release directory, and inside the portable ZIP.
+$noticesFile = Join-Path $root "THIRD_PARTY_NOTICES.md"
+if (-not (Test-Path -LiteralPath $noticesFile)) {
+  throw "THIRD_PARTY_NOTICES.md is missing from $root. It carries the attribution required by the bundled alert sounds' licence and must ship with the release."
+}
 if ($CompressSingleFile -and $NoCompression) {
   throw "Use either -CompressSingleFile or -NoCompression, not both."
 }
@@ -287,6 +296,7 @@ if (Test-PackageMode "PortableZip") {
   }
 
   Write-Host "Creating portable ZIP..."
+  Copy-Item -LiteralPath $noticesFile -Destination $portablePublishDir -Force
   Compress-Archive -Path (Join-Path $portablePublishDir "*") -DestinationPath $releaseZip -Force
 
   $hashPath = Write-ArtifactHash $releaseZip
@@ -342,12 +352,18 @@ if ($releaseArtifacts.Count -eq 0) {
   throw "No release artifacts were produced for PackageMode=$PackageMode."
 }
 
+# Single-file releases are just the exe, so the notices need to sit beside it.
+# (The portable ZIP already has its own copy inside the archive.)
+$releaseNotices = Join-Path $releaseDir "THIRD_PARTY_NOTICES.md"
+Copy-Item -LiteralPath $noticesFile -Destination $releaseNotices -Force
+
 Write-Host ""
 Write-Host "Release ready:"
 foreach ($artifact in $releaseArtifacts) {
   Write-Host "  $($artifact.Artifact)"
   Write-Host "  $($artifact.Hash)"
 }
+Write-Host "  $releaseNotices"
 Write-Host "Sizes:"
 $releaseArtifacts |
   ForEach-Object { Get-Item -LiteralPath $_.Artifact } |

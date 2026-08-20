@@ -51,6 +51,7 @@ jobs:
           files: |
             release/TriffView.exe
             release/TriffView.exe.sha256.txt
+            release/THIRD_PARTY_NOTICES.md
           body: |
             Unofficial build of TriffView with fixes not yet upstream.
 
