@@ -3884,6 +3884,17 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             }
 
             titleFallback = ClampToVirtualDesktop(rect);
+
+            // The title-derived index above only sees the live client list, not who currently
+            // holds a rectangle in _positionMemory: a client further down the title-index order
+            // can have outlived an earlier closure and still be pinned exactly here, and
+            // ClampToVirtualDesktop separately collapses every bottom-overflow case onto the same
+            // Y. Only the first client onto a given title rect should keep it; anyone else falls
+            // through to the collision-probed default stack below.
+            if (_positionMemory.IsHeldByAnother(titleFallback.Value, PreviewClientIdentity.From(client)))
+            {
+                titleFallback = null;
+            }
         }
 
         return TriffViewPreviewPositionMemory.Resolve(
@@ -4565,7 +4576,47 @@ internal sealed class EveWindowTracker
             return true;
         }, nint.Zero);
 
-        return clients;
+        return BlankAmbiguousCharacterSelectNames(clients);
+    }
+
+    /// <summary>
+    /// Blanks <see cref="EveClientWindow.CharacterName"/> for clients whose name is really an
+    /// unrecognized window title that more than one live client happens to share.
+    ///
+    /// <see cref="CharacterNameFromTitle"/> falls through to returning the raw title verbatim for
+    /// any title it doesn't recognize as "EVE - Name" / "Name - EVE" - that fallthrough is exactly
+    /// the condition CharacterName == Title, since a real parse always strips the prefix/suffix.
+    /// EVE cannot log the same character in twice, so if two or more clients land on that same
+    /// catch-all value it isn't a name at all: it's every character-select window sharing an
+    /// unrecognized title (e.g. "EVE Online"). Treating it as a name would collapse every one of
+    /// them onto the same StableKey and the same saved preview position.
+    ///
+    /// Both conditions matter: CharacterName == Title alone would break the deliberate catch-all
+    /// for a single client with an odd title, and "shared name" alone would misfire during a
+    /// relog, where a closing client's window can briefly still be enumerable alongside its
+    /// replacement under the same real, parsed name.
+    /// </summary>
+    internal static IReadOnlyList<EveClientWindow> BlankAmbiguousCharacterSelectNames(
+        IReadOnlyList<EveClientWindow> clients)
+    {
+        var sharedCatchAllTitles = clients
+            .Where(client => string.Equals(client.CharacterName, client.Title, StringComparison.Ordinal))
+            .GroupBy(client => client.CharacterName, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (sharedCatchAllTitles.Count == 0) return clients;
+
+        // Re-tests CharacterName == Title rather than membership alone: a client whose name was
+        // genuinely parsed from "EVE - Name" must never be blanked, even in the pathological case
+        // where that name equals some other window's unrecognized title.
+        return clients
+            .Select(client => string.Equals(client.CharacterName, client.Title, StringComparison.Ordinal)
+                    && sharedCatchAllTitles.Contains(client.CharacterName)
+                ? client with { CharacterName = "" }
+                : client)
+            .ToList();
     }
 
     private string ProcessName(uint processId)
