@@ -22,6 +22,15 @@ internal sealed class TriffViewController : IDisposable
     private const int SwitchSettleBeforeMinimizeMs = 10;
     private readonly Dispatcher _dispatcher;
     private readonly Action<object> _postToHud;
+
+    /// <summary>
+    /// Optional pre-serialized post path. <see cref="PostState"/> has to serialize its payload
+    /// regardless, to compare it against the last one it sent, so handing the resulting string
+    /// straight to the host avoids serializing the same object a second time on the way out.
+    /// Null in tests and any host that does not supply one, which falls back to
+    /// <see cref="_postToHud"/>.
+    /// </summary>
+    private readonly Action<string>? _postJsonToHud;
     private readonly Action _reassertHudTopmost;
     private readonly Action<bool> _applySettingsAlwaysOnTop;
     private readonly EveWindowTracker _tracker = new();
@@ -79,10 +88,12 @@ internal sealed class TriffViewController : IDisposable
         Action<bool> applySettingsAlwaysOnTop,
         ICredentialStore? credentials = null,
         string? gamelogsPath = null,
-        HttpClient? combatLogUploadHttp = null)
+        HttpClient? combatLogUploadHttp = null,
+        Action<string>? postJsonToHud = null)
     {
         _dispatcher = dispatcher;
         _postToHud = postToHud;
+        _postJsonToHud = postJsonToHud;
         _reassertHudTopmost = reassertHudTopmost;
         _applySettingsAlwaysOnTop = applySettingsAlwaysOnTop;
         _credentials = credentials ?? new WindowsCredentialStore();
@@ -143,6 +154,7 @@ internal sealed class TriffViewController : IDisposable
         StartForegroundTracking();
         StartDisplayTracking();
         LogLayoutSnapshot("startup");
+        RecordEnvironmentSnapshot();
         SweepStaleCombatLogTemps();
         RefreshCombatLogWebhookState();
         PostState();
@@ -239,6 +251,33 @@ internal sealed class TriffViewController : IDisposable
             category,
             $"monitors={TriffViewDiagnostics.Monitors()} layouts=" +
             (layouts.Length == 0 ? "<none>" : string.Join(" ", layouts)));
+    }
+
+    /// <summary>
+    /// Records the machine and the settings that decide which of the app's costs are live in
+    /// this session.
+    ///
+    /// The settings half matters as much as the specs. The label overlay repaints its whole
+    /// surface and is the most expensive thing the app does, but it only runs when ShowLabels
+    /// and LabelBackgroundTransparent are BOTH on, and the second defaults to off - so a report
+    /// of stutter means something entirely different depending on those two flags. Without them
+    /// in the log there is no way to tell whether a user is even on that path.
+    /// </summary>
+    private void RecordEnvironmentSnapshot()
+    {
+        var profile = Settings.ActiveProfileFast();
+        var version = System.Reflection.CustomAttributeExtensions
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>(GetType().Assembly)
+            ?.InformationalVersion ?? "unknown";
+
+        TriffViewDiagnostics.RecordEnvironment(
+            version,
+            $"settings=[enabled={Settings.Enabled} showLabels={profile.ShowLabels} " +
+            $"labelBackgroundTransparent={profile.LabelBackgroundTransparent} " +
+            $"opacity={profile.Opacity:F2} borderThickness={profile.BorderThickness} " +
+            $"hideOnLostFocus={profile.HideOnLostFocus} lockPreviews={profile.LockPreviews} " +
+            $"savedLayouts={profile.PreviewLayouts.Count} " +
+            $"splashAudio={Settings.Alerts.SplashDetectionEnabled}]");
     }
 
     public bool HandleWebMessage(string type, JsonObject? message)
@@ -509,6 +548,11 @@ internal sealed class TriffViewController : IDisposable
         finally
         {
             Interlocked.Exchange(ref _periodicRefreshInProgress, 0);
+
+            // Piggy-backed on work the app already does rather than given a timer of its own: a
+            // diagnostics feature that wakes an idle app would be reporting a cost it created.
+            // The call is a clock comparison until the flush interval is actually due.
+            TriffViewPerfLog.FlushIfDue();
         }
     }
 
@@ -516,7 +560,13 @@ internal sealed class TriffViewController : IDisposable
     {
         lock (_trackerGate)
         {
-            return _tracker.GetClients(foreground);
+            var started = TriffViewPerfLog.Start();
+            var clients = _tracker.GetClients(foreground);
+
+            // Client count rides along as the quantity so a log can be read without guessing how
+            // many EVE windows were open: every other cost here scales with it.
+            TriffViewPerfLog.Stop("sweep.windows", started, clients.Count);
+            return clients;
         }
     }
 
@@ -2893,9 +2943,18 @@ internal sealed class TriffViewController : IDisposable
             },
         };
 
-        var json = JsonSerializer.Serialize(payload);
+        // Serialized with the same options the host posts with, so this string is exactly what
+        // goes to the web UI - both the change comparison below and the post itself use it.
+        var json = JsonSerializer.Serialize(payload, WebMessageJson.Options);
         if (!force && string.Equals(json, _lastPostedStateJson, StringComparison.Ordinal)) return;
         _lastPostedStateJson = json;
+
+        if (_postJsonToHud != null)
+        {
+            _postJsonToHud(json);
+            return;
+        }
+
         _postToHud(payload);
     }
 
@@ -3694,6 +3753,7 @@ internal sealed class TriffViewOverlayForm : Forms.Form
 
     protected override void OnPaint(Forms.PaintEventArgs e)
     {
+        var started = TriffViewPerfLog.Start();
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
@@ -3702,6 +3762,9 @@ internal sealed class TriffViewOverlayForm : Forms.Form
             if (!state.Visible) continue;
             DrawPreviewChrome(e.Graphics, state);
         }
+
+        var clip = e.ClipRectangle;
+        TriffViewPerfLog.Stop("paint.previews", started, (long)clip.Width * clip.Height);
     }
 
     protected override void OnMouseDown(Forms.MouseEventArgs e)
@@ -4479,6 +4542,22 @@ internal sealed class TriffViewLabelOverlayForm : Forms.Form
         // behind whenever a preview moved or a client closed. So the repaint stays
         // full-surface, and instead we skip it entirely when nothing actually changed -
         // which was the common case, roughly 90% of calls.
+        // Repainting is all-or-nothing here: this form is layered (WS_EX_LAYERED plus a
+        // TransparencyKey), and a partial Invalidate(rect) does not reach the composited
+        // surface, so stale label text survives at the old location. Bounding the
+        // invalidation was measured at ~30x cheaper per paint but left visible ghosts
+        // behind whenever a preview moved or a client closed. So the repaint stays
+        // full-surface, and instead we skip it entirely when nothing actually changed -
+        // which was the common case, roughly 90% of calls.
+        //
+        // A window region cut to just the label bands was tried too (2026-08-20) and fails the
+        // same way for the same reason. It made paints ~13x cheaper and the region geometry was
+        // correct - the artefacts appeared exactly where the labels belong - but a region makes
+        // every paint a partial one, so the painted content never reached the composited
+        // surface at all and the bands rendered as solid white. That is the same wall the five
+        // bounded-repaint strategies hit; a region is a sixth way of asking this form to update
+        // less than its whole surface, and it is refused like the others. Cheap repaints here
+        // need a form that is not both desktop-spanning and colour-keyed.
         if (wasHidden || !ItemsEqual(previousItems, _items))
         {
             Invalidate();
@@ -4501,6 +4580,10 @@ internal sealed class TriffViewLabelOverlayForm : Forms.Form
 
     protected override void OnPaint(Forms.PaintEventArgs e)
     {
+        // Clip area is recorded alongside the timing because the two answer different questions:
+        // the duration says a paint was expensive, the area says whether it was expensive because
+        // it covered the whole desktop. Distinguishing those is the entire point of this counter.
+        var started = TriffViewPerfLog.Start();
         e.Graphics.Clear(TransparentBackColor);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
@@ -4509,6 +4592,9 @@ internal sealed class TriffViewLabelOverlayForm : Forms.Form
         {
             DrawItem(e.Graphics, item);
         }
+
+        var clip = e.ClipRectangle;
+        TriffViewPerfLog.Stop("paint.labels", started, (long)clip.Width * clip.Height);
     }
 
     private void DrawItem(Graphics graphics, TriffViewLabelOverlayItem item)
@@ -4558,12 +4644,36 @@ internal sealed class EveWindowTracker
         TriffViewNativeMethods.EnumWindows((hwnd, _) =>
         {
             if (hwnd == nint.Zero || !TriffViewNativeMethods.IsWindowVisible(hwnd)) return true;
-            var title = GetWindowTitle(hwnd);
-            if (string.IsNullOrWhiteSpace(title)) return true;
 
+            // Process before title, deliberately. This callback runs for every visible top-level
+            // window on the desktop - measured at ~490 of them to find 8 EVE clients - so the
+            // order of these two filters decides what the sweep costs. GetWindowTitle is two
+            // P/Invokes and allocates a string per window; the process check is one cheap call
+            // plus a dictionary hit once a PID has been seen. Filtering on the process first
+            // means titles are only fetched for actual EVE clients.
+            //
+            // Behaviour is unchanged: LooksLikeEve rejects anything whose process is not
+            // "exefile", and that rejection subsumes its own launcher check, so hoisting it
+            // cannot admit a window the old order excluded. The title conditions below still run.
+            //
+            // The tradeoff, recorded deliberately: ProcessName is now consulted for every
+            // visible window rather than only the titled ones, so the first sweep pays a
+            // Process.GetProcessById (a real handle open) for more PIDs than before, and
+            // _processNames grows to cover most of the desktop instead of a subset. Both are
+            // bounded by the number of distinct processes, not windows, and every sweep after
+            // the first is a dictionary hit - which is what makes this a win in steady state,
+            // where the app spends its entire life. It does widen the pre-existing exposure to
+            // a recycled PID returning a stale cached name; that cache has never been evicted
+            // and fixing it is a separate change.
             TriffViewNativeMethods.GetWindowThreadProcessId(hwnd, out var processId);
             if (processId == (uint)Environment.ProcessId) return true;
-            if (!LooksLikeEve(title, ProcessName(processId))) return true;
+
+            var processName = ProcessName(processId);
+            if (!IsEveClientProcess(processName)) return true;
+
+            var title = GetWindowTitle(hwnd);
+            if (string.IsNullOrWhiteSpace(title)) return true;
+            if (!LooksLikeEve(title, processName)) return true;
 
             clients.Add(new EveClientWindow(
                 hwnd,
@@ -4645,7 +4755,14 @@ internal sealed class EveWindowTracker
         return builder.ToString().Trim();
     }
 
-    private static bool LooksLikeEve(string title, string processName)
+    /// <summary>
+    /// Whether a window belongs to an EVE client, from its title and owning process name.
+    ///
+    /// Internal rather than private so the sweep's filter ordering can be tested: GetClients
+    /// hoists <see cref="IsEveClientProcess"/> ahead of fetching the title, which is only sound
+    /// because a process rejection here is unconditional - see EveWindowTrackerFilterTests.
+    /// </summary>
+    internal static bool LooksLikeEve(string title, string processName)
     {
         if (title.Contains("Launcher", StringComparison.OrdinalIgnoreCase)) return false;
         if (processName.Contains("launcher", StringComparison.OrdinalIgnoreCase)) return false;
@@ -4654,7 +4771,7 @@ internal sealed class EveWindowTracker
         return title.Length > 2;
     }
 
-    private static bool IsEveClientProcess(string processName)
+    internal static bool IsEveClientProcess(string processName)
     {
         return processName.Equals("exefile", StringComparison.OrdinalIgnoreCase);
     }
