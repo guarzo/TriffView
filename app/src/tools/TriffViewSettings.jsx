@@ -122,13 +122,20 @@ const DEFAULT_ALERTS = {
 };
 
 // Every id here must also be accepted by NormalizeSound in TriffAlertsService.cs and resolved in
-// AlertSoundPlayer.cs, or the option shows in the dropdown and silently plays nothing.
+// AlertSoundPlayer.cs, or the option shows in the dropdown and silently plays nothing. Only the
+// `value` is load-bearing that way - `label` is display-only and safe to reword, which is why the
+// ids below no longer describe their sounds: the assets were replaced wholesale (see
+// scripts/build-alert-sounds.py) but keeping the ids means nobody's saved choice is migrated.
+//
+// Ordered softest to most present, matching the order in that script. The sounds are peak-matched
+// rather than loudness-matched, so this really is a range of intrusiveness - someone who finds
+// their current alert irritating can move up the list instead of turning sound off entirely.
 const ALERT_SOUND_OPTIONS = [
   { value: "none", label: "None" },
+  { value: "bell", label: "Tick (softest)" },
+  { value: "ding", label: "Blip" },
   { value: "chime", label: "Chime" },
-  { value: "bell", label: "Bell" },
-  { value: "pulse", label: "Pulse" },
-  { value: "ding", label: "Ding" },
+  { value: "pulse", label: "Double chime (most noticeable)" },
 ];
 
 const ALERT_SOUND_BY_ID = ALERT_SOUND_OPTIONS.reduce((map, option) => {

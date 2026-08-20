@@ -4,6 +4,29 @@ TriffView is licensed under the GNU General Public License, version 3 only. See 
 
 The components listed below remain under their own licenses. This file is intended to travel with source and binary distributions of TriffView.
 
+## Alert Sounds
+
+- Files: `native/Assets/sounds/*.wav`, built from the sources in `assets-src/alert-sounds/`
+- Used by: TriffView alert playback
+- Source: notificationsounds.com — https://notificationsounds.com
+- License: Creative Commons Attribution 4.0 International (CC BY 4.0) — https://creativecommons.org/licenses/by/4.0/
+
+Sounds from notificationsounds.com. **These sounds have been modified.** Each was trimmed to
+remove encoder lead-in and inaudible tail, converted to 16-bit mono WAV, and peak-normalised to
+-3 dBFS with 5 ms edge fades. `scripts/build-alert-sounds.py` performs the modification and
+documents it; the unmodified sources are kept in `assets-src/alert-sounds/` so the change is
+inspectable.
+
+| Shipped as | Source sound | Source page |
+| --- | --- | --- |
+| `bell.wav` | Sly | https://notificationsounds.com/application-user-interface-ui-sounds/sly-user-interface-sound |
+| `ding.wav` | Come here | https://notificationsounds.com/notification-sounds/come-here-notification |
+| `chime.wav` | That was quick | https://notificationsounds.com/message-tones/that-was-quick-606 |
+| `pulse.wav` | No problem | https://notificationsounds.com/free-jingles-and-logos/no-problem-notification-sound |
+
+The shipped file names are historical ids rather than descriptions — they were kept unchanged so
+that existing users' saved sound choices did not need migrating.
+
 ## Fonts
 
 ### Rajdhani
