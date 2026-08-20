@@ -170,17 +170,31 @@ def _loudness(samples: np.ndarray, rate: int) -> float:
 
 
 def _normalise(samples: np.ndarray, rate: int) -> np.ndarray:
+    """Apply the edge fades, then scale so the peak lands on TARGET_PEAK_DBFS.
+
+    Fading first is what makes the target exact. A fast-attack percussive sound
+    - which is most of this set - can have its true peak within the first few
+    milliseconds, so normalising before fading would let the fade pull that peak
+    back down afterwards and leave the file quieter than the level this script
+    and THIRD_PARTY_NOTICES.md both claim it is at.
+    """
+    if len(samples) == 0:
+        raise ValueError("refusing to normalise an empty buffer")
+
+    # Clamped so the two windows cannot overlap. Unclamped, a source shorter
+    # than twice the fade would have its middle multiplied by both ramps and be
+    # quietly mis-shaped rather than rejected, and one shorter than a single
+    # fade would die in a numpy broadcast error instead of saying what is wrong.
+    fade = min(max(int(round(EDGE_FADE_SECONDS * rate)), 1), len(samples) // 2)
+    samples = samples.copy()
+    if fade > 0:
+        samples[:fade] *= np.linspace(0.0, 1.0, fade)
+        samples[-fade:] *= np.linspace(1.0, 0.0, fade)
+
     peak = float(np.abs(samples).max())
     if peak <= 0:
         raise ValueError("refusing to normalise a silent buffer")
-
-    samples = samples * (10 ** (TARGET_PEAK_DBFS / 20) / peak)
-
-    fade = max(int(round(EDGE_FADE_SECONDS * rate)), 1)
-    samples = samples.copy()
-    samples[:fade] *= np.linspace(0.0, 1.0, fade)
-    samples[-fade:] *= np.linspace(1.0, 0.0, fade)
-    return samples
+    return samples * (10 ** (TARGET_PEAK_DBFS / 20) / peak)
 
 
 def _write_wav(path: Path, samples: np.ndarray, rate: int) -> None:
