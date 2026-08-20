@@ -2,6 +2,11 @@
 
 Fast EVE client previews, live log alerts, EVE Settings management, and ESI fleet setup in one standalone app.
 
+> **This is an unofficial fork.** Upstream is
+> [NarcisussX/TriffView](https://github.com/NarcisussX/TriffView); this repository carries fixes
+> and diagnostics that have not landed there yet. Releases here are built and versioned
+> independently of upstream's, and are unsigned.
+
 TriffView is built for EVE Online multiboxers who want the best parts of preview switching, profile management, alert awareness, EVE Settings copying, and fleet setup assistance without needing multiple programs. It gives you live client previews, rapid character switching, persistent layouts, configurable combat/session alerts, imported EVE-O/EVE-X profiles for a fast transition, EVE Settings backup/copy tools, and an ESI-only Fleet Manager in a focused desktop app that is designed to stay light.
 
 ## Why It Exists
@@ -101,13 +106,19 @@ Third-party dependency, font, alert sound, WebView2, and EVE/CCP trademark notic
 
 ## Release Verification
 
-Current Windows release: `v2.0.5`
+Every release publishes `TriffView.exe.sha256.txt` next to the executable, and that sidecar is
+the authoritative hash for that build. Download both from the
+[latest release](https://github.com/guarzo/TriffView/releases/latest) and compare:
 
-- File: `TriffView.exe`
-- Size: `165,348,752 bytes` (`157.69 MiB`)
-- SHA-256: `3BDE32C5CFF1E79945DA97BD6204F89158A10AFC1659A2ECD06AD82E36F6CA7E`
+```powershell
+Get-FileHash .\TriffView.exe -Algorithm SHA256
+```
 
-The release executable is Authenticode signed by Cooper Broderick and timestamped through Microsoft's timestamp service. The download also includes `TriffView.exe.sha256.txt` for verification.
+The printed hash should match the one in `TriffView.exe.sha256.txt`.
+
+These builds are **unsigned** - this fork has no code-signing certificate - so Windows SmartScreen
+warns the first time you run one ("More info" -> "Run anyway"). That warning is expected, and the
+hash above is how you confirm what you actually downloaded.
 
 ## Thanks And Inspiration
 
