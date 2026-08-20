@@ -4628,13 +4628,6 @@ internal sealed class TriffViewLabelOverlayForm : Forms.Form
         // behind whenever a preview moved or a client closed. So the repaint stays
         // full-surface, and instead we skip it entirely when nothing actually changed -
         // which was the common case, roughly 90% of calls.
-        // Repainting is all-or-nothing here: this form is layered (WS_EX_LAYERED plus a
-        // TransparencyKey), and a partial Invalidate(rect) does not reach the composited
-        // surface, so stale label text survives at the old location. Bounding the
-        // invalidation was measured at ~30x cheaper per paint but left visible ghosts
-        // behind whenever a preview moved or a client closed. So the repaint stays
-        // full-surface, and instead we skip it entirely when nothing actually changed -
-        // which was the common case, roughly 90% of calls.
         //
         // A window region cut to just the label bands was tried too (2026-08-20) and fails the
         // same way for the same reason. It made paints ~13x cheaper and the region geometry was
