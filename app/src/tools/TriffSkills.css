@@ -387,6 +387,68 @@
   color: var(--tv-white);
 }
 
+.triffskills .triffskills-chip-new {
+  color: var(--tv-muted);
+}
+
+.triffskills .triffskills-group-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.triffskills .triffskills-group-chip-menu-btn {
+  min-height: 24px;
+  min-width: 20px;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--tv-muted);
+}
+
+.triffskills .triffskills-group-chip-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: max-content;
+  min-width: 140px;
+  border: 1px solid var(--tv-border-strong);
+  background: rgba(var(--tv-bg-rgb), 0.98);
+  padding: 6px;
+  box-shadow: 0 8px 20px rgba(var(--tv-shadow-rgb), 0.5);
+  font-size: 11px;
+}
+
+.triffskills .triffskills-group-chip-popover button {
+  white-space: nowrap;
+}
+
+.triffskills .triffskills-group-chip-rename input {
+  min-width: 120px;
+}
+
+.triffskills .triffskills-group-chip-popover.triffskills-forget-confirm {
+  width: max-content;
+}
+
+.triffskills .triffskills-new-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.triffskills .triffskills-new-group input {
+  min-height: 24px;
+  min-width: 120px;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
 .triffskills .triffskills-roster {
   display: flex;
   min-height: 0;

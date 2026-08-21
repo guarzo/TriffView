@@ -3,6 +3,7 @@ import { copyText, onNativeMessage, postNative } from "../nativeBridge.js";
 import { buildRoster } from "./skills/rosterOrdering";
 import PlanRail from "./skills/PlanRail";
 import CharacterRow from "./skills/CharacterRow";
+import GroupChip from "./skills/GroupChip";
 import ImportClipboardDialog from "./skills/ImportClipboardDialog";
 import "./TriffSkills.css";
 
@@ -307,6 +308,8 @@ export default function TriffSkills() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [filter, setFilter] = useState("");
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [details, setDetails] = useState<Map<number, CellDetail>>(new Map());
   const inputRevisionRef = useRef(0);
@@ -326,6 +329,11 @@ export default function TriffSkills() {
     if (state.plans.some((plan) => plan.name === state.selectedPlanName)) return state.selectedPlanName;
     return state.plans[0]?.name ?? "";
   }, [state.plans, state.selectedPlanName]);
+
+  const selectedPlan = useMemo(
+    () => state.plans.find((plan) => plan.name === selectedPlanName),
+    [state.plans, selectedPlanName],
+  );
 
   const readyCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -407,6 +415,23 @@ export default function TriffSkills() {
     send("triffskills:save-group", { name: group.name, originalName: group.name, characterIds });
   }
 
+  function createGroup() {
+    const trimmed = newGroupName.trim();
+    if (!trimmed) return;
+    send("triffskills:save-group", { name: trimmed, characterIds: [] });
+    setCreatingGroup(false);
+    setNewGroupName("");
+  }
+
+  function renameGroup(originalName: string, nextName: string) {
+    const group = state.characterGroups.find((item) => item.name === originalName);
+    send("triffskills:save-group", { name: nextName, originalName, characterIds: group?.characterIds ?? [] });
+  }
+
+  function deleteGroup(name: string) {
+    send("triffskills:delete-group", { name });
+  }
+
   function forgetCharacter(characterId: number) {
     send("triffskills:forget-character", { characterId });
     setExpandedIds((current) => {
@@ -476,6 +501,15 @@ export default function TriffSkills() {
   useEffect(() => {
     expandedIdsRef.current = expandedIds;
   }, [expandedIds]);
+
+  // A renamed or deleted group vanishes from state.characterGroups; if it was
+  // the active filter, keep browsing instead of leaving the roster silently
+  // stuck on a group name that no longer matches anything.
+  useEffect(() => {
+    if (activeGroup && !state.characterGroups.some((group) => group.name === activeGroup)) {
+      setActiveGroup(null);
+    }
+  }, [state.characterGroups, activeGroup]);
 
   // The cached detail is scoped to whichever plan it was fetched for; switching
   // plans invalidates it and re-fetches only the rows a user already has open,
@@ -692,8 +726,12 @@ export default function TriffSkills() {
         <main className="triffview-section-content">
           <header className="triffview-section-header triffskills-header">
             <div>
-              <h2>Skill plan readiness</h2>
-              <p>Pick a plan from the left rail, then browse characters grouped by readiness.</p>
+              <h2>{selectedPlan ? selectedPlan.name : "Skill plan readiness"}</h2>
+              <p>
+                {selectedPlan
+                  ? `${selectedPlan.requirementCount} requirement${selectedPlan.requirementCount === 1 ? "" : "s"}`
+                  : "Pick a plan from the left rail, then browse characters grouped by readiness."}
+              </p>
             </div>
             <span className="triffskills-plans-stamp">{plansStamp}</span>
           </header>
@@ -758,15 +796,41 @@ export default function TriffSkills() {
                 All {state.characters.length}
               </button>
               {state.characterGroups.map((group) => (
+                <React.Fragment key={group.name}>
+                  <GroupChip
+                    name={group.name}
+                    active={activeGroup === group.name}
+                    onToggle={() => setActiveGroup(activeGroup === group.name ? null : group.name)}
+                    onRename={(nextName) => renameGroup(group.name, nextName)}
+                    onDelete={() => deleteGroup(group.name)}
+                  />
+                </React.Fragment>
+              ))}
+              {creatingGroup ? (
+                <form
+                  className="triffskills-new-group"
+                  onSubmit={(event) => { event.preventDefault(); createGroup(); }}
+                >
+                  <input
+                    autoFocus
+                    maxLength={32}
+                    placeholder="Group name"
+                    value={newGroupName}
+                    aria-label="New group name"
+                    onChange={(event) => setNewGroupName(event.target.value)}
+                  />
+                  <button type="submit" className="primary-action" disabled={!newGroupName.trim()}>Create</button>
+                  <button type="button" onClick={() => { setCreatingGroup(false); setNewGroupName(""); }}>Cancel</button>
+                </form>
+              ) : (
                 <button
                   type="button"
-                  key={group.name}
-                  className={`triffskills-chip${activeGroup === group.name ? " is-on" : ""}`}
-                  onClick={() => setActiveGroup(activeGroup === group.name ? null : group.name)}
+                  className="triffskills-chip triffskills-chip-new"
+                  onClick={() => setCreatingGroup(true)}
                 >
-                  {group.name}
+                  + Group
                 </button>
-              ))}
+              )}
             </div>
 
             <div className="triffskills-roster" data-hud-scroll>
