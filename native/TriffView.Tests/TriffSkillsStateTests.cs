@@ -166,4 +166,31 @@ public class TriffSkillsStateTests : IDisposable
         Assert.Equal("Mains", groups[0].Name);
         Assert.Equal([9001L], groups[0].CharacterIds);
     }
+
+    [Fact]
+    public void NormalizeDoesNotStripPinsWhenTheCharacterIsRestored()
+    {
+        // Models the forget rollback: Normalize() has already dropped the pin for
+        // the removed character, and the rollback must put both back together.
+        var state = new TriffSkillsState();
+        state.Upsert(9001).CharacterName = "Pilot";
+        state.PinnedCharacterIds.Add(9001);
+        state.CharacterGroups.Add(new CharacterGroup { Name = "Mains", CharacterIds = [9001] });
+
+        var previousCharacter = state.Characters[0].Clone();
+        var previousPins = state.SnapshotPins();
+        var previousGroups = state.SnapshotGroups();
+
+        state.Characters.RemoveAt(0);
+        state.Normalize();
+        Assert.Empty(state.PinnedCharacterIds);
+
+        state.Characters.Insert(0, previousCharacter);
+        state.PinnedCharacterIds = previousPins;
+        state.CharacterGroups = previousGroups;
+        state.Normalize();
+
+        Assert.Equal([9001L], state.PinnedCharacterIds);
+        Assert.Equal([9001L], Assert.Single(state.CharacterGroups).CharacterIds);
+    }
 }

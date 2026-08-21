@@ -86,6 +86,8 @@ internal sealed class TriffSkillsAuthentication
             var index = _state.Characters.IndexOf(character);
             var previous = character.Clone();
             var previousSelection = _state.SelectedCharacterId;
+            var previousPins = _state.SnapshotPins();
+            var previousGroups = _state.SnapshotGroups();
             _state.Characters.RemoveAt(index);
             if (_state.SelectedCharacterId == characterId) _state.SelectedCharacterId = _state.Characters.FirstOrDefault()?.CharacterId ?? 0;
             var saveError = _saveState();
@@ -93,6 +95,8 @@ internal sealed class TriffSkillsAuthentication
             {
                 _state.Characters.Insert(index, previous);
                 _state.SelectedCharacterId = previousSelection;
+                _state.PinnedCharacterIds = previousPins;
+                _state.CharacterGroups = previousGroups;
                 try
                 {
                     if (previousSecret is not null) _credentials.Write(target, previousSecret);
