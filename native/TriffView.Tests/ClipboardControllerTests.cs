@@ -80,20 +80,48 @@ public class ClipboardControllerTests : IDisposable
     public void AnInvalidCandidateNameStillProducesACommittablePreview()
     {
         // "CON" is a reserved Windows device name. The plan itself is fine, so
-        // ok must stay true and the reason must arrive as nameError.
+        // ok must stay true and the reason must arrive as nameError. The skill
+        // in the clipboard must actually resolve here (unlike the always-503
+        // StubHandler used elsewhere in this class) because assertion 3 below
+        // needs the preview to genuinely succeed and be stored as pending.
         var messages = new ConcurrentQueue<string>();
-        using var controller = Controller(() => "# CON\r\nCPU Management IV\r\n", _ => { }, messages);
+        using var controller = Controller(() => "# CON\r\nCPU Management IV\r\n", _ => { }, messages, new SkillResolvingHandler());
 
         controller.HandleWebMessage("triffskills:import-clipboard", new JsonObject { ["requestId"] = "req_0002", ["revision"] = 1 });
 
+        JsonNode? preview = null;
         Assert.True(
-            SpinWait.SpinUntil(
-                () => messages.Any(json =>
-                    json.Contains("clipboard-preview", StringComparison.Ordinal) &&
-                    json.Contains("req_0002", StringComparison.Ordinal) &&
-                    json.Contains("nameError", StringComparison.Ordinal) &&
-                    json.Contains("reserved", StringComparison.OrdinalIgnoreCase)),
-                SettleTimeout),
+            SpinWait.SpinUntil(() =>
+            {
+                preview = messages
+                    .Select(json => JsonNode.Parse(json))
+                    .FirstOrDefault(node => (string?)node?["type"] == "triffskills:clipboard-preview" && (string?)node?["requestId"] == "req_0002");
+                return preview is not null;
+            }, SettleTimeout),
+            string.Join(Environment.NewLine, messages));
+
+        // 1. The plan itself parsed and resolved fine.
+        Assert.True((bool?)preview!["ok"], preview.ToJsonString());
+        Assert.Equal(1, (int?)preview["requirementCount"]);
+
+        // 2. The candidate name failed validation and is reported through nameError, not diagnostics.
+        Assert.Equal(string.Empty, (string?)preview["name"]);
+        Assert.False(string.IsNullOrEmpty((string?)preview["nameError"]));
+
+        // 3. The real discriminator: on a buggy implementation that previews under the
+        // candidate name, PlanImportWorkflow.PreviewAsync rejects "CON" before storing a
+        // pending preview, so this commit finds nothing and the file is never written.
+        controller.HandleWebMessage("triffskills:commit-plan", new JsonObject
+        {
+            ["requestId"] = "req_0002",
+            ["revision"] = 1,
+            ["replace"] = false,
+            ["name"] = "Imported CON Plan",
+        });
+
+        var path = Path.Combine(TriffSkillsPaths.PlansDir, "Imported CON Plan.txt");
+        Assert.True(
+            SpinWait.SpinUntil(() => File.Exists(path), SettleTimeout),
             string.Join(Environment.NewLine, messages));
     }
 
@@ -126,11 +154,12 @@ public class ClipboardControllerTests : IDisposable
     private static TriffSkillsController Controller(
         Func<string> readClipboard,
         Action<string> writeClipboard,
-        ConcurrentQueue<string> messages)
+        ConcurrentQueue<string> messages,
+        HttpMessageHandler? handler = null)
         => new(
             value => messages.Enqueue(JsonSerializer.Serialize(value)),
             new MemoryCredentials(),
-            new EsiClient(new HttpClient(new StubHandler()), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }, "TriffView.Tests/1.0"),
+            new EsiClient(new HttpClient(handler ?? new StubHandler()), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }, "TriffView.Tests/1.0"),
             new ControlledSso(),
             TimeProvider.System,
             saveState: () => null,
@@ -141,6 +170,24 @@ public class ClipboardControllerTests : IDisposable
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             => Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable));
+    }
+
+    // Resolves "CPU Management" (the base skill name after SkillPlanParser strips the roman
+    // numeral level) as a genuine EVE skill, so tests using it can exercise a preview that
+    // actually succeeds end to end rather than failing at ESI resolution like StubHandler.
+    private sealed class SkillResolvingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            if (path == "/v3/universe/ids/") return Task.FromResult(Response(System.Net.HttpStatusCode.OK, "{\"inventory_types\":[{\"id\":3426,\"name\":\"CPU Management\"}]}"));
+            if (path == "/v3/universe/types/3426/") return Task.FromResult(Response(System.Net.HttpStatusCode.OK, "{\"group_id\":255}"));
+            if (path == "/v1/universe/groups/255/") return Task.FromResult(Response(System.Net.HttpStatusCode.OK, "{\"category_id\":16}"));
+            return Task.FromResult(Response(System.Net.HttpStatusCode.NotFound, "{\"error\":\"unexpected\"}"));
+        }
+
+        private static HttpResponseMessage Response(System.Net.HttpStatusCode status, string body)
+            => new(status) { Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json") };
     }
 
     // Local copy to match this repo's established per-test-class pattern (see
