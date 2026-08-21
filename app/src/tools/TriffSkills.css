@@ -328,6 +328,37 @@
   gap: 8px;
 }
 
+.triffskills .triffskills-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.triffskills .triffskills-tab {
+  min-height: 26px;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.triffskills .triffskills-tab.is-on {
+  border-color: var(--tv-accent);
+  background: var(--tv-accent-bg);
+  color: var(--tv-white);
+}
+
+.triffskills .triffskills-tab span {
+  margin-left: 6px;
+  color: var(--tv-muted);
+  font-variant-numeric: tabular-nums;
+  text-transform: none;
+}
+
+.triffskills .triffskills-tab.is-on span {
+  color: inherit;
+}
+
 .triffskills .triffskills-filters {
   display: flex;
   flex: 0 0 auto;
@@ -715,6 +746,21 @@
 }
 
 .triffskills .triffskills-import-modal header button {
+  flex: 0 0 auto;
+}
+
+.triffskills .triffskills-clipboard-modal {
+  display: flex;
+  width: min(480px, calc(100% - 42px));
+  max-height: calc(100% - 42px);
+  flex-direction: column;
+}
+
+.triffskills .triffskills-clipboard-modal header {
+  flex: 0 0 auto;
+}
+
+.triffskills .triffskills-clipboard-modal header button {
   flex: 0 0 auto;
 }
 
