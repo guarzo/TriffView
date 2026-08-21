@@ -98,7 +98,6 @@ const EMPTY_STATE: SkillsState = {
   selectedPlanName: "",
 };
 
-const READINESS_ORDER: Readiness[] = ["Ready", "Training", "Locked", "Missing", "Unknown", "Unscored"];
 export const STATUS: Record<Readiness, { label: string; description: string; sampleFill?: number }> = {
   Ready: { label: "Ready", description: "All requirements are active", sampleFill: 1 },
   Training: { label: "Training", description: "A requirement is in the queue", sampleFill: 0.5 },
@@ -299,7 +298,6 @@ export default function TriffSkills() {
   const [progress, setProgress] = useState("");
   const [importOpen, setImportOpen] = useState(false);
   const [clipboardImportOpen, setClipboardImportOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<"readiness" | "train-next">("readiness");
   const [importError, setImportError] = useState("");
   const [planName, setPlanName] = useState("");
   const [planText, setPlanText] = useState("");
@@ -365,32 +363,6 @@ export default function TriffSkills() {
       }),
     [state.characters, state.pinnedCharacterIds, state.characterGroups, cells, selectedPlanName, filter, activeGroup],
   );
-
-  // Train next: everyone not ready for the selected plan, fewest-missing-first.
-  // This is a distance ordering, not a cost one — the evaluator knows levels
-  // and queue entries but not skill ranks, so it cannot rank by training time.
-  const trainNextIds = useMemo(() => {
-    const needle = filter.trim().toLowerCase();
-    const groupMembers = activeGroup
-      ? new Set(state.characterGroups.find((group) => group.name === activeGroup)?.characterIds ?? [])
-      : null;
-    const missingOf = (characterId: number) => cellFor(characterId)?.missingCount ?? Number.MAX_SAFE_INTEGER;
-
-    return state.characters
-      .filter((character) => {
-        if (needle && !character.characterName.toLowerCase().includes(needle)) return false;
-        if (groupMembers && !groupMembers.has(character.characterId)) return false;
-        const readiness = cellFor(character.characterId)?.readiness ?? "Unscored";
-        return readiness !== "Ready";
-      })
-      .sort(
-        (left, right) =>
-          missingOf(left.characterId) - missingOf(right.characterId) ||
-          left.characterName.localeCompare(right.characterName),
-      )
-      .map((character) => character.characterId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.characters, state.characterGroups, cells, selectedPlanName, filter, activeGroup]);
 
   const charactersById = useMemo(() => {
     const map = new Map<number, Character>();
@@ -728,16 +700,6 @@ export default function TriffSkills() {
             <button type="button" onClick={() => send("triffskills:refresh-plans")}>Reload plans</button>
           </nav>
 
-          <section className="triffskills-legend" aria-label="Readiness legend">
-            <h3>Readiness</h3>
-            {READINESS_ORDER.map((readiness) => (
-              <span className={statusClass(readiness)} key={readiness} title={STATUS[readiness].description}>
-                <ProgressMark readiness={readiness} fill={STATUS[readiness].sampleFill} />
-                {STATUS[readiness].label}
-              </span>
-            ))}
-            <p>Color shows why a plan is blocked. Fill shows the share of requirements already trained.</p>
-          </section>
         </aside>
 
         <main className="triffview-section-content">
@@ -775,27 +737,6 @@ export default function TriffSkills() {
           </div>
 
           <div className="triffskills-workspace">
-            <div className="triffskills-tabs" role="tablist" aria-label="Skill planner views">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTab === "readiness"}
-                className={`triffskills-tab${activeTab === "readiness" ? " is-on" : ""}`}
-                onClick={() => setActiveTab("readiness")}
-              >
-                Readiness
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTab === "train-next"}
-                className={`triffskills-tab${activeTab === "train-next" ? " is-on" : ""}`}
-                onClick={() => setActiveTab("train-next")}
-              >
-                Train next<span>{trainNextIds.length}</span>
-              </button>
-            </div>
-
             <div className="triffskills-filters">
               <input
                 type="search"
@@ -855,37 +796,9 @@ export default function TriffSkills() {
                 <div className="triffskills-empty">
                   <p><strong>No characters yet.</strong> Add one from the actions on the left.</p>
                 </div>
-              ) : activeTab === "readiness" ? (
-                rosterIsEmpty ? (
-                  <div className="triffskills-empty">
-                    <p><strong>No characters match the current filter.</strong></p>
-                    {filtersActive ? (
-                      <p>
-                        <button type="button" onClick={clearRosterFilters}>Clear filter</button>
-                      </p>
-                    ) : null}
-                  </div>
-                ) : (
-                  roster.map((group) => (
-                    <section key={group.key} className="triffskills-roster-group">
-                      <h4 className={group.key === "Pinned" ? "is-pinned" : group.key === "Ungrouped" ? "is-unknown" : statusClass(group.key as Readiness)}>
-                        {group.key === "Pinned" ? (
-                          <span aria-hidden="true">★</span>
-                        ) : group.key === "Ungrouped" ? (
-                          <span aria-hidden="true">?</span>
-                        ) : (
-                          <ProgressMark readiness={group.key as Readiness} fill={STATUS[group.key as Readiness].sampleFill} />
-                        )}
-                        {group.label}
-                        <span>{group.characterIds.length}</span>
-                      </h4>
-                      {group.characterIds.map(renderCharacterRow)}
-                    </section>
-                  ))
-                )
-              ) : !trainNextIds.length ? (
+              ) : rosterIsEmpty ? (
                 <div className="triffskills-empty">
-                  <p><strong>{filtersActive ? "No characters match the current filter." : "Everyone is ready for this plan."}</strong></p>
+                  <p><strong>No characters match the current filter.</strong></p>
                   {filtersActive ? (
                     <p>
                       <button type="button" onClick={clearRosterFilters}>Clear filter</button>
@@ -893,14 +806,22 @@ export default function TriffSkills() {
                   ) : null}
                 </div>
               ) : (
-                <section className="triffskills-roster-group">
-                  <h4 className={statusClass("Missing")}>
-                    <ProgressMark readiness="Missing" fill={STATUS.Missing.sampleFill} />
-                    Train next
-                    <span>{trainNextIds.length}</span>
-                  </h4>
-                  {trainNextIds.map(renderCharacterRow)}
-                </section>
+                roster.map((group) => (
+                  <section key={group.key} className="triffskills-roster-group">
+                    <h4 className={group.key === "Pinned" ? "is-pinned" : group.key === "Ungrouped" ? "is-unknown" : statusClass(group.key as Readiness)}>
+                      {group.key === "Pinned" ? (
+                        <span aria-hidden="true">★</span>
+                      ) : group.key === "Ungrouped" ? (
+                        <span aria-hidden="true">?</span>
+                      ) : (
+                        <ProgressMark readiness={group.key as Readiness} fill={STATUS[group.key as Readiness].sampleFill} />
+                      )}
+                      {group.label}
+                      <span>{group.characterIds.length}</span>
+                    </h4>
+                    {group.characterIds.map(renderCharacterRow)}
+                  </section>
+                ))
               )}
             </div>
           </div>
