@@ -471,9 +471,6 @@ export default function TriffSkills() {
             <button type="button" disabled={state.refreshInFlight || !state.characters.length} onClick={() => send("triffskills:refresh-characters")}>
               {state.refreshInFlight ? "Refreshing…" : "Refresh characters"}
             </button>
-            <button type="button" onClick={() => send("triffskills:open-plans-folder")}>Open plans folder</button>
-            <button type="button" onClick={() => send("triffskills:refresh-plans")}>Reload plans</button>
-            <button type="button" onClick={() => { setImportError(""); setImportOpen(true); }}>Import local plan</button>
           </nav>
 
           {state.authInProgress ? <p className="triffskills-rail-status" aria-live="polite">Waiting for EVE SSO…</p> : null}
@@ -483,6 +480,25 @@ export default function TriffSkills() {
               <span>This build needs an EVE SSO client ID before authentication can finish.</span>
             </div>
           ) : null}
+
+          <section className="triffskills-plan-section">
+            <h3>Plans</h3>
+            <PlanRail
+              plans={state.plans}
+              readyCounts={readyCounts}
+              characterCount={state.characters.length}
+              selectedPlanName={selectedPlanName}
+              onSelect={(name) => send("triffskills:select-plan", { planName: name })}
+            />
+          </section>
+
+          <nav className="triffskills-rail-actions triffskills-rail-actions-bottom" aria-label="Plan file actions">
+            <button type="button" disabled title="Copy the selected plan to the clipboard (coming soon)">Copy plan</button>
+            <button type="button" disabled title="Import a plan from the clipboard (coming soon)">Import from clipboard</button>
+            <button type="button" onClick={() => { setImportError(""); setImportOpen(true); }}>Import local plan</button>
+            <button type="button" onClick={() => send("triffskills:open-plans-folder")}>Open plans folder</button>
+            <button type="button" onClick={() => send("triffskills:refresh-plans")}>Reload plans</button>
+          </nav>
 
           <section className="triffskills-legend" aria-label="Readiness legend">
             <h3>Readiness</h3>
@@ -500,7 +516,7 @@ export default function TriffSkills() {
           <header className="triffview-section-header triffskills-header">
             <div>
               <h2>Skill plan readiness</h2>
-              <p>Pick a plan on the right, then browse characters grouped by readiness.</p>
+              <p>Pick a plan from the left rail, then browse characters grouped by readiness.</p>
             </div>
             <span className="triffskills-plans-stamp">{plansStamp}</span>
           </header>
@@ -527,110 +543,97 @@ export default function TriffSkills() {
           </div>
 
           <div className="triffskills-workspace">
-            <div className="triffskills-roster-pane">
-              <div className="triffskills-filters">
-                <input
-                  type="search"
-                  className="triffskills-filter"
-                  placeholder="Filter characters…"
-                  value={filter}
-                  onChange={(event) => setFilter(event.target.value)}
-                  aria-label="Filter characters by name"
-                />
+            <div className="triffskills-filters">
+              <input
+                type="search"
+                className="triffskills-filter"
+                placeholder="Filter characters…"
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+                aria-label="Filter characters by name"
+              />
+              <button
+                type="button"
+                className={`triffskills-chip${activeGroup === null ? " is-on" : ""}`}
+                onClick={() => setActiveGroup(null)}
+              >
+                All {state.characters.length}
+              </button>
+              {state.characterGroups.map((group) => (
                 <button
                   type="button"
-                  className={`triffskills-chip${activeGroup === null ? " is-on" : ""}`}
-                  onClick={() => setActiveGroup(null)}
+                  key={group.name}
+                  className={`triffskills-chip${activeGroup === group.name ? " is-on" : ""}`}
+                  onClick={() => setActiveGroup(activeGroup === group.name ? null : group.name)}
                 >
-                  All {state.characters.length}
+                  {group.name}
                 </button>
-                {state.characterGroups.map((group) => (
-                  <button
-                    type="button"
-                    key={group.name}
-                    className={`triffskills-chip${activeGroup === group.name ? " is-on" : ""}`}
-                    onClick={() => setActiveGroup(activeGroup === group.name ? null : group.name)}
-                  >
-                    {group.name}
-                  </button>
-                ))}
-              </div>
-
-              <div className="triffskills-roster" data-hud-scroll>
-                {!state.characters.length ? (
-                  <div className="triffskills-empty">
-                    <p><strong>No characters yet.</strong> Add one from the actions on the left.</p>
-                  </div>
-                ) : rosterIsEmpty ? (
-                  <div className="triffskills-empty">
-                    <p><strong>No characters match the current filter.</strong></p>
-                    {filtersActive ? (
-                      <p>
-                        <button type="button" onClick={clearRosterFilters}>Clear filter</button>
-                      </p>
-                    ) : null}
-                  </div>
-                ) : (
-                  roster.map((group) => (
-                    <section key={group.key} className="triffskills-roster-group">
-                      <h4 className={group.key === "Pinned" ? "is-pinned" : statusClass(group.key as Readiness)}>
-                        {group.key !== "Pinned" ? (
-                          <ProgressMark readiness={group.key as Readiness} fill={STATUS[group.key as Readiness].sampleFill} />
-                        ) : (
-                          <span aria-hidden="true">★</span>
-                        )}
-                        {group.label}
-                        <span>{group.characterIds.length}</span>
-                      </h4>
-                      {group.characterIds.map((characterId) => {
-                        const character = charactersById.get(characterId);
-                        if (!character) return null;
-                        const cell = cellFor(characterId);
-                        const readiness = cell?.readiness ?? "Unscored";
-                        const pinned = pinnedSet.has(characterId);
-                        const groupNames = groupsByCharacter.get(characterId) ?? [];
-                        return (
-                          <div key={characterId} className="triffskills-roster-row">
-                            <button
-                              type="button"
-                              className={`triffskills-pin-btn${pinned ? " is-pinned" : ""}`}
-                              aria-pressed={pinned}
-                              aria-label={pinned ? `Unpin ${character.characterName}` : `Pin ${character.characterName}`}
-                              onClick={() => togglePinned(characterId)}
-                            >
-                              ★
-                            </button>
-                            <span className="triffskills-roster-name">{character.characterName}</span>
-                            {groupNames.length ? (
-                              <span className="triffskills-roster-tags">
-                                {groupNames.map((name) => (
-                                  <span className="triffskills-roster-tag" key={name}>{name}</span>
-                                ))}
-                              </span>
-                            ) : null}
-                            {character.stale ? <span className="triffskills-roster-badge is-stale">Stale</span> : null}
-                            <span className={`triffskills-roster-status ${statusClass(readiness)}`}>
-                              {statusLine(cell, readiness)}
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </section>
-                  ))
-                )}
-              </div>
+              ))}
             </div>
 
-            <aside className="triffskills-plan-pane">
-              <h3>Plans</h3>
-              <PlanRail
-                plans={state.plans}
-                readyCounts={readyCounts}
-                characterCount={state.characters.length}
-                selectedPlanName={selectedPlanName}
-                onSelect={(name) => send("triffskills:select-plan", { planName: name })}
-              />
-            </aside>
+            <div className="triffskills-roster" data-hud-scroll>
+              {!state.characters.length ? (
+                <div className="triffskills-empty">
+                  <p><strong>No characters yet.</strong> Add one from the actions on the left.</p>
+                </div>
+              ) : rosterIsEmpty ? (
+                <div className="triffskills-empty">
+                  <p><strong>No characters match the current filter.</strong></p>
+                  {filtersActive ? (
+                    <p>
+                      <button type="button" onClick={clearRosterFilters}>Clear filter</button>
+                    </p>
+                  ) : null}
+                </div>
+              ) : (
+                roster.map((group) => (
+                  <section key={group.key} className="triffskills-roster-group">
+                    <h4 className={group.key === "Pinned" ? "is-pinned" : statusClass(group.key as Readiness)}>
+                      {group.key !== "Pinned" ? (
+                        <ProgressMark readiness={group.key as Readiness} fill={STATUS[group.key as Readiness].sampleFill} />
+                      ) : (
+                        <span aria-hidden="true">★</span>
+                      )}
+                      {group.label}
+                      <span>{group.characterIds.length}</span>
+                    </h4>
+                    {group.characterIds.map((characterId) => {
+                      const character = charactersById.get(characterId);
+                      if (!character) return null;
+                      const cell = cellFor(characterId);
+                      const readiness = cell?.readiness ?? "Unscored";
+                      const pinned = pinnedSet.has(characterId);
+                      const groupNames = groupsByCharacter.get(characterId) ?? [];
+                      return (
+                        <div key={characterId} className="triffskills-roster-row">
+                          <button
+                            type="button"
+                            className={`triffskills-pin-btn${pinned ? " is-pinned" : ""}`}
+                            aria-pressed={pinned}
+                            aria-label={pinned ? `Unpin ${character.characterName}` : `Pin ${character.characterName}`}
+                            onClick={() => togglePinned(characterId)}
+                          >
+                            ★
+                          </button>
+                          <span className="triffskills-roster-name">{character.characterName}</span>
+                          {groupNames.length ? (
+                            <span className="triffskills-roster-tags">
+                              {groupNames.map((name) => (
+                                <span className="triffskills-roster-tag" key={name}>{name}</span>
+                              ))}
+                            </span>
+                          ) : null}
+                          {character.stale ? <span className="triffskills-roster-badge is-stale">Stale</span> : null}
+                          <span className={`triffskills-roster-status ${statusClass(readiness)}`}>
+                            {statusLine(cell, readiness)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </section>
+                ))
+              )}
+            </div>
           </div>
         </main>
       </section>

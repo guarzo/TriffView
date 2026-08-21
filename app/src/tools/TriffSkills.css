@@ -86,6 +86,72 @@
   font-size: 11px;
 }
 
+.triffskills .triffskills-plan-section {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 5px;
+  border-top: 1px solid var(--tv-border-soft);
+  padding-top: 11px;
+}
+
+.triffskills .triffskills-plan-section h3 {
+  margin: 0;
+  color: var(--tv-text-strong);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.triffskills .triffskills-plan-list {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.triffskills .triffskills-plan-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 26px;
+  padding: 5px 7px;
+  text-align: left;
+}
+
+.triffskills .triffskills-plan-row.is-selected {
+  border-color: var(--tv-accent);
+  background: var(--tv-accent-bg);
+  color: var(--tv-white);
+}
+
+.triffskills .triffskills-plan-name {
+  overflow: hidden;
+  flex: 1 1 auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triffskills .triffskills-plan-ratio {
+  flex: 0 0 auto;
+  color: var(--tv-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.triffskills .triffskills-plan-row.is-selected .triffskills-plan-ratio {
+  color: inherit;
+}
+
+.triffskills .triffskills-rail-actions-bottom {
+  border-top: 1px solid var(--tv-border-soft);
+  padding-top: 10px;
+}
+
 .triffskills .triffskills-sso-warning {
   gap: 3px;
   padding: 7px 8px;
@@ -255,14 +321,6 @@
 }
 
 .triffskills .triffskills-workspace {
-  display: grid;
-  min-width: 0;
-  min-height: 0;
-  grid-template-columns: minmax(0, 1fr) clamp(220px, 22vw, 280px);
-  gap: 10px;
-}
-
-.triffskills .triffskills-roster-pane {
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -401,66 +459,6 @@
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-
-.triffskills .triffskills-plan-pane {
-  display: flex;
-  min-height: 0;
-  flex-direction: column;
-  gap: 6px;
-  border-left: 1px solid var(--tv-border-soft);
-  padding-left: 10px;
-}
-
-.triffskills .triffskills-plan-pane h3 {
-  margin: 0;
-  color: var(--tv-text-strong);
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-.triffskills .triffskills-plan-list {
-  display: flex;
-  min-height: 0;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 4px;
-  overflow-y: auto;
-}
-
-.triffskills .triffskills-plan-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 26px;
-  padding: 5px 7px;
-  text-align: left;
-}
-
-.triffskills .triffskills-plan-row.is-selected {
-  border-color: var(--tv-accent);
-  background: var(--tv-accent-bg);
-  color: var(--tv-white);
-}
-
-.triffskills .triffskills-plan-name {
-  overflow: hidden;
-  flex: 1 1 auto;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.triffskills .triffskills-plan-ratio {
-  flex: 0 0 auto;
-  color: var(--tv-muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.triffskills .triffskills-plan-row.is-selected .triffskills-plan-ratio {
-  color: inherit;
 }
 
 .triffskills .triffskills-empty {
@@ -607,13 +605,6 @@
   gap: 7px;
   border-top: 1px solid var(--tv-border-muted);
   padding: 10px 12px;
-}
-
-@media (max-width: 900px) {
-  .triffskills .triffskills-workspace {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(230px, 1fr) minmax(190px, 0.58fr);
-  }
 }
 
 @media (max-width: 700px) {
