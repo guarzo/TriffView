@@ -63,6 +63,66 @@ public class ClipboardControllerTests : IDisposable
             string.Join(Environment.NewLine, messages));
     }
 
+    [Fact]
+    public void ImportFromClipboardStripsTheTitleAndReportsTheCandidateName()
+    {
+        var messages = new ConcurrentQueue<string>();
+        using var controller = Controller(() => "# Mastadon\r\nCPU Management IV\r\n", _ => { }, messages);
+
+        controller.HandleWebMessage("triffskills:import-clipboard", new JsonObject { ["requestId"] = "req_0001", ["revision"] = 1 });
+
+        Assert.True(
+            SpinWait.SpinUntil(() => messages.Any(json => json.Contains("clipboard-preview", StringComparison.Ordinal) && json.Contains("Mastadon", StringComparison.Ordinal)), SettleTimeout),
+            string.Join(Environment.NewLine, messages));
+    }
+
+    [Fact]
+    public void AnInvalidCandidateNameStillProducesACommittablePreview()
+    {
+        // "CON" is a reserved Windows device name. The plan itself is fine, so
+        // ok must stay true and the reason must arrive as nameError.
+        var messages = new ConcurrentQueue<string>();
+        using var controller = Controller(() => "# CON\r\nCPU Management IV\r\n", _ => { }, messages);
+
+        controller.HandleWebMessage("triffskills:import-clipboard", new JsonObject { ["requestId"] = "req_0002", ["revision"] = 1 });
+
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => messages.Any(json =>
+                    json.Contains("clipboard-preview", StringComparison.Ordinal) &&
+                    json.Contains("req_0002", StringComparison.Ordinal) &&
+                    json.Contains("nameError", StringComparison.Ordinal) &&
+                    json.Contains("reserved", StringComparison.OrdinalIgnoreCase)),
+                SettleTimeout),
+            string.Join(Environment.NewLine, messages));
+    }
+
+    [Fact]
+    public void AnEmptyClipboardReportsADiagnosticRatherThanSilence()
+    {
+        var messages = new ConcurrentQueue<string>();
+        using var controller = Controller(() => string.Empty, _ => { }, messages);
+
+        controller.HandleWebMessage("triffskills:import-clipboard", new JsonObject { ["requestId"] = "req_0003", ["revision"] = 1 });
+
+        Assert.True(
+            SpinWait.SpinUntil(() => messages.Any(json => json.Contains("req_0003", StringComparison.Ordinal) && json.Contains("clipboard", StringComparison.OrdinalIgnoreCase)), SettleTimeout),
+            string.Join(Environment.NewLine, messages));
+    }
+
+    [Fact]
+    public void AReadThatThrowsSurfacesAsAnError()
+    {
+        var messages = new ConcurrentQueue<string>();
+        using var controller = Controller(() => throw new InvalidOperationException("clipboard busy"), _ => { }, messages);
+
+        controller.HandleWebMessage("triffskills:import-clipboard", new JsonObject { ["requestId"] = "req_0004", ["revision"] = 1 });
+
+        Assert.True(
+            SpinWait.SpinUntil(() => messages.Any(json => json.Contains("triffskills:error", StringComparison.Ordinal) && json.Contains("import-clipboard", StringComparison.Ordinal)), SettleTimeout),
+            string.Join(Environment.NewLine, messages));
+    }
+
     private static TriffSkillsController Controller(
         Func<string> readClipboard,
         Action<string> writeClipboard,

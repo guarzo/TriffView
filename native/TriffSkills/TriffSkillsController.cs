@@ -151,6 +151,9 @@ internal sealed class TriffSkillsController : IDisposable
             case "triffskills:copy-plan":
                 CopyPlan(message);
                 return true;
+            case "triffskills:import-clipboard":
+                _ = ImportFromClipboardAsync(message);
+                return true;
             default:
                 return false;
         }
@@ -537,12 +540,77 @@ internal sealed class TriffSkillsController : IDisposable
         }
     }
 
+    private const string ClipboardPlaceholderName = "Imported plan";
+
+    private async Task ImportFromClipboardAsync(JsonObject? message)
+    {
+        var requestId = ReadRequestId(message);
+        if (requestId.Length == 0) return;
+        var revision = ReadRevision(message);
+
+        string clipboard;
+        try
+        {
+            clipboard = _readClipboard() ?? string.Empty;
+        }
+        catch (Exception exception)
+        {
+            PostError("import-clipboard", $"The clipboard could not be read: {exception.Message}");
+            return;
+        }
+
+        var (candidate, contents) = ClipboardPlanText.SplitTitle(clipboard);
+        if (string.IsNullOrWhiteSpace(contents))
+        {
+            PostClipboardPreview(requestId, revision, ok: false, name: string.Empty, nameError: string.Empty, requirementCount: 0,
+                diagnostics: [new PlanDiagnostic(0, "The clipboard holds no plan text.")]);
+            return;
+        }
+
+        // Always preview under a name guaranteed valid. Validating the candidate
+        // here would reject it before a pending preview existed, and no later
+        // correction in the dialog could then commit.
+        PlanPreviewResult preview;
+        try
+        {
+            preview = await _planImports.PreviewAsync(requestId, revision, ClipboardPlaceholderName, contents, _lifetime.Token);
+        }
+        catch (Exception exception)
+        {
+            // Mirrors PreviewPlanAsync's handling: skill-name resolution can hit ESI and
+            // fail there. Since this method is invoked fire-and-forget, an uncaught
+            // exception here would fault the task silently and never reach the web UI.
+            preview = new PlanPreviewResult(
+                requestId,
+                revision,
+                null,
+                [new PlanDiagnostic(0, $"Could not validate skill names: {exception.Message}")]);
+        }
+
+        var nameError = string.Empty;
+        var name = candidate;
+        if (candidate.Length > 0 && !PlanNameValidator.TryValidate(candidate, out _, out var candidateError))
+        {
+            name = string.Empty;
+            nameError = candidateError;
+        }
+
+        PostClipboardPreview(
+            requestId,
+            revision,
+            ok: preview.Plan is not null,
+            name: name,
+            nameError: nameError,
+            requirementCount: preview.Plan?.Requirements.Count ?? 0,
+            diagnostics: preview.Diagnostics);
+    }
+
     private async Task CommitPlanAsync(JsonObject? message)
     {
         var requestId = ReadRequestId(message);
         if (requestId.Length == 0) return;
         var revision = ReadRevision(message);
-        var result = _planImports.Commit(requestId, revision, ReadBool(message, "replace"));
+        var result = _planImports.Commit(requestId, revision, ReadBool(message, "replace"), ReadString(message, "name", 120));
         if (result.Collision)
         {
             _post(new { type = "triffskills:plan-commit", requestId, revision, ok = false, collision = true, expired = false, name = result.Name });
@@ -721,6 +789,26 @@ internal sealed class TriffSkillsController : IDisposable
             diagnostics = result.Diagnostics.Take(100).ToArray(),
         });
     }
+
+    private void PostClipboardPreview(
+        string requestId,
+        long revision,
+        bool ok,
+        string name,
+        string nameError,
+        int requirementCount,
+        IReadOnlyList<PlanDiagnostic> diagnostics)
+        => _post(new
+        {
+            type = "triffskills:clipboard-preview",
+            requestId,
+            revision,
+            ok,
+            name,
+            nameError,
+            requirementCount,
+            diagnostics = diagnostics.Take(20).ToArray(),
+        });
 
     private void PostRequestError(string action, string requestId, string message)
         => _post(new { type = $"triffskills:{action}", requestId, ok = false, collision = false, message });
