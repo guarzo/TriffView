@@ -154,6 +154,18 @@ internal sealed class TriffSkillsController : IDisposable
             case "triffskills:import-clipboard":
                 _ = ImportFromClipboardAsync(message);
                 return true;
+            case "triffskills:set-pinned":
+                SetPinned(message);
+                return true;
+            case "triffskills:save-group":
+                SaveGroup(message);
+                return true;
+            case "triffskills:delete-group":
+                DeleteGroup(message);
+                return true;
+            case "triffskills:select-plan":
+                SelectPlan(message);
+                return true;
             default:
                 return false;
         }
@@ -257,6 +269,128 @@ internal sealed class TriffSkillsController : IDisposable
             PostError("reorder-characters", "Character order could not be saved.");
         }
         PostState(force: true);
+    }
+
+    private void SetPinned(JsonObject? message)
+    {
+        var characterId = ReadLong(message, "characterId");
+        if (_state.Find(characterId) is null)
+        {
+            PostError("set-pinned", "That character no longer exists.");
+            PostState(force: true);
+            return;
+        }
+
+        // An independent copy, not a captured reference: Add and Remove mutate
+        // this list in place, so a reference would be the same object.
+        var previous = _state.SnapshotPins();
+        if (ReadBool(message, "pinned"))
+        {
+            if (!_state.PinnedCharacterIds.Contains(characterId)) _state.PinnedCharacterIds.Add(characterId);
+        }
+        else
+        {
+            _state.PinnedCharacterIds.Remove(characterId);
+        }
+
+        if (_saveState() is not null)
+        {
+            _state.PinnedCharacterIds = previous;
+            PostError("set-pinned", "The pin could not be saved.");
+        }
+        PostState(force: true);
+    }
+
+    private void SaveGroup(JsonObject? message)
+    {
+        var name = ReadString(message, "name", TriffSkillsState.MaxGroupNameLength).Trim();
+        if (name.Length == 0)
+        {
+            PostError("save-group", "A group needs a name.");
+            PostState(force: true);
+            return;
+        }
+
+        var originalName = ReadString(message, "originalName", TriffSkillsState.MaxGroupNameLength).Trim();
+        var characterIds = ReadCharacterIds(message);
+
+        // Deep, not shallow: renaming mutates a group object, which a shallow
+        // list copy would still share.
+        var previous = _state.SnapshotGroups();
+
+        var existing = _state.CharacterGroups.FirstOrDefault(group => string.Equals(group.Name, originalName, StringComparison.OrdinalIgnoreCase));
+        var collides = _state.CharacterGroups.Any(group =>
+            string.Equals(group.Name, name, StringComparison.OrdinalIgnoreCase) && !ReferenceEquals(group, existing));
+        if (collides)
+        {
+            PostError("save-group", $"A group called \"{name}\" already exists.");
+            PostState(force: true);
+            return;
+        }
+
+        if (existing is null)
+        {
+            if (_state.CharacterGroups.Count >= TriffSkillsState.MaxGroups)
+            {
+                PostError("save-group", $"There is a maximum of {TriffSkillsState.MaxGroups} groups.");
+                PostState(force: true);
+                return;
+            }
+            _state.CharacterGroups.Add(new CharacterGroup { Name = name, CharacterIds = characterIds });
+        }
+        else
+        {
+            existing.Name = name;
+            existing.CharacterIds = characterIds;
+        }
+
+        if (_saveState() is not null)
+        {
+            _state.CharacterGroups = previous;
+            PostError("save-group", "The group could not be saved.");
+        }
+        PostState(force: true);
+    }
+
+    private void DeleteGroup(JsonObject? message)
+    {
+        var name = ReadString(message, "name", TriffSkillsState.MaxGroupNameLength).Trim();
+        var previous = _state.SnapshotGroups();
+        _state.CharacterGroups.RemoveAll(group => string.Equals(group.Name, name, StringComparison.OrdinalIgnoreCase));
+
+        if (_saveState() is not null)
+        {
+            _state.CharacterGroups = previous;
+            PostError("delete-group", "The group could not be removed.");
+        }
+        PostState(force: true);
+    }
+
+    private void SelectPlan(JsonObject? message)
+    {
+        var previous = _state.SelectedPlanName;
+        _state.SelectedPlanName = ReadString(message, "planName", 120);
+
+        if (_saveState() is not null)
+        {
+            _state.SelectedPlanName = previous;
+            PostError("select-plan", "The selected plan could not be saved.");
+        }
+        PostState(force: true);
+    }
+
+    private static List<long> ReadCharacterIds(JsonObject? message)
+    {
+        var ids = new List<long>();
+        if (message?["characterIds"] is not JsonArray array) return ids;
+        foreach (var node in array.Take(TriffSkillsState.MaxCharacters))
+        {
+            if (node is null) continue;
+            try { ids.Add(node.GetValue<long>()); }
+            catch (FormatException) { }
+            catch (InvalidOperationException) { }
+        }
+        return ids;
     }
 
     private async Task RefreshCharactersAsync()
@@ -731,6 +865,13 @@ internal sealed class TriffSkillsController : IDisposable
                 character.NeedsReauth,
                 stale = character.FetchedUtc is not null && !string.IsNullOrWhiteSpace(character.Error),
             }).ToArray(),
+            pinnedCharacterIds = _state.PinnedCharacterIds.ToArray(),
+            characterGroups = _state.CharacterGroups.Select(group => new
+            {
+                group.Name,
+                CharacterIds = group.CharacterIds.ToArray(),
+            }).ToArray(),
+            selectedPlanName = _state.SelectedPlanName,
             plans = matrix.Plans,
             matrix = matrix.Cells.Select(cell => new
             {
