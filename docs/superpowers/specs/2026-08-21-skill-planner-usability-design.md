@@ -269,7 +269,7 @@ New message, native to web:
 
 | Message | Payload |
 |---|---|
-| `triffskills:clipboard-preview` | `{requestId, revision, ok, name, requirementCount, diagnostics}` |
+| `triffskills:clipboard-preview` | `{requestId, revision, ok, name, nameError, requirementCount, diagnostics}` |
 
 `commit-plan` gains an optional `name`, validated through `PlanNameValidator`,
 so the name edited in the confirm dialog applies without a second preview round
@@ -394,12 +394,26 @@ Requiring the comment marker keeps every malformed requirement reportable.
    parse result and pending preview always exist, whatever the clipboard said.
 4. The reply carries `requestId`, the same `revision`, `ok`, the candidate `name`
    (empty when the clipboard had no `#` title or the candidate failed
-   validation), `requirementCount`, and `diagnostics`.
-5. The dialog shows a name field pre-filled with the candidate, and a verdict
-   line: either the requirement count, or the diagnostics. `Import` is disabled
-   while the name is empty or invalid. A candidate rejected by the validator
-   arrives as an empty name with the reason among the diagnostics, so the user
-   is told why rather than silently handed a blank field.
+   validation), `nameError` (why a candidate was rejected, empty otherwise),
+   `requirementCount`, and `diagnostics`.
+
+   **Plan validity and name validity are separate axes, and the reply keeps them
+   separate.** `ok` and `diagnostics` describe the plan only; `name` and
+   `nameError` describe the candidate only. Conflating them is not possible in
+   the existing shape — the modal's `canCommit` reads `preview.ok` alone
+   (`app/src/tools/TriffSkills.tsx:221`), so a name problem reported through
+   `diagnostics` would read as an unparseable plan and block a commit that should
+   be one corrected field away.
+5. The dialog shows a name field pre-filled with the candidate, the verdict line
+   from `ok`/`diagnostics`, and `nameError` beside the field when the candidate
+   was rejected — so a `# CON` title explains itself rather than presenting a
+   silently blank field. `Import` is enabled when `ok` holds and the name field
+   is non-empty.
+
+   **The web does not validate the name.** `PlanNameValidator` is native
+   (`native/TriffSkills/PlanNameValidator.cs:18-69`) and stays the only
+   authority; duplicating its reserved-device-name, length, and path rules in
+   TypeScript would create two sources of truth that drift.
 6. `Import` posts the existing `commit-plan` with the `requestId`, the same
    `revision`, and the confirmed name. The revision is not optional: `Commit`
    rejects a mismatch (`native/TriffSkills/TriffSkillsController.cs:526-531`,
@@ -408,6 +422,22 @@ Requiring the comment marker keeps every malformed requirement reportable.
    compares requirements and not names (`native/TriffSkills/PlanStore.cs:201`),
    committing under a name different from the placeholder is safe. Collision
    handling, atomic write, and reload verification are unchanged.
+7. **A commit rejected for an invalid name is recoverable in place.** `Commit`
+   removes the pending preview only on success
+   (`native/TriffSkills/PlanImportWorkflow.cs:92`), so a name the validator
+   refuses leaves the preview intact: the dialog shows the validator's message,
+   the user corrects the field, and `Import` retries with the same `requestId`
+   and `revision`. No re-read of the clipboard, no second preview, and no new
+   message type.
+
+**Name edits must not invalidate a clipboard preview.** The textarea path clears
+the preview and bumps the revision whenever the name changes
+(`app/src/tools/TriffSkills.tsx:663-671`), which is correct there because the web
+holds the plan text and can re-preview. It would be fatal here: the contents live
+natively, so an invalidated clipboard preview could never be rebuilt and the
+dialog would deadlock the moment the user edited the name. For a clipboard
+preview the name is not an input to the preview at all, and editing it leaves
+`requestId` and `revision` untouched.
 
 An empty clipboard, non-text clipboard content, or unparseable text surfaces as
 diagnostics in the dialog rather than as a silent no-op.
@@ -475,9 +505,13 @@ In `native/TriffView.Tests`:
   leading malformed requirement still produces a parse diagnostic rather than
   being swallowed as a name; a non-leading `#` comment is preserved.
 - **An invalid candidate name still yields a committable preview** — `# CON` and
-  an over-long title both return a requirement count with an empty `name`, and a
-  subsequent `commit-plan` under a corrected name succeeds. This is the `# CON`
-  path that the placeholder-preview rule exists to close.
+  an over-long title both return a requirement count with `ok` true, an empty
+  `name`, and the reason in `nameError`; a subsequent `commit-plan` under a
+  corrected name succeeds. This is the `# CON` path that the placeholder-preview
+  rule exists to close.
+- **A commit rejected for an invalid name leaves the pending preview intact**, so
+  a retry under a corrected name with the same `requestId` and `revision`
+  succeeds without re-reading the clipboard.
 - The clipboard round trip: a plan exported with its `# name` header re-imports
   under the same name and the same requirements, and **the saved file gains no
   title line however many times the cycle repeats**.
