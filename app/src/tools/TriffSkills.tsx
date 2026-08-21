@@ -1,12 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { onNativeMessage, postNative } from "../nativeBridge.js";
+import { copyText, onNativeMessage, postNative } from "../nativeBridge.js";
 import { buildRoster } from "./skills/rosterOrdering";
 import PlanRail from "./skills/PlanRail";
+import CharacterRow from "./skills/CharacterRow";
 import "./TriffSkills.css";
 
-type Readiness = "Ready" | "Training" | "Locked" | "Missing" | "Unknown" | "Unscored";
+export type Readiness = "Ready" | "Training" | "Locked" | "Missing" | "Unknown" | "Unscored";
+export type RequirementState = "Active" | "TrainedInactive" | "Queued" | "Missing" | "Unknown";
 
-type Character = {
+export type Character = {
   characterId: number;
   characterName: string;
   fetchedUtc?: string | null;
@@ -17,7 +19,7 @@ type Character = {
 
 type Plan = { name: string; requirementCount: number };
 
-type MatrixCell = {
+export type MatrixCell = {
   characterId: number;
   planName: string;
   readiness: Readiness;
@@ -32,7 +34,26 @@ type MatrixCell = {
 
 type Diagnostic = { line?: number; message: string };
 type PlanIssue = { fileName: string; message: string; diagnostics?: Diagnostic[] };
-type CharacterGroupDef = { name: string; characterIds: number[] };
+export type CharacterGroupDef = { name: string; characterIds: number[] };
+
+export type RequirementDetail = {
+  skillName: string;
+  requiredLevel: number;
+  activeLevel: number | null;
+  trainedLevel: number | null;
+  state: RequirementState;
+  queuedFinishUtc?: string | null;
+  queueTimingUnknown?: boolean;
+};
+
+export type CellDetail = {
+  characterId: number;
+  planName: string;
+  readiness: Readiness;
+  estimatedFinishUtc?: string | null;
+  queueTimingUnknown?: boolean;
+  requirements: RequirementDetail[];
+};
 
 type SkillsState = {
   authConfigured: boolean;
@@ -76,7 +97,7 @@ const EMPTY_STATE: SkillsState = {
 };
 
 const READINESS_ORDER: Readiness[] = ["Ready", "Training", "Locked", "Missing", "Unknown", "Unscored"];
-const STATUS: Record<Readiness, { label: string; description: string; sampleFill?: number }> = {
+export const STATUS: Record<Readiness, { label: string; description: string; sampleFill?: number }> = {
   Ready: { label: "Ready", description: "All requirements are active", sampleFill: 1 },
   Training: { label: "Training", description: "A requirement is in the queue", sampleFill: 0.5 },
   Locked: { label: "Locked", description: "Trained requirements are not active", sampleFill: 1 },
@@ -84,7 +105,15 @@ const STATUS: Record<Readiness, { label: string; description: string; sampleFill
   Unknown: { label: "Unknown", description: "A skill could not be resolved" },
   Unscored: { label: "Unscored", description: "No successful character fetch yet" },
 };
-const LEVELS = ["", "I", "II", "III", "IV", "V"];
+export const REQUIREMENT_ORDER: RequirementState[] = ["TrainedInactive", "Queued", "Missing", "Unknown"];
+export const REQUIREMENT_LABEL: Record<RequirementState, string> = {
+  Active: "Active",
+  TrainedInactive: "Trained, inactive",
+  Queued: "Queued",
+  Missing: "Missing",
+  Unknown: "Unknown",
+};
+export const LEVELS = ["", "I", "II", "III", "IV", "V"];
 
 const requestId = () =>
   typeof crypto?.randomUUID === "function"
@@ -95,7 +124,7 @@ function send(type: string, payload: Record<string, unknown> = {}) {
   return postNative({ type, ...payload });
 }
 
-function formatDate(value?: string | null) {
+export function formatDate(value?: string | null) {
   if (!value) return "";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
@@ -105,7 +134,7 @@ function quantizedProgress(progress?: number) {
   return progress === undefined ? undefined : Math.round(progress * 4) / 4;
 }
 
-function statusClass(readiness: Readiness) {
+export function statusClass(readiness: Readiness) {
   return `is-${readiness.toLowerCase()}`;
 }
 
@@ -113,7 +142,11 @@ function key(characterId: number, planName: string) {
   return `${characterId}:${planName}`;
 }
 
-function statusLine(cell: MatrixCell | undefined, readiness: Readiness) {
+export function isDegraded(character: Character) {
+  return Boolean(character.stale || character.error);
+}
+
+export function statusLine(cell: MatrixCell | undefined, readiness: Readiness) {
   if (readiness === "Training") {
     if (cell?.queueTimingUnknown) return "Training — timing unknown";
     const eta = formatDate(cell?.estimatedFinishUtc);
@@ -125,7 +158,7 @@ function statusLine(cell: MatrixCell | undefined, readiness: Readiness) {
   return STATUS[readiness].label;
 }
 
-function ProgressMark({ readiness, fill }: { readiness: Readiness; fill?: number }) {
+export function ProgressMark({ readiness, fill }: { readiness: Readiness; fill?: number }) {
   const quantized = quantizedProgress(readiness === "Ready" ? 1 : fill);
   return (
     <span
@@ -271,10 +304,14 @@ export default function TriffSkills() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [filter, setFilter] = useState("");
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const [details, setDetails] = useState<Map<number, CellDetail>>(new Map());
   const inputRevisionRef = useRef(0);
   const previewRequestRef = useRef<{ requestId: string; revision: number } | null>(null);
   const commitRequestRef = useRef("");
   const previewRef = useRef<Preview | null>(null);
+  const pendingDetailRequestsRef = useRef<Map<string, number>>(new Map());
+  const expandedIdsRef = useRef<Set<number>>(new Set());
 
   const cells = useMemo(() => {
     const map = new Map<string, MatrixCell>();
@@ -296,18 +333,6 @@ export default function TriffSkills() {
   }, [state.matrix]);
 
   const pinnedSet = useMemo(() => new Set(state.pinnedCharacterIds), [state.pinnedCharacterIds]);
-
-  const groupsByCharacter = useMemo(() => {
-    const map = new Map<number, string[]>();
-    for (const group of state.characterGroups) {
-      for (const characterId of group.characterIds) {
-        const names = map.get(characterId);
-        if (names) names.push(group.name);
-        else map.set(characterId, [group.name]);
-      }
-    }
-    return map;
-  }, [state.characterGroups]);
 
   const cellFor = (characterId: number) => cells.get(key(characterId, selectedPlanName));
 
@@ -343,6 +368,70 @@ export default function TriffSkills() {
     send("triffskills:set-pinned", { characterId, pinned: !pinnedSet.has(characterId) });
   }
 
+  function toggleGroupMembership(characterId: number, groupName: string) {
+    const group = state.characterGroups.find((item) => item.name === groupName);
+    if (!group) return;
+    const isMember = group.characterIds.includes(characterId);
+    const characterIds = isMember
+      ? group.characterIds.filter((id) => id !== characterId)
+      : [...group.characterIds, characterId];
+    send("triffskills:save-group", { name: group.name, originalName: group.name, characterIds });
+  }
+
+  function forgetCharacter(characterId: number) {
+    send("triffskills:forget-character", { characterId });
+    setExpandedIds((current) => {
+      if (!current.has(characterId)) return current;
+      const next = new Set(current);
+      next.delete(characterId);
+      return next;
+    });
+  }
+
+  function requestCellDetail(characterId: number, planNameForRequest: string) {
+    const id = requestId();
+    pendingDetailRequestsRef.current.set(id, characterId);
+    send("triffskills:get-cell-detail", { requestId: id, characterId, planName: planNameForRequest });
+  }
+
+  function toggleExpand(characterId: number) {
+    const opening = !expandedIds.has(characterId);
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      if (opening) next.add(characterId);
+      else next.delete(characterId);
+      return next;
+    });
+    // One request per expansion: skip the fetch if detail for the current
+    // plan is already cached, so re-expanding a row doesn't re-ask native.
+    if (opening) {
+      const existing = details.get(characterId);
+      if (!existing || existing.planName !== selectedPlanName) requestCellDetail(characterId, selectedPlanName);
+    }
+  }
+
+  function copyMissingSkills(characterId: number) {
+    const detail = details.get(characterId);
+    if (!detail) return;
+    const outstanding = detail.requirements.filter((requirement) => requirement.state !== "Active");
+    if (!outstanding.length) return;
+    const lines = outstanding.map((requirement) => `${requirement.skillName} ${LEVELS[requirement.requiredLevel] || requirement.requiredLevel}`);
+    copyText(lines.join("\n"));
+  }
+
+  useEffect(() => {
+    expandedIdsRef.current = expandedIds;
+  }, [expandedIds]);
+
+  // The cached detail is scoped to whichever plan it was fetched for; switching
+  // plans invalidates it and re-fetches only the rows a user already has open,
+  // never the whole roster.
+  useEffect(() => {
+    setDetails(new Map());
+    for (const characterId of expandedIdsRef.current) requestCellDetail(characterId, selectedPlanName);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPlanName]);
+
   useEffect(() => {
     const unsubscribe = onNativeMessage((message: any) => {
       if (message?.type === "triffskills:state") {
@@ -355,6 +444,21 @@ export default function TriffSkills() {
       }
       if (message?.type === "triffskills:error") {
         setError(`${message.action || "Skill Planner"}: ${message.message || "Unknown error"}`);
+        return;
+      }
+      if (message?.type === "triffskills:cell-detail") {
+        const characterId = pendingDetailRequestsRef.current.get(message.requestId);
+        if (characterId === undefined) return;
+        pendingDetailRequestsRef.current.delete(message.requestId);
+        if (message.ok) {
+          setDetails((current) => {
+            const next = new Map(current);
+            next.set(characterId, message as CellDetail);
+            return next;
+          });
+        } else {
+          setError(message.message || "Could not load requirement detail.");
+        }
         return;
       }
       const pendingPreview = previewRequestRef.current;
@@ -600,34 +704,23 @@ export default function TriffSkills() {
                     {group.characterIds.map((characterId) => {
                       const character = charactersById.get(characterId);
                       if (!character) return null;
-                      const cell = cellFor(characterId);
-                      const readiness = cell?.readiness ?? "Unscored";
-                      const pinned = pinnedSet.has(characterId);
-                      const groupNames = groupsByCharacter.get(characterId) ?? [];
                       return (
-                        <div key={characterId} className="triffskills-roster-row">
-                          <button
-                            type="button"
-                            className={`triffskills-pin-btn${pinned ? " is-pinned" : ""}`}
-                            aria-pressed={pinned}
-                            aria-label={pinned ? `Unpin ${character.characterName}` : `Pin ${character.characterName}`}
-                            onClick={() => togglePinned(characterId)}
-                          >
-                            ★
-                          </button>
-                          <span className="triffskills-roster-name">{character.characterName}</span>
-                          {groupNames.length ? (
-                            <span className="triffskills-roster-tags">
-                              {groupNames.map((name) => (
-                                <span className="triffskills-roster-tag" key={name}>{name}</span>
-                              ))}
-                            </span>
-                          ) : null}
-                          {character.stale ? <span className="triffskills-roster-badge is-stale">Stale</span> : null}
-                          <span className={`triffskills-roster-status ${statusClass(readiness)}`}>
-                            {statusLine(cell, readiness)}
-                          </span>
-                        </div>
+                        <React.Fragment key={characterId}>
+                          <CharacterRow
+                            character={character}
+                            cell={cellFor(characterId)}
+                            planName={selectedPlanName}
+                            pinned={pinnedSet.has(characterId)}
+                            groups={state.characterGroups}
+                            expanded={expandedIds.has(characterId)}
+                            detail={details.get(characterId)}
+                            onToggleExpand={() => toggleExpand(characterId)}
+                            onTogglePin={() => togglePinned(characterId)}
+                            onToggleGroup={(groupName) => toggleGroupMembership(characterId, groupName)}
+                            onForget={() => forgetCharacter(characterId)}
+                            onCopyMissing={() => copyMissingSkills(characterId)}
+                          />
+                        </React.Fragment>
                       );
                     })}
                   </section>
