@@ -110,6 +110,21 @@ requirement count, with two tabs: **Readiness** and **Train next**.
 | 4 | Locked | Trained but inactive |
 | 5 | Missing | Not trained, sorted fewest-missing first |
 | 6 | Unknown | Skill names that did not resolve |
+| 7 | Unscored | No successful skill snapshot yet |
+
+**Every character appears in exactly one group, always.** `Unscored` is not
+optional padding: `SkillPlanEvaluator.Evaluate` returns it whenever a character
+has no successful fetch (`native/TriffSkills/SkillPlanEvaluator.cs:61-63`), which
+is the state of every newly authenticated character until its first refresh
+lands, and of any character whose first refresh failed. It is also the group that
+`READINESS_ORDER` already carries as its sixth entry
+(`app/src/tools/TriffSkills.tsx:94`).
+
+Omitting it would be a lockout rather than a cosmetic gap: with forget and
+re-authenticate relocated into the character row, a character with no row has no
+way to be removed or repaired. The roster must therefore be driven by "every
+character in `state.characters`", with readiness selecting the group — never by
+enumerating groups and hoping they cover the roster.
 
 Each group header carries the readiness mark as a colour key and a count. Rows
 read `Aiga Otsolen … Ready`, `Zuelo Parvi … Training — 2d 4h`,
@@ -179,7 +194,11 @@ Three fields added to `TriffSkillsState`:
 - `characterGroups`: trim names; drop empty names; de-duplicate names
   case-insensitively, first wins; cap the name at 32 characters; cap the list at
   20 groups; within each group drop ids absent from `Characters`, de-duplicate,
-  and cap at `MaxCharacters`; drop groups left with no members.
+  and cap at `MaxCharacters`. **An empty group is valid and must be kept** — a
+  group is created before anyone is put in it, and because `TrySave` normalizes
+  before it writes (`native/TriffSkills/TriffSkillsState.cs:116`), an invariant
+  that dropped memberless groups would delete every new group in the same call
+  that created it.
 - `selectedPlanName`: trim, cap length. Not validated against the plan list —
   plans are files loaded separately — so the controller resolves an unknown name
   to the first available plan without rewriting state.
@@ -250,15 +269,23 @@ or the selected plan without it. `triffskills:state` therefore adds
 the normalized state so the web never sees an id the native side has already
 dropped.
 
-**Mutations acknowledge by re-posting state.** `set-pinned`, `save-group`,
-`delete-group`, and `select-plan` each apply, save, and then `PostState(force: true)`
-— the pattern every existing mutating handler already follows
-(`native/TriffSkills/TriffSkillsController.cs:163-271`). The posted state is the
-acknowledgement; there is no separate success message, and the web treats its own
-optimistic update as provisional until that state arrives. On failure the handler
-posts `triffskills:error` with the action name, exactly as the existing error path
-does (`:691`), and does not post state — leaving the last good state in place
-rather than half-applying.
+**Mutations snapshot, apply, save, and re-post state.** Each of `set-pinned`,
+`save-group`, `delete-group`, and `select-plan` follows the shape the reorder
+handler already established (`native/TriffSkills/TriffSkillsController.cs:229-242`):
+capture the field it is about to change, apply the change, call `_saveState()`,
+and **restore the captured value if the save fails**, then `PostError` with the
+action name and `PostState(force: true)` either way.
+
+Restoring is not optional here. `TrySave` runs `Normalize()` against live state
+before writing and returns `false` without undoing anything
+(`native/TriffSkills/TriffSkillsState.cs:112-125`), so a mutation left in place
+after a failed save survives in memory, is served to the web on the next state
+request, and can be written by any later save that happens to succeed — the exact
+opposite of the "last good state" the failure path is supposed to preserve.
+
+State is posted on the failure path too, not withheld. That is what re-syncs the
+web's optimistic update back to the restored truth; suppressing it would leave the
+UI showing a pin that no longer exists.
 
 What remains unchanged in `triffskills:state` is `matrix`, which both the rail's
 ready ratios and the roster's readiness depend on. `BuildCompact` is untouched.
@@ -280,9 +307,23 @@ Transport Ships I
 ```
 
 `Copy plan` prepends `# <plan name>`. Import reads a leading `#` line as the
-candidate name. Text pasted from anywhere else still imports — it simply arrives
-without a candidate name. The plan files on disk are unchanged; the title line
-exists only in clipboard text.
+candidate name **and removes that line from the contents it previews**. Text
+pasted from anywhere else still imports — it simply arrives without a candidate
+name.
+
+**The strip is load-bearing, not tidiness.** `PlanImportWorkflow` stores the
+exact contents it previewed (`native/TriffSkills/PlanImportWorkflow.cs:74-75`)
+and `CommitValidated` writes them verbatim
+(`native/TriffSkills/PlanStore.cs:149-160`). Relying on the parser to skip the
+comment would leave the title line in the saved file, and since export prepends
+its own, every clipboard round trip would add another — a plan copied and
+re-imported three times would carry three stale title comments, each possibly
+naming something the plan is no longer called. Only the leading title line is
+removed; any other `#` line the user wrote is preserved.
+
+With the strip in place the on-disk format genuinely is unchanged: plan files
+hold requirement lines, the name lives in the filename, and the title line exists
+only in clipboard text.
 
 **Only a `#` line is a title.** An earlier draft treated any first line that
 failed to parse as the name. That would have silently swallowed a typo'd skill —
@@ -293,8 +334,9 @@ Requiring the comment marker keeps every malformed requirement reportable.
 ### Import flow
 
 1. `Import from clipboard` posts `triffskills:import-clipboard`.
-2. Native reads the clipboard and takes the candidate name from a leading `#`
-   line if one is present.
+2. Native reads the clipboard, takes the candidate name from a leading `#` line
+   if one is present, and strips that line from the contents it will preview and
+   ultimately save.
 3. Native previews through the existing workflow. **The preview always runs under
    a valid name**, because `PlanImportWorkflow.PreviewAsync` validates the name
    before it parses anything (`native/TriffSkills/PlanImportWorkflow.cs:53-58`) —
@@ -362,25 +404,35 @@ the type for no gain.
 In `native/TriffView.Tests`:
 
 - `Normalize()` invariants for pins and groups: orphan cleanup when a character is
-  removed, name de-duplication, cap enforcement, and dropping groups left empty.
+  removed, name de-duplication, cap enforcement, and **an empty group surviving a
+  save**, which is the case a memberless-group invariant would silently break.
 - The forget-character rollback restoring pins and group memberships alongside the
   character when the save fails — the partial-loss hole this design would
   otherwise open.
-- Candidate-name derivation: a leading `#` line becomes the name; a leading valid
-  requirement does not; a leading malformed requirement still produces a parse
-  diagnostic rather than being swallowed as a name.
+- Each new mutation handler restoring its captured value when `_saveState()` fails,
+  and posting state on the failure path as well as the success path.
+- Candidate-name derivation: a leading `#` line becomes the name and is stripped
+  from the saved contents; a leading valid requirement does not become a name; a
+  leading malformed requirement still produces a parse diagnostic rather than
+  being swallowed as a name; a non-leading `#` comment is preserved.
 - The clipboard round trip: a plan exported with its `# name` header re-imports
-  under the same name and the same requirements.
+  under the same name and the same requirements, and **the saved file gains no
+  title line however many times the cycle repeats**.
 - `commit-plan` with a name override, including a name that fails
   `PlanNameValidator`.
 - `triffskills:import-clipboard` against an injected clipboard seam. Per CLAUDE.md,
   tests must not touch a real system resource where a seam is available.
 - The state projection carrying `pinnedCharacterIds`, `characterGroups`, and
-  `selectedPlanName`, and mutation failures posting `triffskills:error` without
-  posting state.
+  `selectedPlanName`, and mutation failures posting `triffskills:error`.
 
-Roster ordering (group order, fewest-missing-first within Missing) is web-side and
-covered by whatever the `app/` side already uses; it needs no C# test project.
+**Roster ordering has no automated coverage, and this design does not add any.**
+`app/` has no test script and no test dependency — only `dev`, `build`, and
+`preview` (`app/package.json:7-18`) — so grouping, pin precedence, filtering, and
+fewest-missing ordering are verified by hand or not at all. Introducing a test
+framework to the web project is a repo-level decision outside this change's scope.
+The consequence is stated rather than papered over: the logic most likely to
+regress here is the least protected, and the manual check below is the only thing
+standing behind it.
 
 `MatrixBoundsTests` must continue to pass untouched, confirming `BuildCompact`
 was not disturbed.
@@ -401,6 +453,12 @@ claim:
 - That `Clipboard.GetText()` returns what is expected from the WPF STA thread in
   this context.
 - How the roster reads at 40 rows with real character names.
+- **Roster ordering, which has no automated test at all** (see Testing): with the
+  full 40-character roster, confirm group order, that pinned characters surface
+  above their readiness group, that the filter box and group chips compose, and
+  that Missing is ordered fewest-first.
+- **That a newly added character appears** — it is `Unscored` until its first
+  refresh, and must be visible and removable in that state.
 - That the pane behaves on the 100% monitors as well as the 200% primary. The
   Skill Planner is WebView2 content inside the settings window rather than
   preview-overlay geometry, so the mixed-DPI trap documented in CLAUDE.md is not
