@@ -80,10 +80,7 @@ public class SkillsMutationTests : IDisposable
 
         var last = messages.Last(json => json.Contains("triffskills:state", StringComparison.Ordinal));
         var state = JsonNode.Parse(last)!;
-        // The test harness re-serializes the posted object with default JsonSerializerOptions
-        // (no camelCase policy), so member-access-shorthand properties like `group.Name` come
-        // through as declared ("Name"), unlike the explicitly-named "characterGroups" wrapper.
-        var groupNames = state["characterGroups"]?.AsArray().Select(node => (string?)node?["Name"]).ToArray() ?? [];
+        var groupNames = state["characterGroups"]?.AsArray().Select(node => (string?)node?["name"]).ToArray() ?? [];
         Assert.Contains("Haulers", groupNames);
         Assert.DoesNotContain("Renamed", groupNames);
     }
@@ -113,7 +110,10 @@ public class SkillsMutationTests : IDisposable
 
     private static TriffSkillsController Controller(ConcurrentQueue<string> messages, Func<string?>? saveState)
         => new(
-            value => messages.Enqueue(JsonSerializer.Serialize(value)),
+            // Serialize with the same options production uses to post to the WebView2 client
+            // (WebMessageJson.Options, camelCase) so these tests inspect byte-identical messages
+            // to what the web side actually receives, rather than a differently-cased view.
+            value => messages.Enqueue(JsonSerializer.Serialize(value, WebMessageJson.Options)),
             new MemoryCredentials(),
             new EsiClient(new HttpClient(new StubHandler()), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }, "TriffView.Tests/1.0"),
             new ControlledSso(),
