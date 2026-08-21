@@ -34,6 +34,8 @@ internal sealed class TriffSkillsController : IDisposable
     private readonly TriffSkillsAuthentication _authentication;
     private readonly PlanImportWorkflow _planImports;
     private readonly Func<string?> _saveState;
+    private readonly Func<string> _readClipboard;
+    private readonly Action<string> _writeClipboard;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly SemaphoreSlim _authGate = new(1, 1);
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
@@ -53,7 +55,12 @@ internal sealed class TriffSkillsController : IDisposable
     private string _lastPostedState = string.Empty;
 
     public TriffSkillsController(Action<object> post)
-        : this(post, new WindowsCredentialStore(), CreateEsiClient(), CreateSsoClient(), TimeProvider.System)
+        : this(post, () => string.Empty, _ => { })
+    {
+    }
+
+    public TriffSkillsController(Action<object> post, Func<string> readClipboard, Action<string> writeClipboard)
+        : this(post, new WindowsCredentialStore(), CreateEsiClient(), CreateSsoClient(), TimeProvider.System, null, readClipboard, writeClipboard)
     {
     }
 
@@ -63,11 +70,15 @@ internal sealed class TriffSkillsController : IDisposable
         EsiClient esi,
         IEveSsoClient sso,
         TimeProvider time,
-        Func<string?>? saveState = null)
+        Func<string?>? saveState = null,
+        Func<string>? readClipboard = null,
+        Action<string>? writeClipboard = null)
     {
         _post = post;
         _esi = esi;
         _time = time;
+        _readClipboard = readClipboard ?? (() => string.Empty);
+        _writeClipboard = writeClipboard ?? (_ => { });
 
         var stateLoad = TriffSkillsState.Load();
         _state = stateLoad.State;
@@ -136,6 +147,9 @@ internal sealed class TriffSkillsController : IDisposable
                 return true;
             case "triffskills:get-cell-detail":
                 PostCellDetail(message);
+                return true;
+            case "triffskills:copy-plan":
+                CopyPlan(message);
                 return true;
             default:
                 return false;
@@ -589,6 +603,33 @@ internal sealed class TriffSkillsController : IDisposable
                 item.QueueTimingUnknown,
             }).ToArray(),
         });
+    }
+
+    private void CopyPlan(JsonObject? message)
+    {
+        var planName = ReadString(message, "planName", 120);
+        var plan = _plans.FirstOrDefault(item => string.Equals(item.Name, planName, StringComparison.OrdinalIgnoreCase));
+        if (plan is null)
+        {
+            PostError("copy-plan", "That plan no longer exists. Reload plans and try again.");
+            return;
+        }
+
+        try
+        {
+            var path = Path.Combine(TriffSkillsPaths.PlansDir, plan.Name + ".txt");
+            var contents = AtomicFile.ReadBoundedText(path, PlanStore.MaxPlanFileBytes);
+            _writeClipboard(ClipboardPlanText.WithTitle(plan.Name, contents));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException or NotSupportedException)
+        {
+            PostError("copy-plan", $"Plan could not be copied: {exception.Message}");
+        }
+        catch (Exception exception)
+        {
+            // The injected clipboard writer owns the real failure surface.
+            PostError("copy-plan", $"Plan could not be copied: {exception.Message}");
+        }
     }
 
     private void OpenPlansFolder()

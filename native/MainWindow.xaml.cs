@@ -681,7 +681,7 @@ public partial class MainWindow : Window
         {
             try
             {
-                _triffSkills ??= new TriffSkills.TriffSkillsController(PostAppEvent);
+                _triffSkills ??= new TriffSkills.TriffSkillsController(PostAppEvent, ReadClipboardText, CopyText);
             }
             catch (Exception ex)
             {
@@ -920,6 +920,18 @@ public partial class MainWindow : Window
         catch
         {
             PostAppEvent(new { type = "clipboard", text = "" });
+        }
+    }
+
+    private string ReadClipboardText()
+    {
+        try
+        {
+            return System.Windows.Clipboard.ContainsText() ? System.Windows.Clipboard.GetText() : string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
         }
     }
 
