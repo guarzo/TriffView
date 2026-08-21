@@ -118,9 +118,34 @@ Clicking a row expands its outstanding requirements in place, with a
 `Copy missing skills` action.
 
 *Train next tab.* Characters not ready for the selected plan, ordered by fewest
-missing requirements, each listing the specific skills and levels still needed.
-This is a distance ordering, not a cost ordering — see the evaluator constraint
-above. Cross-plan "cheapest unlock" is out of scope.
+missing requirements, each row showing that count. Expanding a row fetches and
+lists the specific skills and levels still needed. This is a distance ordering,
+not a cost ordering — see the evaluator constraint above. Cross-plan "cheapest
+unlock" is out of scope.
+
+The expansion is lazy by necessity, not preference: the compact matrix carries
+counts only (`native/TriffSkills/TriffSkillsMatrix.cs:59-70`), and the specific
+missing requirements come from the existing one-character/one-plan detail request
+(`native/TriffSkills/TriffSkillsController.cs:556-591`). Rendering every
+character's skills up front would mean up to 50 detail requests on tab open, or a
+new batched projection. Neither is worth it when the ordering already answers the
+question and only the expanded row needs the detail. One request per expansion
+matches how the current cell selection already behaves.
+
+**Character management.** Forgetting a character and re-authenticating one move
+into the expanded character row, which is where a character's own detail now
+lives. The expansion carries `Forget character` behind the existing
+confirm step, the existing re-auth prompt when `needsReauth` is set, the stale-data
+flag, and any per-character error — the same content the character detail panel
+renders today (`app/src/tools/TriffSkills.tsx:360-395`), reached by expanding a
+row rather than by selecting a column header.
+
+**Pinning and groups.** The star on each row toggles that character's pin. The
+chip row above the roster ends with `+ Group`, which prompts for a name and
+creates an empty group; each chip carries a context action to rename or delete
+it. Group membership is set from the expanded character row, which lists the
+groups with a checkbox each. Renaming a group preserves its membership; deleting
+one removes the group without touching the characters.
 
 **Freshness.** The current per-row `Current` / `Stale` label
 (`app/src/tools/TriffSkills.tsx:440`) becomes a badge shown only when a character
@@ -159,12 +184,32 @@ Three fields added to `TriffSkillsState`:
   plans are files loaded separately — so the controller resolves an unknown name
   to the first available plan without rewriting state.
 
-Because `Normalize()` runs on save, forgetting a character cleans its pins and
-group memberships automatically.
+**Orphan cleanup must not run inside a rollback.** `Normalize()` mutates in place
+and `TrySave` calls it *before* writing
+(`native/TriffSkills/TriffSkillsState.cs:116`), while the forget-character
+rollback restores only `Characters` and `SelectedCharacterId`
+(`native/TriffSkills/TriffSkillsAuthentication.cs:86-104`). Left alone, a forget
+whose save fails would restore the character but leave its pins and group
+memberships already stripped from memory — silent partial data loss on a path
+that reports success at rolling back.
+
+The fix is to extend that existing rollback rather than restructure `Normalize()`:
+capture `pinnedCharacterIds` and `characterGroups` alongside the existing
+`previous` character clone and `previousSelection`, and restore all four together
+when `_saveState()` fails. This keeps the snapshot next to the mutation it
+protects, matching how the character clone is already handled.
 
 **Backward compatibility.** All three fields are additive and default to empty.
-An existing `state.json` written by the current build deserialises unchanged, and
-older builds ignore the new fields. No migration is required.
+An existing `state.json` written by the current build deserialises unchanged, so
+no migration is required.
+
+Downgrading is lossy, and deliberately not defended against. `TriffSkillsState`
+has no `[JsonExtensionData]`, so an older build deserialises the file, drops the
+three fields it does not know, and erases them on its next save
+(`native/TriffSkills/TriffSkillsState.cs:116-120`). The cost is re-pinning and
+re-creating groups, which is minutes of work and no character or plan data;
+versioning machinery to protect a downgrade path nobody has asked for is not
+worth its weight.
 
 ### Native and web contract
 
@@ -176,8 +221,8 @@ New messages, web to native:
 
 | Message | Payload | Effect |
 |---|---|---|
-| `triffskills:import-clipboard` | `{requestId}` | Native reads `Clipboard.GetText()`, derives a candidate name from a leading title line, and runs the existing `PlanImportWorkflow.PreviewAsync` |
-| `triffskills:copy-plan` | `{planName}` | Native reads the plan file and calls the existing `CopyText` |
+| `triffskills:import-clipboard` | `{requestId}` | Native reads `Clipboard.GetText()`, derives a candidate name from a leading `#` comment line, and runs the existing `PlanImportWorkflow.PreviewAsync` |
+| `triffskills:copy-plan` | `{planName}` | Native reads the plan file, prepends a `# <name>` title line, and calls the existing `CopyText` |
 | `triffskills:set-pinned` | `{characterId, pinned}` | Toggles a pin, saves state |
 | `triffskills:save-group` | `{name, characterIds, originalName?}` | Creates or renames a group |
 | `triffskills:delete-group` | `{name}` | Removes a group |
@@ -196,22 +241,76 @@ trip. The requirement comparison in `CommitValidated` is unaffected.
 The web side never receives the plan text. A 512 KiB plan read from the clipboard
 stays native; only the name, count, and diagnostics cross the bridge.
 
-`triffskills:state` is otherwise unchanged and continues to carry `matrix`, which
-both the rail's ready ratios and the roster's readiness depend on. `BuildCompact`
-is untouched.
+**The state projection gains the three new fields.** `PostState`
+(`native/TriffSkills/TriffSkillsController.cs:607-647`) currently projects
+characters, plans, matrix, plan issues, warnings, and the plans timestamp — the
+new persisted state is not in it, and the roster cannot render pins, group chips,
+or the selected plan without it. `triffskills:state` therefore adds
+`pinnedCharacterIds`, `characterGroups`, and `selectedPlanName`, projected from
+the normalized state so the web never sees an id the native side has already
+dropped.
+
+**Mutations acknowledge by re-posting state.** `set-pinned`, `save-group`,
+`delete-group`, and `select-plan` each apply, save, and then `PostState(force: true)`
+— the pattern every existing mutating handler already follows
+(`native/TriffSkills/TriffSkillsController.cs:163-271`). The posted state is the
+acknowledgement; there is no separate success message, and the web treats its own
+optimistic update as provisional until that state arrives. On failure the handler
+posts `triffskills:error` with the action name, exactly as the existing error path
+does (`:691`), and does not post state — leaving the last good state in place
+rather than half-applying.
+
+What remains unchanged in `triffskills:state` is `matrix`, which both the rail's
+ready ratios and the roster's readiness depend on. `BuildCompact` is untouched.
+
+### Clipboard round trip
+
+Export and import have to agree on where the plan's name lives, and today it
+lives nowhere in the file: `PlanStore` writes requirement lines only, and the
+name comes from the filename (`native/TriffSkills/PlanStore.cs:149-160`). A naive
+`Copy plan` would therefore produce text no import could name.
+
+The parser already skips `#` comment lines
+(`native/TriffSkills/SkillPlanParser.cs:60`), so the name travels as one:
+
+```
+# Mastadon
+Caldari Industrial V
+Transport Ships I
+```
+
+`Copy plan` prepends `# <plan name>`. Import reads a leading `#` line as the
+candidate name. Text pasted from anywhere else still imports — it simply arrives
+without a candidate name. The plan files on disk are unchanged; the title line
+exists only in clipboard text.
+
+**Only a `#` line is a title.** An earlier draft treated any first line that
+failed to parse as the name. That would have silently swallowed a typo'd skill —
+`Caldari Battleshp V` would have become the plan's name instead of the parse
+diagnostic the user needs (`native/TriffSkills/SkillPlanParser.cs:62-120`).
+Requiring the comment marker keeps every malformed requirement reportable.
 
 ### Import flow
 
 1. `Import from clipboard` posts `triffskills:import-clipboard`.
-2. Native reads the clipboard. If the first non-blank line does not parse as a
-   skill requirement, it is taken as the candidate plan name and excluded from
-   the requirements; otherwise the candidate name is empty.
-3. Native previews through the existing workflow and replies with the candidate
-   name, the requirement count, and any diagnostics.
+2. Native reads the clipboard and takes the candidate name from a leading `#`
+   line if one is present.
+3. Native previews through the existing workflow. **The preview always runs under
+   a valid name**, because `PlanImportWorkflow.PreviewAsync` validates the name
+   before it parses anything (`native/TriffSkills/PlanImportWorkflow.cs:53-58`) —
+   an empty candidate would fail with a name error and never reach the parser, so
+   the requirement count and diagnostics the dialog needs would never be produced.
+   When no candidate name is present, the preview uses the placeholder
+   `Imported plan`, and the reply's `name` is empty so the dialog knows the user
+   must supply one.
 4. The dialog shows a name field pre-filled with the candidate, and a verdict
-   line: either the requirement count, or the diagnostics.
-5. `Import` posts the existing `commit-plan` with the confirmed name. Collision
-   handling, atomic write, and reload verification are unchanged.
+   line: either the requirement count, or the diagnostics. `Import` is disabled
+   while the name is empty or invalid.
+5. `Import` posts the existing `commit-plan` with the confirmed name. Because
+   `CommitValidated` compares requirements and not names
+   (`native/TriffSkills/PlanStore.cs:201`), committing under a name different
+   from the placeholder is safe. Collision handling, atomic write, and reload
+   verification are unchanged.
 
 An empty clipboard, non-text clipboard content, or unparseable text surfaces as
 diagnostics in the dialog rather than as a silent no-op.
@@ -226,6 +325,13 @@ diagnostics in the dialog rather than as a silent no-op.
   `TriffSkillsState.TryReorderCharacters`, and its tests. Manual ordering has no
   surface once the grid is gone, and pins plus groups replace its purpose.
 - The per-row `Current` label, replaced by an exception-only `Stale` badge.
+
+Nothing here is removed without a replacement. In particular the character
+detail panel's contents are relocated, not dropped: forget, re-auth, the stale
+flag, and per-character errors all move into the expanded character row, as
+described under Character management above. Losing the only surface for
+forgetting a character would otherwise strand any character whose credentials
+had gone bad.
 
 ### Error and failure behaviour
 
@@ -246,22 +352,35 @@ New failure paths:
 
 ### Testing
 
-Pure logic goes to `tests/TriffView.Tests`, which links source files with
-`<Compile Include>` rather than a project reference, so each new file needs a
-line added to that csproj and must avoid Windows-only dependencies:
+Persistence and controller tests go to `native/TriffView.Tests`, which references
+the project and can see `internal` types. `TriffSkillsState`'s tests already live
+there (`native/TriffView.Tests/TriffSkillsStateTests.cs`), and
+`tests/TriffView.Tests` links no TriffSkills sources at all — extracting
+`Normalize()` into a Windows-free file purely to move its tests would fragment
+the type for no gain.
 
-- `Normalize()` invariants for pins and groups, including orphan cleanup when a
-  character is removed, name de-duplication, and cap enforcement.
-- Candidate-name derivation from a leading title line, including the case where
-  the first line is a valid requirement and no name is derived.
-- Roster ordering: group order, fewest-missing-first within Missing.
+In `native/TriffView.Tests`:
 
-`native/TriffView.Tests` covers what needs the real project:
-
-- The new controller message handlers, including `commit-plan` with a name
-  override and a name that fails validation.
+- `Normalize()` invariants for pins and groups: orphan cleanup when a character is
+  removed, name de-duplication, cap enforcement, and dropping groups left empty.
+- The forget-character rollback restoring pins and group memberships alongside the
+  character when the save fails — the partial-loss hole this design would
+  otherwise open.
+- Candidate-name derivation: a leading `#` line becomes the name; a leading valid
+  requirement does not; a leading malformed requirement still produces a parse
+  diagnostic rather than being swallowed as a name.
+- The clipboard round trip: a plan exported with its `# name` header re-imports
+  under the same name and the same requirements.
+- `commit-plan` with a name override, including a name that fails
+  `PlanNameValidator`.
 - `triffskills:import-clipboard` against an injected clipboard seam. Per CLAUDE.md,
   tests must not touch a real system resource where a seam is available.
+- The state projection carrying `pinnedCharacterIds`, `characterGroups`, and
+  `selectedPlanName`, and mutation failures posting `triffskills:error` without
+  posting state.
+
+Roster ordering (group order, fewest-missing-first within Missing) is web-side and
+covered by whatever the `app/` side already uses; it needs no C# test project.
 
 `MatrixBoundsTests` must continue to pass untouched, confirming `BuildCompact`
 was not disturbed.
@@ -298,8 +417,20 @@ plans; search is fast when the name is known but leaves no browsable default
 state, which is the wrong trade for the primary "who can fly this" question.
 
 **Pins and groups in native `state.json`**, over web `localStorage`. Consistent
-with the rest of the subsystem, survives WebView2 profile resets, and gets
-orphan cleanup from the existing `Normalize()` for free.
+with the rest of the subsystem and survives WebView2 profile resets. Note that
+orphan cleanup is *not* free from `Normalize()` as first drafted — it needs the
+rollback snapshot described under Persisted state, because `Normalize()` mutates
+before the save it precedes.
+
+**A `#` title line carries the plan name through the clipboard**, over a bare
+requirement list or a separate name-carrying format. It reuses comment support
+the parser already has, keeps exported text valid input for any other tool, and
+leaves the plan files on disk unchanged.
+
+**Train next expands lazily**, over a batched projection or eager fetch. The
+missing-skill detail exists only per character per plan, so eager rendering costs
+up to 50 requests on tab open. One request per expansion matches the existing
+cell-selection behaviour and needs no new payload to size and regression-test.
 
 **Always confirm the import with a name field**, over inferring silently or
 auto-naming with a later rename. Nothing is created blind, and it avoids adding
