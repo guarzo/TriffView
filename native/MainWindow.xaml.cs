@@ -681,7 +681,7 @@ public partial class MainWindow : Window
         {
             try
             {
-                _triffSkills ??= new TriffSkills.TriffSkillsController(PostAppEvent);
+                _triffSkills ??= new TriffSkills.TriffSkillsController(PostAppEvent, ReadClipboardText, CopyText);
             }
             catch (Exception ex)
             {
@@ -921,6 +921,16 @@ public partial class MainWindow : Window
         {
             PostAppEvent(new { type = "clipboard", text = "" });
         }
+    }
+
+    private string ReadClipboardText()
+    {
+        // Let a genuine failure (e.g. ExternalException from a locked clipboard) propagate:
+        // TriffSkillsController.ImportFromClipboardAsync catches it and reports a
+        // distinguishable "clipboard could not be read" diagnostic. Swallowing it here and
+        // returning "" would be reported as an empty clipboard instead — a wrong diagnosis
+        // with no reason to retry.
+        return System.Windows.Clipboard.ContainsText() ? System.Windows.Clipboard.GetText() : string.Empty;
     }
 
     private void PostAppEvent(object message)

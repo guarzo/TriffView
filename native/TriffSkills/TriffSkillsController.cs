@@ -34,6 +34,8 @@ internal sealed class TriffSkillsController : IDisposable
     private readonly TriffSkillsAuthentication _authentication;
     private readonly PlanImportWorkflow _planImports;
     private readonly Func<string?> _saveState;
+    private readonly Func<string> _readClipboard;
+    private readonly Action<string> _writeClipboard;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly SemaphoreSlim _authGate = new(1, 1);
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
@@ -53,7 +55,12 @@ internal sealed class TriffSkillsController : IDisposable
     private string _lastPostedState = string.Empty;
 
     public TriffSkillsController(Action<object> post)
-        : this(post, new WindowsCredentialStore(), CreateEsiClient(), CreateSsoClient(), TimeProvider.System)
+        : this(post, () => string.Empty, _ => { })
+    {
+    }
+
+    public TriffSkillsController(Action<object> post, Func<string> readClipboard, Action<string> writeClipboard)
+        : this(post, new WindowsCredentialStore(), CreateEsiClient(), CreateSsoClient(), TimeProvider.System, null, readClipboard, writeClipboard)
     {
     }
 
@@ -63,11 +70,15 @@ internal sealed class TriffSkillsController : IDisposable
         EsiClient esi,
         IEveSsoClient sso,
         TimeProvider time,
-        Func<string?>? saveState = null)
+        Func<string?>? saveState = null,
+        Func<string>? readClipboard = null,
+        Action<string>? writeClipboard = null)
     {
         _post = post;
         _esi = esi;
         _time = time;
+        _readClipboard = readClipboard ?? (() => string.Empty);
+        _writeClipboard = writeClipboard ?? (_ => { });
 
         var stateLoad = TriffSkillsState.Load();
         _state = stateLoad.State;
@@ -116,9 +127,6 @@ internal sealed class TriffSkillsController : IDisposable
             case "triffskills:forget-character":
                 _ = ForgetCharacterAsync(ReadLong(message, "characterId"));
                 return true;
-            case "triffskills:reorder-characters":
-                ReorderCharacters(message);
-                return true;
             case "triffskills:refresh-characters":
                 _ = RefreshCharactersAsync();
                 return true;
@@ -136,6 +144,24 @@ internal sealed class TriffSkillsController : IDisposable
                 return true;
             case "triffskills:get-cell-detail":
                 PostCellDetail(message);
+                return true;
+            case "triffskills:copy-plan":
+                CopyPlan(message);
+                return true;
+            case "triffskills:import-clipboard":
+                _ = ImportFromClipboardAsync(message);
+                return true;
+            case "triffskills:set-pinned":
+                SetPinned(message);
+                return true;
+            case "triffskills:save-group":
+                SaveGroup(message);
+                return true;
+            case "triffskills:delete-group":
+                DeleteGroup(message);
+                return true;
+            case "triffskills:select-plan":
+                SelectPlan(message);
                 return true;
             default:
                 return false;
@@ -207,39 +233,126 @@ internal sealed class TriffSkillsController : IDisposable
         PostState(force: true);
     }
 
-    private void ReorderCharacters(JsonObject? message)
+    private void SetPinned(JsonObject? message)
     {
-        if (message?["characterIds"] is not JsonArray nodes || nodes.Count > TriffSkillsState.MaxCharacters)
+        var characterId = ReadLong(message, "characterId");
+        if (_state.Find(characterId) is null)
         {
-            PostError("reorder-characters", "Character order was invalid.");
-            return;
-        }
-
-        var characterIds = new List<long>(nodes.Count);
-        foreach (var node in nodes)
-        {
-            if (node is not JsonValue value || !value.TryGetValue<long>(out var characterId) || characterId <= 0)
-            {
-                PostError("reorder-characters", "Character order was invalid.");
-                return;
-            }
-            characterIds.Add(characterId);
-        }
-
-        var previous = _state.Characters;
-        if (!_state.TryReorderCharacters(characterIds))
-        {
-            PostError("reorder-characters", "Character order no longer matched the current characters.");
+            PostError("set-pinned", "That character no longer exists.");
             PostState(force: true);
             return;
         }
 
+        // An independent copy, not a captured reference: Add and Remove mutate
+        // this list in place, so a reference would be the same object.
+        var previous = _state.SnapshotPins();
+        if (ReadBool(message, "pinned"))
+        {
+            if (!_state.PinnedCharacterIds.Contains(characterId)) _state.PinnedCharacterIds.Add(characterId);
+        }
+        else
+        {
+            _state.PinnedCharacterIds.Remove(characterId);
+        }
+
         if (_saveState() is not null)
         {
-            _state.Characters = previous;
-            PostError("reorder-characters", "Character order could not be saved.");
+            _state.PinnedCharacterIds = previous;
+            PostError("set-pinned", "The pin could not be saved.");
         }
         PostState(force: true);
+    }
+
+    private void SaveGroup(JsonObject? message)
+    {
+        var name = ReadString(message, "name", TriffSkillsState.MaxGroupNameLength).Trim();
+        if (name.Length == 0)
+        {
+            PostError("save-group", "A group needs a name.");
+            PostState(force: true);
+            return;
+        }
+
+        var originalName = ReadString(message, "originalName", TriffSkillsState.MaxGroupNameLength).Trim();
+        var characterIds = ReadCharacterIds(message);
+
+        // Deep, not shallow: renaming mutates a group object, which a shallow
+        // list copy would still share.
+        var previous = _state.SnapshotGroups();
+
+        var existing = _state.CharacterGroups.FirstOrDefault(group => string.Equals(group.Name, originalName, StringComparison.OrdinalIgnoreCase));
+        var collides = _state.CharacterGroups.Any(group =>
+            string.Equals(group.Name, name, StringComparison.OrdinalIgnoreCase) && !ReferenceEquals(group, existing));
+        if (collides)
+        {
+            PostError("save-group", $"A group called \"{name}\" already exists.");
+            PostState(force: true);
+            return;
+        }
+
+        if (existing is null)
+        {
+            if (_state.CharacterGroups.Count >= TriffSkillsState.MaxGroups)
+            {
+                PostError("save-group", $"There is a maximum of {TriffSkillsState.MaxGroups} groups.");
+                PostState(force: true);
+                return;
+            }
+            _state.CharacterGroups.Add(new CharacterGroup { Name = name, CharacterIds = characterIds });
+        }
+        else
+        {
+            existing.Name = name;
+            existing.CharacterIds = characterIds;
+        }
+
+        if (_saveState() is not null)
+        {
+            _state.CharacterGroups = previous;
+            PostError("save-group", "The group could not be saved.");
+        }
+        PostState(force: true);
+    }
+
+    private void DeleteGroup(JsonObject? message)
+    {
+        var name = ReadString(message, "name", TriffSkillsState.MaxGroupNameLength).Trim();
+        var previous = _state.SnapshotGroups();
+        _state.CharacterGroups.RemoveAll(group => string.Equals(group.Name, name, StringComparison.OrdinalIgnoreCase));
+
+        if (_saveState() is not null)
+        {
+            _state.CharacterGroups = previous;
+            PostError("delete-group", "The group could not be removed.");
+        }
+        PostState(force: true);
+    }
+
+    private void SelectPlan(JsonObject? message)
+    {
+        var previous = _state.SelectedPlanName;
+        _state.SelectedPlanName = ReadString(message, "planName", 120);
+
+        if (_saveState() is not null)
+        {
+            _state.SelectedPlanName = previous;
+            PostError("select-plan", "The selected plan could not be saved.");
+        }
+        PostState(force: true);
+    }
+
+    private static List<long> ReadCharacterIds(JsonObject? message)
+    {
+        var ids = new List<long>();
+        if (message?["characterIds"] is not JsonArray array) return ids;
+        foreach (var node in array.Take(TriffSkillsState.MaxCharacters))
+        {
+            if (node is null) continue;
+            try { ids.Add(node.GetValue<long>()); }
+            catch (FormatException) { }
+            catch (InvalidOperationException) { }
+        }
+        return ids;
     }
 
     private async Task RefreshCharactersAsync()
@@ -523,12 +636,77 @@ internal sealed class TriffSkillsController : IDisposable
         }
     }
 
+    private const string ClipboardPlaceholderName = "Imported plan";
+
+    private async Task ImportFromClipboardAsync(JsonObject? message)
+    {
+        var requestId = ReadRequestId(message);
+        if (requestId.Length == 0) return;
+        var revision = ReadRevision(message);
+
+        string clipboard;
+        try
+        {
+            clipboard = _readClipboard() ?? string.Empty;
+        }
+        catch (Exception exception)
+        {
+            PostError("import-clipboard", $"The clipboard could not be read: {exception.Message}");
+            return;
+        }
+
+        var (candidate, contents) = ClipboardPlanText.SplitTitle(clipboard);
+        if (string.IsNullOrWhiteSpace(contents))
+        {
+            PostClipboardPreview(requestId, revision, ok: false, name: string.Empty, nameError: string.Empty, requirementCount: 0,
+                diagnostics: [new PlanDiagnostic(0, "The clipboard holds no plan text.")]);
+            return;
+        }
+
+        // Always preview under a name guaranteed valid. Validating the candidate
+        // here would reject it before a pending preview existed, and no later
+        // correction in the dialog could then commit.
+        PlanPreviewResult preview;
+        try
+        {
+            preview = await _planImports.PreviewAsync(requestId, revision, ClipboardPlaceholderName, contents, _lifetime.Token);
+        }
+        catch (Exception exception)
+        {
+            // Mirrors PreviewPlanAsync's handling: skill-name resolution can hit ESI and
+            // fail there. Since this method is invoked fire-and-forget, an uncaught
+            // exception here would fault the task silently and never reach the web UI.
+            preview = new PlanPreviewResult(
+                requestId,
+                revision,
+                null,
+                [new PlanDiagnostic(0, $"Could not validate skill names: {exception.Message}")]);
+        }
+
+        var nameError = string.Empty;
+        var name = candidate;
+        if (candidate.Length > 0 && !PlanNameValidator.TryValidate(candidate, out _, out var candidateError))
+        {
+            name = string.Empty;
+            nameError = candidateError;
+        }
+
+        PostClipboardPreview(
+            requestId,
+            revision,
+            ok: preview.Plan is not null,
+            name: name,
+            nameError: nameError,
+            requirementCount: preview.Plan?.Requirements.Count ?? 0,
+            diagnostics: preview.Diagnostics);
+    }
+
     private async Task CommitPlanAsync(JsonObject? message)
     {
         var requestId = ReadRequestId(message);
         if (requestId.Length == 0) return;
         var revision = ReadRevision(message);
-        var result = _planImports.Commit(requestId, revision, ReadBool(message, "replace"));
+        var result = _planImports.Commit(requestId, revision, ReadBool(message, "replace"), ReadString(message, "name", 120));
         if (result.Collision)
         {
             _post(new { type = "triffskills:plan-commit", requestId, revision, ok = false, collision = true, expired = false, name = result.Name });
@@ -591,6 +769,33 @@ internal sealed class TriffSkillsController : IDisposable
         });
     }
 
+    private void CopyPlan(JsonObject? message)
+    {
+        var planName = ReadString(message, "planName", 120);
+        var plan = _plans.FirstOrDefault(item => string.Equals(item.Name, planName, StringComparison.OrdinalIgnoreCase));
+        if (plan is null)
+        {
+            PostError("copy-plan", "That plan no longer exists. Reload plans and try again.");
+            return;
+        }
+
+        try
+        {
+            var path = Path.Combine(TriffSkillsPaths.PlansDir, plan.Name + ".txt");
+            var contents = AtomicFile.ReadBoundedText(path, PlanStore.MaxPlanFileBytes);
+            _writeClipboard(ClipboardPlanText.WithTitle(plan.Name, contents));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException or NotSupportedException)
+        {
+            PostError("copy-plan", $"Plan could not be copied: {exception.Message}");
+        }
+        catch (Exception exception)
+        {
+            // The injected clipboard writer owns the real failure surface.
+            PostError("copy-plan", $"Plan could not be copied: {exception.Message}");
+        }
+    }
+
     private void OpenPlansFolder()
     {
         try
@@ -622,6 +827,13 @@ internal sealed class TriffSkillsController : IDisposable
                 character.NeedsReauth,
                 stale = character.FetchedUtc is not null && !string.IsNullOrWhiteSpace(character.Error),
             }).ToArray(),
+            pinnedCharacterIds = _state.PinnedCharacterIds.ToArray(),
+            characterGroups = _state.CharacterGroups.Select(group => new
+            {
+                group.Name,
+                CharacterIds = group.CharacterIds.ToArray(),
+            }).ToArray(),
+            selectedPlanName = _state.SelectedPlanName,
             plans = matrix.Plans,
             matrix = matrix.Cells.Select(cell => new
             {
@@ -680,6 +892,26 @@ internal sealed class TriffSkillsController : IDisposable
             diagnostics = result.Diagnostics.Take(100).ToArray(),
         });
     }
+
+    private void PostClipboardPreview(
+        string requestId,
+        long revision,
+        bool ok,
+        string name,
+        string nameError,
+        int requirementCount,
+        IReadOnlyList<PlanDiagnostic> diagnostics)
+        => _post(new
+        {
+            type = "triffskills:clipboard-preview",
+            requestId,
+            revision,
+            ok,
+            name,
+            nameError,
+            requirementCount,
+            diagnostics = diagnostics.Take(20).ToArray(),
+        });
 
     private void PostRequestError(string action, string requestId, string message)
         => _post(new { type = $"triffskills:{action}", requestId, ok = false, collision = false, message });

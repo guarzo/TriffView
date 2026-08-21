@@ -76,7 +76,7 @@ internal sealed class PlanImportWorkflow
         return new PlanPreviewResult(requestId, revision, parsed.Plan, []);
     }
 
-    public PlanImportCommitResult Commit(string requestId, long revision, bool replace)
+    public PlanImportCommitResult Commit(string requestId, long revision, bool replace, string? nameOverride = null)
     {
         Prune();
         if (!_pending.TryGetValue(requestId, out var preview) || preview.Revision != revision)
@@ -84,9 +84,21 @@ internal sealed class PlanImportWorkflow
             return new PlanImportCommitResult(false, false, true, string.Empty, "Validated preview expired or no longer matches the current input.");
         }
 
+        var name = preview.Name;
+        if (!string.IsNullOrWhiteSpace(nameOverride))
+        {
+            if (!PlanNameValidator.TryValidate(nameOverride, out var validated, out var nameError))
+            {
+                // The pending preview is deliberately left in place: the caller
+                // corrects the name and retries with the same requestId.
+                return new PlanImportCommitResult(false, false, false, nameOverride, nameError);
+            }
+            name = validated;
+        }
+
         var result = PlanStore.CommitValidated(
             _plansDirectory,
-            preview.Name,
+            name,
             preview.Contents,
             preview.Plan,
             replace);

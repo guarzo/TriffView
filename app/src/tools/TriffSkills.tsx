@@ -1,11 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { onNativeMessage, postNative } from "../nativeBridge.js";
+import { copyText, onNativeMessage, postNative } from "../nativeBridge.js";
+import { buildRoster } from "./skills/rosterOrdering";
+import PlanRail from "./skills/PlanRail";
+import CharacterRow from "./skills/CharacterRow";
+import GroupChip from "./skills/GroupChip";
+import ImportClipboardDialog from "./skills/ImportClipboardDialog";
 import "./TriffSkills.css";
 
-type Readiness = "Ready" | "Training" | "Locked" | "Missing" | "Unknown" | "Unscored";
-type RequirementState = "Active" | "TrainedInactive" | "Queued" | "Missing" | "Unknown";
+export type Readiness = "Ready" | "Training" | "Locked" | "Missing" | "Unknown" | "Unscored";
+export type RequirementState = "Active" | "TrainedInactive" | "Queued" | "Missing" | "Unknown";
 
-type Character = {
+export type Character = {
   characterId: number;
   characterName: string;
   fetchedUtc?: string | null;
@@ -16,7 +21,7 @@ type Character = {
 
 type Plan = { name: string; requirementCount: number };
 
-type MatrixCell = {
+export type MatrixCell = {
   characterId: number;
   planName: string;
   readiness: Readiness;
@@ -31,6 +36,26 @@ type MatrixCell = {
 
 type Diagnostic = { line?: number; message: string };
 type PlanIssue = { fileName: string; message: string; diagnostics?: Diagnostic[] };
+export type CharacterGroupDef = { name: string; characterIds: number[] };
+
+export type RequirementDetail = {
+  skillName: string;
+  requiredLevel: number;
+  activeLevel: number | null;
+  trainedLevel: number | null;
+  state: RequirementState;
+  queuedFinishUtc?: string | null;
+  queueTimingUnknown?: boolean;
+};
+
+export type CellDetail = {
+  characterId: number;
+  planName: string;
+  readiness: Readiness;
+  estimatedFinishUtc?: string | null;
+  queueTimingUnknown?: boolean;
+  requirements: RequirementDetail[];
+};
 
 type SkillsState = {
   authConfigured: boolean;
@@ -42,25 +67,9 @@ type SkillsState = {
   planIssues: PlanIssue[];
   warnings: string[];
   plansUpdatedUtc?: string;
-};
-
-type RequirementDetail = {
-  skillName: string;
-  requiredLevel: number;
-  activeLevel: number | null;
-  trainedLevel: number | null;
-  state: RequirementState;
-  queuedFinishUtc?: string | null;
-  queueTimingUnknown?: boolean;
-};
-
-type CellDetail = {
-  characterId: number;
-  planName: string;
-  readiness: Readiness;
-  estimatedFinishUtc?: string | null;
-  queueTimingUnknown?: boolean;
-  requirements: RequirementDetail[];
+  pinnedCharacterIds: number[];
+  characterGroups: CharacterGroupDef[];
+  selectedPlanName: string;
 };
 
 type Preview = {
@@ -75,11 +84,6 @@ type Preview = {
   message?: string;
 };
 
-type Selection =
-  | { kind: "cell"; characterId: number; planName: string }
-  | { kind: "character"; characterId: number }
-  | { kind: "plan"; planName: string };
-
 const EMPTY_STATE: SkillsState = {
   authConfigured: false,
   authInProgress: false,
@@ -89,11 +93,12 @@ const EMPTY_STATE: SkillsState = {
   matrix: [],
   planIssues: [],
   warnings: [],
+  pinnedCharacterIds: [],
+  characterGroups: [],
+  selectedPlanName: "",
 };
 
-const READINESS_ORDER: Readiness[] = ["Ready", "Training", "Locked", "Missing", "Unknown", "Unscored"];
-const REQUIREMENT_ORDER: RequirementState[] = ["Active", "TrainedInactive", "Queued", "Missing", "Unknown"];
-const STATUS: Record<Readiness, { label: string; description: string; sampleFill?: number }> = {
+export const STATUS: Record<Readiness, { label: string; description: string; sampleFill?: number }> = {
   Ready: { label: "Ready", description: "All requirements are active", sampleFill: 1 },
   Training: { label: "Training", description: "A requirement is in the queue", sampleFill: 0.5 },
   Locked: { label: "Locked", description: "Trained requirements are not active", sampleFill: 1 },
@@ -101,14 +106,15 @@ const STATUS: Record<Readiness, { label: string; description: string; sampleFill
   Unknown: { label: "Unknown", description: "A skill could not be resolved" },
   Unscored: { label: "Unscored", description: "No successful character fetch yet" },
 };
-const REQUIREMENT_LABEL: Record<RequirementState, string> = {
+export const REQUIREMENT_ORDER: RequirementState[] = ["TrainedInactive", "Queued", "Missing", "Unknown"];
+export const REQUIREMENT_LABEL: Record<RequirementState, string> = {
   Active: "Active",
   TrainedInactive: "Trained, inactive",
   Queued: "Queued",
   Missing: "Missing",
   Unknown: "Unknown",
 };
-const LEVELS = ["", "I", "II", "III", "IV", "V"];
+export const LEVELS = ["", "I", "II", "III", "IV", "V"];
 
 const requestId = () =>
   typeof crypto?.randomUUID === "function"
@@ -119,67 +125,41 @@ function send(type: string, payload: Record<string, unknown> = {}) {
   return postNative({ type, ...payload });
 }
 
-function key(characterId: number, planName: string) {
-  return `${characterId}\u0000${planName}`;
-}
-
-function formatDate(value?: string | null) {
+export function formatDate(value?: string | null) {
   if (!value) return "";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
-}
-
-function isDegraded(character?: Character) {
-  return Boolean(character?.stale || character?.error);
-}
-
-function trainedProgress(cell: MatrixCell | undefined, requirementCount: number) {
-  if (!cell || cell.readiness === "Unscored" || cell.readiness === "Unknown" || requirementCount <= 0) return undefined;
-  if (cell.readiness === "Ready") return 1;
-  return Math.max(0, Math.min(1, (cell.activeCount + cell.trainedInactiveCount) / requirementCount));
 }
 
 function quantizedProgress(progress?: number) {
   return progress === undefined ? undefined : Math.round(progress * 4) / 4;
 }
 
-function progressPercent(cell: MatrixCell | undefined, requirementCount: number) {
-  const progress = trainedProgress(cell, requirementCount);
-  return progress === undefined ? undefined : Math.round(progress * 100);
-}
-
-function statusClass(readiness: Readiness) {
+export function statusClass(readiness: Readiness) {
   return `is-${readiness.toLowerCase()}`;
 }
 
-function selectionEquals(left: Selection | null, right: Selection) {
-  if (!left || left.kind !== right.kind) return false;
-  if (left.kind === "cell" && right.kind === "cell") {
-    return left.characterId === right.characterId && left.planName === right.planName;
+function key(characterId: number, planName: string) {
+  return `${characterId}:${planName}`;
+}
+
+export function isDegraded(character: Character) {
+  return Boolean(character.stale || character.error);
+}
+
+export function statusLine(cell: MatrixCell | undefined, readiness: Readiness) {
+  if (readiness === "Training") {
+    if (cell?.queueTimingUnknown) return "Training — timing unknown";
+    const eta = formatDate(cell?.estimatedFinishUtc);
+    return eta ? `Training — ${eta}` : "Training";
   }
-  if (left.kind === "character" && right.kind === "character") return left.characterId === right.characterId;
-  return left.kind === "plan" && right.kind === "plan" && left.planName === right.planName;
+  if (readiness === "Missing") {
+    return `Missing ${cell?.missingCount ?? 0}`;
+  }
+  return STATUS[readiness].label;
 }
 
-function describeCell(cell: MatrixCell | undefined, plan: Plan, character: Character) {
-  const readiness = cell?.readiness ?? "Unscored";
-  const percent = progressPercent(cell, plan.requirementCount);
-  const pieces = [
-    `${plan.name}, ${character.characterName}: ${STATUS[readiness].label}`,
-    percent === undefined ? "Trained progress unavailable" : `Approximately ${percent}% trained`,
-    `${cell?.activeCount ?? 0} active`,
-    `${cell?.trainedInactiveCount ?? 0} trained but inactive`,
-    `${cell?.queuedCount ?? 0} queued`,
-    `${cell?.missingCount ?? 0} missing`,
-    `${cell?.unknownCount ?? 0} unknown`,
-  ];
-  if (cell?.estimatedFinishUtc) pieces.push(`ETA ${formatDate(cell.estimatedFinishUtc)}`);
-  if (cell?.queueTimingUnknown) pieces.push("Queue timing is unavailable or paused");
-  if (isDegraded(character)) pieces.push("Stale last-good character data");
-  return pieces.join("; ");
-}
-
-function ProgressMark({ readiness, fill }: { readiness: Readiness; fill?: number }) {
+export function ProgressMark({ readiness, fill }: { readiness: Readiness; fill?: number }) {
   const quantized = quantizedProgress(readiness === "Ready" ? 1 : fill);
   return (
     <span
@@ -312,230 +292,218 @@ function ImportPlanModal({
   );
 }
 
-function DetailPanel({
-  selection,
-  characters,
-  plans,
-  cells,
-  detail,
-  detailRequest,
-  confirmForgetId,
-  onSelect,
-  onClear,
-  onAskForget,
-  onCancelForget,
-  onConfirmForget,
-}: {
-  selection: Selection | null;
-  characters: Character[];
-  plans: Plan[];
-  cells: Map<string, MatrixCell>;
-  detail: CellDetail | null;
-  detailRequest: string;
-  confirmForgetId: number | null;
-  onSelect: (selection: Selection) => void;
-  onClear: () => void;
-  onAskForget: (characterId: number) => void;
-  onCancelForget: () => void;
-  onConfirmForget: (characterId: number) => void;
-}) {
-  if (!selection) {
-    return (
-      <aside className="triffskills-detail-pane is-empty" data-hud-scroll aria-label="Selected detail">
-        <div>
-          <h3>Selected detail</h3>
-          <p>Select a progress mark, character header, or plan name to inspect it here.</p>
-        </div>
-      </aside>
-    );
-  }
-
-  const header = (title: string, subtitle: string) => (
-    <header className="triffskills-detail-head">
-      <div><h3>{title}</h3><p>{subtitle}</p></div>
-      <button type="button" className="triffskills-detail-dismiss" onClick={onClear}>Clear</button>
-    </header>
-  );
-
-  if (selection.kind === "character") {
-    const character = characters.find((item) => item.characterId === selection.characterId);
-    if (!character) return <aside className="triffskills-detail-pane" data-hud-scroll>{header("Selection unavailable", "The character no longer exists.")}</aside>;
-
-    const grouped = READINESS_ORDER.map((readiness) => ({
-      readiness,
-      items: plans.filter((plan) => (cells.get(key(character.characterId, plan.name))?.readiness ?? "Unscored") === readiness),
-    }));
-
-    return (
-      <aside className="triffskills-detail-pane" data-hud-scroll aria-live="polite">
-        {header(character.characterName, "Character overview")}
-        <div className="triffskills-detail-meta">
-          <span>Last successful fetch</span>
-          <strong>{formatDate(character.fetchedUtc) || "Never fetched"}</strong>
-        </div>
-        {isDegraded(character) ? <div className="triffskills-detail-flag">Stale last-good data is shown for this character.</div> : null}
-        {character.error ? <div className="triffskills-detail-flag is-error">{character.error}</div> : null}
-        {character.needsReauth ? <div className="triffskills-detail-flag is-error">EVE sign-in must be refreshed before this character can update.</div> : null}
-
-        <div className="triffskills-detail-actions">
-          {character.needsReauth ? (
-            <button type="button" onClick={() => send("triffskills:auth")}>Re-authenticate</button>
-          ) : null}
-          {confirmForgetId === character.characterId ? (
-            <div className="triffskills-forget-confirm" role="alert">
-              <span>Delete this character’s stored TriffSkills token?</span>
-              <div>
-                <button type="button" onClick={onCancelForget}>Keep character</button>
-                <button type="button" className="danger-action" onClick={() => onConfirmForget(character.characterId)}>Forget character</button>
-              </div>
-            </div>
-          ) : (
-            <button type="button" className="danger-action" onClick={() => onAskForget(character.characterId)}>Forget character</button>
-          )}
-        </div>
-
-        <div className="triffskills-detail-groups">
-          {grouped.map(({ readiness, items }) => (
-            <section className={statusClass(readiness)} key={readiness}>
-              <h4><ProgressMark readiness={readiness} fill={STATUS[readiness].sampleFill} />{STATUS[readiness].label}<span>{items.length}</span></h4>
-              {items.length ? (
-                <ul>
-                  {items.map((plan) => (
-                    <li key={plan.name}>
-                      <button type="button" title={`Inspect ${plan.name} for ${character.characterName}`} onClick={() => onSelect({ kind: "cell", characterId: character.characterId, planName: plan.name })}>
-                        <span>{plan.name}</span><small>{plan.requirementCount} req.</small>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </section>
-          ))}
-        </div>
-      </aside>
-    );
-  }
-
-  if (selection.kind === "plan") {
-    const plan = plans.find((item) => item.name === selection.planName);
-    if (!plan) return <aside className="triffskills-detail-pane" data-hud-scroll>{header("Selection unavailable", "The plan no longer exists.")}</aside>;
-
-    const grouped = READINESS_ORDER.map((readiness) => ({
-      readiness,
-      items: characters.filter((character) => (cells.get(key(character.characterId, plan.name))?.readiness ?? "Unscored") === readiness),
-    }));
-
-    return (
-      <aside className="triffskills-detail-pane" data-hud-scroll aria-live="polite">
-        {header(plan.name, `${plan.requirementCount} requirement${plan.requirementCount === 1 ? "" : "s"}`)}
-        <div className="triffskills-detail-groups">
-          {grouped.map(({ readiness, items }) => (
-            <section className={statusClass(readiness)} key={readiness}>
-              <h4><ProgressMark readiness={readiness} fill={STATUS[readiness].sampleFill} />{STATUS[readiness].label}<span>{items.length}</span></h4>
-              {items.length ? (
-                <ul>
-                  {items.map((character) => (
-                    <li key={character.characterId}>
-                      <button type="button" title={`Inspect ${plan.name} for ${character.characterName}`} onClick={() => onSelect({ kind: "cell", characterId: character.characterId, planName: plan.name })}>
-                        <span>{character.characterName}</span><small>{isDegraded(character) ? "Stale" : "Current"}</small>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </section>
-          ))}
-        </div>
-      </aside>
-    );
-  }
-
-  const character = characters.find((item) => item.characterId === selection.characterId);
-  const plan = plans.find((item) => item.name === selection.planName);
-  const compact = character && plan ? cells.get(key(character.characterId, plan.name)) : undefined;
-  if (!character || !plan) return <aside className="triffskills-detail-pane" data-hud-scroll>{header("Selection unavailable", "The character or plan no longer exists.")}</aside>;
-
-  const readiness = detail?.readiness ?? compact?.readiness ?? "Unscored";
-  const fill = trainedProgress(compact, plan.requirementCount);
-  const percent = progressPercent(compact, plan.requirementCount);
-  const groups = REQUIREMENT_ORDER.map((state) => ({
-    state,
-    items: detail?.requirements.filter((requirement) => requirement.state === state) ?? [],
-  }));
-
-  return (
-    <aside className="triffskills-detail-pane" data-hud-scroll aria-live="polite">
-      {header(plan.name, character.characterName)}
-      <div className={`triffskills-selected-status ${statusClass(readiness)}`}>
-        <ProgressMark readiness={readiness} fill={fill} />
-        <div>
-          <strong>{STATUS[readiness].label}</strong>
-          <small>{percent === undefined ? "Trained progress unavailable" : `Approximately ${percent}% of requirements trained`}</small>
-        </div>
-      </div>
-      {isDegraded(character) ? <div className="triffskills-detail-flag">Stale last-good data is shown.</div> : null}
-      {compact ? (
-        <div className="triffskills-counts" aria-label="Compact requirement counts">
-          <span><b>{compact.activeCount}</b>Active</span>
-          <span><b>{compact.trainedInactiveCount}</b>Inactive</span>
-          <span><b>{compact.queuedCount}</b>Queued</span>
-          <span><b>{compact.missingCount}</b>Missing</span>
-          <span><b>{compact.unknownCount}</b>Unknown</span>
-        </div>
-      ) : null}
-      {detail?.estimatedFinishUtc ? <div className="triffskills-detail-meta"><span>Estimated queue finish</span><strong>{formatDate(detail.estimatedFinishUtc)}</strong></div> : null}
-      {detail?.queueTimingUnknown ? <div className="triffskills-detail-flag">Queue timing is unavailable or paused.</div> : null}
-
-      {!detail ? <p className="triffskills-detail-loading">{detailRequest ? "Loading requirement details…" : "No requirement detail is available."}</p> : null}
-      {detail ? (
-        <div className="triffskills-requirement-groups">
-          {groups.filter((group) => group.items.length).map(({ state, items }) => (
-            <section className={`is-${state.toLowerCase()}`} key={state}>
-              <h4>{REQUIREMENT_LABEL[state]}<span>{items.length}</span></h4>
-              <ul>
-                {items.map((requirement) => (
-                  <li key={requirement.skillName}>
-                    <div><strong>{requirement.skillName}</strong><small>Required {LEVELS[requirement.requiredLevel] || requirement.requiredLevel}</small></div>
-                    <div className="triffskills-levels">
-                      <span>Active {requirement.activeLevel ?? 0}</span>
-                      <span>Trained {requirement.trainedLevel ?? 0}</span>
-                    </div>
-                    {requirement.queuedFinishUtc ? <small>Queue finish {formatDate(requirement.queuedFinishUtc)}</small> : null}
-                    {requirement.queueTimingUnknown ? <small>Queue timing unavailable</small> : null}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ))}
-        </div>
-      ) : null}
-    </aside>
-  );
-}
-
 export default function TriffSkills() {
   const [state, setState] = useState<SkillsState>(EMPTY_STATE);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState("");
-  const [selection, setSelection] = useState<Selection | null>(null);
-  const [detailRequest, setDetailRequest] = useState("");
-  const [detail, setDetail] = useState<CellDetail | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [clipboardImportOpen, setClipboardImportOpen] = useState(false);
   const [importError, setImportError] = useState("");
   const [planName, setPlanName] = useState("");
   const [planText, setPlanText] = useState("");
   const [previewRequest, setPreviewRequest] = useState("");
   const [commitRequest, setCommitRequest] = useState("");
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [confirmForgetId, setConfirmForgetId] = useState<number | null>(null);
-  const [draggedCharacterId, setDraggedCharacterId] = useState<number | null>(null);
-  const [dragTargetCharacterId, setDragTargetCharacterId] = useState<number | null>(null);
-  const detailRequestRef = useRef("");
+  const [filter, setFilter] = useState("");
+  const [activeGroup, setActiveGroup] = useState<string | null>(null);
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const [details, setDetails] = useState<Map<number, CellDetail>>(new Map());
   const inputRevisionRef = useRef(0);
   const previewRequestRef = useRef<{ requestId: string; revision: number } | null>(null);
   const commitRequestRef = useRef("");
   const previewRef = useRef<Preview | null>(null);
-  const draggedCharacterRef = useRef<number | null>(null);
+  const pendingDetailRequestsRef = useRef<Map<string, { characterId: number; planName: string }>>(new Map());
+  const expandedIdsRef = useRef<Set<number>>(new Set());
+  // The native-message effect below is mount-only, so its closure cannot see a
+  // re-rendered selectedPlanName. Read the plan through this ref instead —
+  // comparing against the captured value discards every reply, because on the
+  // first render there are no plans yet and selectedPlanName is "".
+  const selectedPlanNameRef = useRef("");
+
+  const cells = useMemo(() => {
+    const map = new Map<string, MatrixCell>();
+    for (const cell of state.matrix) map.set(key(cell.characterId, cell.planName), cell);
+    return map;
+  }, [state.matrix]);
+
+  const selectedPlanName = useMemo(() => {
+    if (state.plans.some((plan) => plan.name === state.selectedPlanName)) return state.selectedPlanName;
+    return state.plans[0]?.name ?? "";
+  }, [state.plans, state.selectedPlanName]);
+
+  const selectedPlan = useMemo(
+    () => state.plans.find((plan) => plan.name === selectedPlanName),
+    [state.plans, selectedPlanName],
+  );
+
+  const readyCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const cell of state.matrix) {
+      if (cell.readiness === "Ready") counts[cell.planName] = (counts[cell.planName] ?? 0) + 1;
+    }
+    return counts;
+  }, [state.matrix]);
+
+  const pinnedSet = useMemo(() => new Set(state.pinnedCharacterIds), [state.pinnedCharacterIds]);
+
+  const cellFor = (characterId: number) => cells.get(key(characterId, selectedPlanName));
+
+  const roster = useMemo(
+    () =>
+      buildRoster({
+        characters: state.characters,
+        readinessOf: (characterId) => cellFor(characterId)?.readiness ?? "Unscored",
+        missingOf: (characterId) => cellFor(characterId)?.missingCount ?? Number.MAX_SAFE_INTEGER,
+        pinnedIds: state.pinnedCharacterIds,
+        filter,
+        activeGroup,
+        groups: state.characterGroups,
+      }),
+    [state.characters, state.pinnedCharacterIds, state.characterGroups, cells, selectedPlanName, filter, activeGroup],
+  );
+
+  const charactersById = useMemo(() => {
+    const map = new Map<number, Character>();
+    for (const character of state.characters) map.set(character.characterId, character);
+    return map;
+  }, [state.characters]);
+
+  const filtersActive = Boolean(filter.trim() || activeGroup);
+  const rosterIsEmpty = roster.every((group) => !group.characterIds.length);
+
+  function clearRosterFilters() {
+    setFilter("");
+    setActiveGroup(null);
+  }
+
+  function togglePinned(characterId: number) {
+    send("triffskills:set-pinned", { characterId, pinned: !pinnedSet.has(characterId) });
+  }
+
+  function toggleGroupMembership(characterId: number, groupName: string) {
+    const group = state.characterGroups.find((item) => item.name === groupName);
+    if (!group) return;
+    const isMember = group.characterIds.includes(characterId);
+    const characterIds = isMember
+      ? group.characterIds.filter((id) => id !== characterId)
+      : [...group.characterIds, characterId];
+    send("triffskills:save-group", { name: group.name, originalName: group.name, characterIds });
+  }
+
+  function createGroup() {
+    const trimmed = newGroupName.trim();
+    if (!trimmed) return;
+    send("triffskills:save-group", { name: trimmed, characterIds: [] });
+    setCreatingGroup(false);
+    setNewGroupName("");
+  }
+
+  function renameGroup(originalName: string, nextName: string) {
+    const group = state.characterGroups.find((item) => item.name === originalName);
+    send("triffskills:save-group", { name: nextName, originalName, characterIds: group?.characterIds ?? [] });
+  }
+
+  function deleteGroup(name: string) {
+    send("triffskills:delete-group", { name });
+  }
+
+  function forgetCharacter(characterId: number) {
+    send("triffskills:forget-character", { characterId });
+    setExpandedIds((current) => {
+      if (!current.has(characterId)) return current;
+      const next = new Set(current);
+      next.delete(characterId);
+      return next;
+    });
+  }
+
+  function requestCellDetail(characterId: number, planNameForRequest: string) {
+    const id = requestId();
+    pendingDetailRequestsRef.current.set(id, { characterId, planName: planNameForRequest });
+    send("triffskills:get-cell-detail", { requestId: id, characterId, planName: planNameForRequest });
+  }
+
+  function toggleExpand(characterId: number) {
+    const opening = !expandedIds.has(characterId);
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      if (opening) next.add(characterId);
+      else next.delete(characterId);
+      return next;
+    });
+    // One request per expansion: skip the fetch if detail for the current
+    // plan is already cached, so re-expanding a row doesn't re-ask native.
+    if (opening) {
+      const existing = details.get(characterId);
+      if (!existing || existing.planName !== selectedPlanName) requestCellDetail(characterId, selectedPlanName);
+    }
+  }
+
+  async function copyMissingSkills(characterId: number) {
+    const detail = details.get(characterId);
+    if (!detail) return;
+    const outstanding = detail.requirements.filter((requirement) => requirement.state !== "Active");
+    if (!outstanding.length) return;
+    const lines = outstanding.map((requirement) => `${requirement.skillName} ${LEVELS[requirement.requiredLevel] || requirement.requiredLevel}`);
+    if (!(await copyText(lines.join("\n")))) setError("The missing skills could not be copied to the clipboard.");
+  }
+
+  // Shared by both tabs so the Readiness roster and Train next list render
+  // identical rows from a single implementation.
+  function renderCharacterRow(characterId: number) {
+    const character = charactersById.get(characterId);
+    if (!character) return null;
+    return (
+      <React.Fragment key={characterId}>
+        <CharacterRow
+          character={character}
+          cell={cellFor(characterId)}
+          planName={selectedPlanName}
+          pinned={pinnedSet.has(characterId)}
+          groups={state.characterGroups}
+          expanded={expandedIds.has(characterId)}
+          detail={details.get(characterId)}
+          onToggleExpand={() => toggleExpand(characterId)}
+          onTogglePin={() => togglePinned(characterId)}
+          onToggleGroup={(groupName) => toggleGroupMembership(characterId, groupName)}
+          onForget={() => forgetCharacter(characterId)}
+          onCopyMissing={() => copyMissingSkills(characterId)}
+        />
+      </React.Fragment>
+    );
+  }
+
+  useEffect(() => {
+    expandedIdsRef.current = expandedIds;
+  }, [expandedIds]);
+
+  useEffect(() => {
+    selectedPlanNameRef.current = selectedPlanName;
+  }, [selectedPlanName]);
+
+  // A renamed or deleted group vanishes from state.characterGroups; if it was
+  // the active filter, keep browsing instead of leaving the roster silently
+  // stuck on a group name that no longer matches anything.
+  useEffect(() => {
+    if (activeGroup && !state.characterGroups.some((group) => group.name === activeGroup)) {
+      setActiveGroup(null);
+    }
+  }, [state.characterGroups, activeGroup]);
+
+  // The cached detail is scoped to whichever plan it was fetched for; switching
+  // plans invalidates it and re-fetches only the rows a user already has open,
+  // never the whole roster.
+  useEffect(() => {
+    setDetails(new Map());
+    // Replies still in flight for the previous plan must not land on top of the
+    // new ones; a stale reply arriving after this clear would otherwise overwrite
+    // a fresh detail with one keyed to a plan the row no longer shows.
+    pendingDetailRequestsRef.current.clear();
+    for (const characterId of expandedIdsRef.current) requestCellDetail(characterId, selectedPlanName);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPlanName]);
 
   useEffect(() => {
     const unsubscribe = onNativeMessage((message: any) => {
@@ -551,11 +519,23 @@ export default function TriffSkills() {
         setError(`${message.action || "Skill Planner"}: ${message.message || "Unknown error"}`);
         return;
       }
-      if (message?.type === "triffskills:cell-detail" && message.requestId === detailRequestRef.current) {
-        detailRequestRef.current = "";
-        setDetailRequest("");
-        if (message.ok) setDetail(message as CellDetail);
-        else setError(message.message || "Could not load cell detail.");
+      if (message?.type === "triffskills:cell-detail") {
+        const pending = pendingDetailRequestsRef.current.get(message.requestId);
+        if (pending === undefined) return;
+        pendingDetailRequestsRef.current.delete(message.requestId);
+        // A reply for a plan the user has since navigated away from must not
+        // land on top of the (possibly already-loaded) detail for the current
+        // plan; the request that superseded it already cleared this map.
+        if (pending.planName !== selectedPlanNameRef.current) return;
+        if (message.ok) {
+          setDetails((current) => {
+            const next = new Map(current);
+            next.set(pending.characterId, message as CellDetail);
+            return next;
+          });
+        } else {
+          setError(message.message || "Could not load requirement detail.");
+        }
         return;
       }
       const pendingPreview = previewRequestRef.current;
@@ -602,63 +582,8 @@ export default function TriffSkills() {
   }, []);
 
   useEffect(() => {
-    if (!selection || selection.kind !== "cell") {
-      setDetail(null);
-      detailRequestRef.current = "";
-      setDetailRequest("");
-      return;
-    }
-    const id = requestId();
-    setDetail(null);
-    detailRequestRef.current = id;
-    setDetailRequest(id);
-    send("triffskills:get-cell-detail", { requestId: id, characterId: selection.characterId, planName: selection.planName });
-  }, [selection]);
-
-  useEffect(() => {
     if (!state.refreshInFlight) setProgress("");
   }, [state.refreshInFlight]);
-
-  const cells = useMemo(() => {
-    const result = new Map<string, MatrixCell>();
-    for (const cell of state.matrix) result.set(key(cell.characterId, cell.planName), cell);
-    return result;
-  }, [state.matrix]);
-
-  const totals = useMemo(() => {
-    const characterReady = new Map<number, number>();
-    const planReady = new Map<string, number>();
-    let readyTotal = 0;
-    for (const character of state.characters) {
-      let ready = 0;
-      for (const plan of state.plans) {
-        if (cells.get(key(character.characterId, plan.name))?.readiness === "Ready") {
-          ready += 1;
-          readyTotal += 1;
-          planReady.set(plan.name, (planReady.get(plan.name) ?? 0) + 1);
-        }
-      }
-      characterReady.set(character.characterId, ready);
-    }
-    return { characterReady, planReady, readyTotal };
-  }, [cells, state.characters, state.plans]);
-
-  function choose(next: Selection) {
-    setConfirmForgetId(null);
-    setSelection((current) => selectionEquals(current, next) ? null : next);
-  }
-
-  function reorderCharacters(sourceId: number, targetId: number) {
-    if (sourceId === targetId) return;
-    const sourceIndex = state.characters.findIndex((character) => character.characterId === sourceId);
-    const targetIndex = state.characters.findIndex((character) => character.characterId === targetId);
-    if (sourceIndex < 0 || targetIndex < 0) return;
-    const characters = [...state.characters];
-    const [moved] = characters.splice(sourceIndex, 1);
-    characters.splice(targetIndex, 0, moved);
-    setState((current) => ({ ...current, characters }));
-    send("triffskills:reorder-characters", { characterIds: characters.map((character) => character.characterId) });
-  }
 
   function invalidatePlanPreview() {
     if (commitRequestRef.current) return;
@@ -706,12 +631,6 @@ export default function TriffSkills() {
     invalidatePlanPreview();
   }
 
-  function forgetCharacter(characterId: number) {
-    send("triffskills:forget-character", { characterId });
-    setConfirmForgetId(null);
-    setSelection(null);
-  }
-
   const hasNotices = Boolean(error || progress || state.warnings.length || state.planIssues.length);
   const plansStamp = state.plansUpdatedUtc ? `Plans updated ${formatDate(state.plansUpdatedUtc)}` : "No plans loaded";
 
@@ -733,9 +652,6 @@ export default function TriffSkills() {
             <button type="button" disabled={state.refreshInFlight || !state.characters.length} onClick={() => send("triffskills:refresh-characters")}>
               {state.refreshInFlight ? "Refreshing…" : "Refresh characters"}
             </button>
-            <button type="button" onClick={() => send("triffskills:open-plans-folder")}>Open plans folder</button>
-            <button type="button" onClick={() => send("triffskills:refresh-plans")}>Reload plans</button>
-            <button type="button" onClick={() => { setImportError(""); setImportOpen(true); }}>Import local plan</button>
           </nav>
 
           {state.authInProgress ? <p className="triffskills-rail-status" aria-live="polite">Waiting for EVE SSO…</p> : null}
@@ -746,23 +662,55 @@ export default function TriffSkills() {
             </div>
           ) : null}
 
-          <section className="triffskills-legend" aria-label="Readiness legend">
-            <h3>Readiness</h3>
-            {READINESS_ORDER.map((readiness) => (
-              <span className={statusClass(readiness)} key={readiness} title={STATUS[readiness].description}>
-                <ProgressMark readiness={readiness} fill={STATUS[readiness].sampleFill} />
-                {STATUS[readiness].label}
-              </span>
-            ))}
-            <p>Color shows why a plan is blocked. Fill shows the share of requirements already trained.</p>
+          <section className="triffskills-plan-section">
+            <h3>Plans</h3>
+            <PlanRail
+              plans={state.plans}
+              readyCounts={readyCounts}
+              characterCount={state.characters.length}
+              selectedPlanName={selectedPlanName}
+              onSelect={(name) => send("triffskills:select-plan", { planName: name })}
+            />
           </section>
+
+          <nav className="triffskills-rail-actions triffskills-rail-actions-bottom" aria-label="Plan file actions">
+            <button
+              type="button"
+              disabled={!selectedPlanName}
+              title="Copy the selected plan's skill list to the clipboard"
+              onClick={() => send("triffskills:copy-plan", { planName: selectedPlanName })}
+            >
+              Copy plan
+            </button>
+            <button
+              type="button"
+              title="Read a plan directly from the clipboard"
+              onClick={() => setClipboardImportOpen(true)}
+            >
+              Import from clipboard
+            </button>
+            <button
+              type="button"
+              title="Paste plan text by hand"
+              onClick={() => { setImportError(""); setImportOpen(true); }}
+            >
+              Paste plan text…
+            </button>
+            <button type="button" onClick={() => send("triffskills:open-plans-folder")}>Open plans folder</button>
+            <button type="button" onClick={() => send("triffskills:refresh-plans")}>Reload plans</button>
+          </nav>
+
         </aside>
 
         <main className="triffview-section-content">
           <header className="triffview-section-header triffskills-header">
             <div>
-              <h2>Skill plan readiness</h2>
-              <p>Rows are plans, columns are characters. Select a cell, plan, or character for detail.</p>
+              <h2>{selectedPlan ? selectedPlan.name : "Skill plan readiness"}</h2>
+              <p>
+                {selectedPlan
+                  ? `${selectedPlan.requirementCount} requirement${selectedPlan.requirementCount === 1 ? "" : "s"}`
+                  : "Pick a plan from the left rail, then browse characters grouped by readiness."}
+              </p>
             </div>
             <span className="triffskills-plans-stamp">{plansStamp}</span>
           </header>
@@ -789,153 +737,93 @@ export default function TriffSkills() {
           </div>
 
           <div className="triffskills-workspace">
-            <section className="triffskills-matrix-pane" aria-label="Skill plan readiness matrix">
-              {!state.characters.length || !state.plans.length ? (
+            <div className="triffskills-filters">
+              <input
+                type="search"
+                className="triffskills-filter"
+                placeholder="Filter characters…"
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+                aria-label="Filter characters by name"
+              />
+              <button
+                type="button"
+                className={`triffskills-chip${activeGroup === null ? " is-on" : ""}`}
+                onClick={() => setActiveGroup(null)}
+              >
+                All {state.characters.length}
+              </button>
+              {state.characterGroups.map((group) => (
+                <React.Fragment key={group.name}>
+                  <GroupChip
+                    name={group.name}
+                    active={activeGroup === group.name}
+                    onToggle={() => setActiveGroup(activeGroup === group.name ? null : group.name)}
+                    onRename={(nextName) => renameGroup(group.name, nextName)}
+                    onDelete={() => deleteGroup(group.name)}
+                  />
+                </React.Fragment>
+              ))}
+              {creatingGroup ? (
+                <form
+                  className="triffskills-new-group"
+                  onSubmit={(event) => { event.preventDefault(); createGroup(); }}
+                >
+                  <input
+                    autoFocus
+                    maxLength={32}
+                    placeholder="Group name"
+                    value={newGroupName}
+                    aria-label="New group name"
+                    onChange={(event) => setNewGroupName(event.target.value)}
+                  />
+                  <button type="submit" className="primary-action" disabled={!newGroupName.trim()}>Create</button>
+                  <button type="button" onClick={() => { setCreatingGroup(false); setNewGroupName(""); }}>Cancel</button>
+                </form>
+              ) : (
+                <button
+                  type="button"
+                  className="triffskills-chip triffskills-chip-new"
+                  onClick={() => setCreatingGroup(true)}
+                >
+                  + Group
+                </button>
+              )}
+            </div>
+
+            <div className="triffskills-roster" data-hud-scroll>
+              {!state.characters.length ? (
                 <div className="triffskills-empty">
-                  {!state.characters.length ? <p><strong>No characters yet.</strong> Add a character through EVE SSO to begin.</p> : null}
-                  {!state.plans.length ? <p><strong>No local plans yet.</strong> Import one or add a text file to the plans folder, then reload.</p> : null}
+                  <p><strong>No characters yet.</strong> Add one from the actions on the left.</p>
+                </div>
+              ) : rosterIsEmpty ? (
+                <div className="triffskills-empty">
+                  <p><strong>No characters match the current filter.</strong></p>
+                  {filtersActive ? (
+                    <p>
+                      <button type="button" onClick={clearRosterFilters}>Clear filter</button>
+                    </p>
+                  ) : null}
                 </div>
               ) : (
-                <div className="triffskills-matrix-scroll" data-hud-scroll tabIndex={0} aria-label="Character by skill plan matrix">
-                  <table className="triffskills-matrix">
-                    <colgroup>
-                      <col className="triffskills-plan-col" />
-                      <col className="triffskills-total-col" />
-                      {state.characters.map((character) => <col className="triffskills-character-col" key={character.characterId} />)}
-                    </colgroup>
-                    <thead>
-                      <tr className="triffskills-character-head-row">
-                        <th className="triffskills-plan-heading" scope="col"><span>Plan</span><small>Requirements</small></th>
-                        <th className="triffskills-plan-total-heading" scope="col"><span>Ready</span></th>
-                        {state.characters.map((character) => {
-                          const degraded = isDegraded(character);
-                          const selected = selection?.kind === "character" && selection.characterId === character.characterId;
-                          return (
-                            <th
-                              scope="col"
-                              draggable
-                              className={[
-                                "triffskills-character-heading",
-                                degraded ? "is-degraded" : "",
-                                draggedCharacterId === character.characterId ? "is-dragging" : "",
-                                dragTargetCharacterId === character.characterId ? "is-drag-target" : "",
-                              ].filter(Boolean).join(" ")}
-                              key={character.characterId}
-                              onDragStart={(event) => {
-                                event.dataTransfer.effectAllowed = "move";
-                                event.dataTransfer.setData("text/plain", String(character.characterId));
-                                draggedCharacterRef.current = character.characterId;
-                                setDraggedCharacterId(character.characterId);
-                              }}
-                              onDragOver={(event) => {
-                                if (draggedCharacterRef.current === null || draggedCharacterRef.current === character.characterId) return;
-                                event.preventDefault();
-                                event.dataTransfer.dropEffect = "move";
-                                setDragTargetCharacterId(character.characterId);
-                              }}
-                              onDrop={(event) => {
-                                event.preventDefault();
-                                const sourceId = draggedCharacterRef.current ?? Number(event.dataTransfer.getData("text/plain"));
-                                if (Number.isSafeInteger(sourceId) && sourceId > 0) reorderCharacters(sourceId, character.characterId);
-                                draggedCharacterRef.current = null;
-                                setDraggedCharacterId(null);
-                                setDragTargetCharacterId(null);
-                              }}
-                              onDragEnd={() => {
-                                draggedCharacterRef.current = null;
-                                setDraggedCharacterId(null);
-                                setDragTargetCharacterId(null);
-                              }}
-                            >
-                              <button
-                                type="button"
-                                className={selected ? "is-selected" : ""}
-                                title={`${character.characterName}. Click for character details; drag to reorder.${degraded ? " Stale or degraded." : ""}`}
-                                aria-label={`Character ${character.characterName}. ${totals.characterReady.get(character.characterId) ?? 0} of ${state.plans.length} plans ready.${degraded ? " Stale or degraded data." : ""}`}
-                                aria-pressed={selected}
-                                onClick={() => choose({ kind: "character", characterId: character.characterId })}
-                              ><span>{character.characterName}</span></button>
-                            </th>
-                          );
-                        })}
-                      </tr>
-                      <tr className="triffskills-totals-row">
-                        <th scope="row">Plans ready</th>
-                        <td title={`${totals.readyTotal} of ${state.plans.length * state.characters.length} character-plan pairs ready`}>
-                          <strong>{totals.readyTotal}</strong><small>/{state.plans.length * state.characters.length}</small>
-                        </td>
-                        {state.characters.map((character) => (
-                          <td
-                            className={isDegraded(character) ? "is-degraded" : ""}
-                            key={character.characterId}
-                            title={`${character.characterName}: ${totals.characterReady.get(character.characterId) ?? 0} of ${state.plans.length} plans ready`}
-                          >
-                            <strong>{totals.characterReady.get(character.characterId) ?? 0}</strong><small>/{state.plans.length}</small>
-                          </td>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {state.plans.map((plan) => {
-                        const planSelected = selection?.kind === "plan" && selection.planName === plan.name;
-                        return (
-                          <tr key={plan.name}>
-                            <th scope="row">
-                              <button
-                                type="button"
-                                className={planSelected ? "is-selected" : ""}
-                                title={`${plan.name}: ${plan.requirementCount} requirements`}
-                                aria-label={`Plan ${plan.name}, ${plan.requirementCount} requirements, ${totals.planReady.get(plan.name) ?? 0} of ${state.characters.length} characters ready`}
-                                aria-pressed={planSelected}
-                                onClick={() => choose({ kind: "plan", planName: plan.name })}
-                              ><strong>{plan.name}</strong><small>{plan.requirementCount}</small></button>
-                            </th>
-                            <td className="triffskills-plan-total" title={`${totals.planReady.get(plan.name) ?? 0} of ${state.characters.length} characters ready`}>
-                              <strong>{totals.planReady.get(plan.name) ?? 0}</strong><small>/{state.characters.length}</small>
-                            </td>
-                            {state.characters.map((character) => {
-                              const cell = cells.get(key(character.characterId, plan.name));
-                              const readiness = cell?.readiness ?? "Unscored";
-                              const active = selection?.kind === "cell" && selection.characterId === character.characterId && selection.planName === plan.name;
-                              const description = describeCell(cell, plan, character);
-                              return (
-                                <td className={isDegraded(character) ? "is-degraded" : ""} key={character.characterId}>
-                                  <button
-                                    type="button"
-                                    className={`triffskills-cell-button ${statusClass(readiness)}${active ? " is-selected" : ""}`}
-                                    title={description}
-                                    aria-label={description}
-                                    aria-pressed={active}
-                                    onClick={() => choose({ kind: "cell", characterId: character.characterId, planName: plan.name })}
-                                  >
-                                    <ProgressMark readiness={readiness} fill={trainedProgress(cell, plan.requirementCount)} />
-                                  </button>
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                roster.map((group) => (
+                  <section key={group.key} className="triffskills-roster-group">
+                    <h4 className={group.key === "Pinned" ? "is-pinned" : group.key === "Ungrouped" ? "is-unknown" : statusClass(group.key as Readiness)}>
+                      {group.key === "Pinned" ? (
+                        <span aria-hidden="true">★</span>
+                      ) : group.key === "Ungrouped" ? (
+                        <span aria-hidden="true">?</span>
+                      ) : (
+                        <ProgressMark readiness={group.key as Readiness} fill={STATUS[group.key as Readiness].sampleFill} />
+                      )}
+                      {group.label}
+                      <span>{group.characterIds.length}</span>
+                    </h4>
+                    {group.characterIds.map(renderCharacterRow)}
+                  </section>
+                ))
               )}
-            </section>
-
-            <DetailPanel
-              selection={selection}
-              characters={state.characters}
-              plans={state.plans}
-              cells={cells}
-              detail={detail}
-              detailRequest={detailRequest}
-              confirmForgetId={confirmForgetId}
-              onSelect={choose}
-              onClear={() => { setSelection(null); setConfirmForgetId(null); }}
-              onAskForget={setConfirmForgetId}
-              onCancelForget={() => setConfirmForgetId(null)}
-              onConfirmForget={forgetCharacter}
-            />
+            </div>
           </div>
         </main>
       </section>
@@ -953,6 +841,13 @@ export default function TriffSkills() {
           onPreview={previewPlan}
           onCommit={commitPlan}
           onClose={closeImportModal}
+        />
+      ) : null}
+
+      {clipboardImportOpen ? (
+        <ImportClipboardDialog
+          onImported={() => setClipboardImportOpen(false)}
+          onClose={() => setClipboardImportOpen(false)}
         />
       ) : null}
     </div>

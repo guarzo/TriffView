@@ -60,14 +60,37 @@ internal sealed class TriffSkillsCharacter
     };
 }
 
+internal sealed class CharacterGroup
+{
+    public string Name { get; set; } = string.Empty;
+    public List<long> CharacterIds { get; set; } = [];
+
+    public CharacterGroup Clone() => new()
+    {
+        Name = Name,
+        CharacterIds = [.. CharacterIds],
+    };
+}
+
 internal sealed record StateLoadResult(TriffSkillsState State, string Warning);
 
 internal sealed class TriffSkillsState
 {
     private const long MaxStateFileBytes = 16 * 1024 * 1024;
     public const int MaxCharacters = 50;
+    public const int MaxGroups = 20;
+    public const int MaxGroupNameLength = 32;
+    private const int MaxSelectedPlanNameLength = 120;
+
     public List<TriffSkillsCharacter> Characters { get; set; } = [];
     public long SelectedCharacterId { get; set; }
+    public List<long> PinnedCharacterIds { get; set; } = [];
+    public List<CharacterGroup> CharacterGroups { get; set; } = [];
+    public string SelectedPlanName { get; set; } = string.Empty;
+
+    public List<long> SnapshotPins() => [.. PinnedCharacterIds];
+
+    public List<CharacterGroup> SnapshotGroups() => CharacterGroups.Select(group => group.Clone()).ToList();
 
     public static StateLoadResult Load()
     {
@@ -142,6 +165,39 @@ internal sealed class TriffSkillsState
         }
 
         Characters = deduped.Values.Take(MaxCharacters).ToList();
+
+        var known = Characters.Select(character => character.CharacterId).ToHashSet();
+
+        PinnedCharacterIds = (PinnedCharacterIds ?? [])
+            .Where(known.Contains)
+            .Distinct()
+            .Take(MaxCharacters)
+            .ToList();
+
+        var seenGroupNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var normalizedGroups = new List<CharacterGroup>();
+        foreach (var group in (CharacterGroups ?? []).Take(MaxGroups * 2))
+        {
+            if (group is null) continue;
+            var name = (group.Name ?? string.Empty).Trim();
+            if (name.Length == 0) continue;
+            if (name.Length > MaxGroupNameLength) name = name[..MaxGroupNameLength];
+            if (!seenGroupNames.Add(name)) continue;
+
+            // An empty group is valid: a group is created before anyone is put in
+            // it, and TrySave normalizes before it writes.
+            normalizedGroups.Add(new CharacterGroup
+            {
+                Name = name,
+                CharacterIds = (group.CharacterIds ?? []).Where(known.Contains).Distinct().Take(MaxCharacters).ToList(),
+            });
+            if (normalizedGroups.Count >= MaxGroups) break;
+        }
+        CharacterGroups = normalizedGroups;
+
+        SelectedPlanName = (SelectedPlanName ?? string.Empty).Trim();
+        if (SelectedPlanName.Length > MaxSelectedPlanNameLength) SelectedPlanName = string.Empty;
+
         if (!deduped.ContainsKey(SelectedCharacterId)) SelectedCharacterId = Characters.FirstOrDefault()?.CharacterId ?? 0;
         return this;
     }
@@ -157,15 +213,6 @@ internal sealed class TriffSkillsState
         var added = new TriffSkillsCharacter { CharacterId = characterId };
         Characters.Add(added);
         return added;
-    }
-
-    public bool TryReorderCharacters(IReadOnlyList<long> characterIds)
-    {
-        if (characterIds.Count != Characters.Count || characterIds.Distinct().Count() != Characters.Count) return false;
-        var byId = Characters.ToDictionary(character => character.CharacterId);
-        if (characterIds.Any(characterId => !byId.ContainsKey(characterId))) return false;
-        Characters = characterIds.Select(characterId => byId[characterId]).ToList();
-        return true;
     }
 
     public void ApplyFetchSuccess(

@@ -79,26 +79,103 @@ public class TriffSkillsStateTests : IDisposable
     }
 
     [Fact]
-    public void CharacterOrderValidatesAndPersists()
-    {
-        var state = new TriffSkillsState();
-        state.Upsert(1).CharacterName = "First";
-        state.Upsert(2).CharacterName = "Second";
-        state.Upsert(3).CharacterName = "Third";
-
-        Assert.False(state.TryReorderCharacters([3, 3, 1]));
-        Assert.Equal([1L, 2L, 3L], state.Characters.Select(character => character.CharacterId).ToArray());
-        Assert.True(state.TryReorderCharacters([3, 1, 2]));
-        Assert.True(state.TrySave(out var error), error);
-        Assert.Equal([3L, 1L, 2L], TriffSkillsState.Load().State.Characters.Select(character => character.CharacterId).ToArray());
-    }
-
-    [Fact]
     public void PathsUseStandaloneTriffViewNamespace()
     {
         TriffSkillsPaths.ClearOverride();
         Assert.Contains(Path.Combine("TriffView", "TriffSkills"), TriffSkillsPaths.Root, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("TriffHud", TriffSkillsPaths.Root, StringComparison.OrdinalIgnoreCase);
         TriffSkillsPaths.OverrideRoot(_dir);
+    }
+
+    [Fact]
+    public void EmptyGroupSurvivesSaveAndReload()
+    {
+        var state = new TriffSkillsState();
+        state.Upsert(9001).CharacterName = "Pilot";
+        state.CharacterGroups.Add(new CharacterGroup { Name = "Haulers" });
+
+        Assert.True(state.TrySave(out var error), error);
+
+        var loaded = TriffSkillsState.Load();
+        var group = Assert.Single(loaded.State.CharacterGroups);
+        Assert.Equal("Haulers", group.Name);
+        Assert.Empty(group.CharacterIds);
+    }
+
+    [Fact]
+    public void NormalizeDropsPinsAndMembershipsForUnknownCharacters()
+    {
+        var state = new TriffSkillsState();
+        state.Upsert(9001).CharacterName = "Pilot";
+        state.PinnedCharacterIds.Add(9001);
+        state.PinnedCharacterIds.Add(9002);
+        state.CharacterGroups.Add(new CharacterGroup { Name = "Mains", CharacterIds = [9001, 9002] });
+
+        state.Normalize();
+
+        Assert.Equal([9001L], state.PinnedCharacterIds);
+        Assert.Equal([9001L], Assert.Single(state.CharacterGroups).CharacterIds);
+    }
+
+    [Fact]
+    public void NormalizeDeduplicatesGroupNamesCaseInsensitivelyKeepingTheFirst()
+    {
+        var state = new TriffSkillsState();
+        state.Upsert(9001).CharacterName = "Pilot";
+        state.CharacterGroups.Add(new CharacterGroup { Name = "Haulers", CharacterIds = [9001] });
+        state.CharacterGroups.Add(new CharacterGroup { Name = "HAULERS" });
+
+        state.Normalize();
+
+        var group = Assert.Single(state.CharacterGroups);
+        Assert.Equal("Haulers", group.Name);
+        Assert.Equal([9001L], group.CharacterIds);
+    }
+
+    [Fact]
+    public void SnapshotsAreIndependentOfLaterMutation()
+    {
+        var state = new TriffSkillsState();
+        state.Upsert(9001).CharacterName = "Pilot";
+        state.PinnedCharacterIds.Add(9001);
+        state.CharacterGroups.Add(new CharacterGroup { Name = "Mains", CharacterIds = [9001] });
+
+        var pins = state.SnapshotPins();
+        var groups = state.SnapshotGroups();
+
+        state.PinnedCharacterIds.Clear();
+        state.CharacterGroups[0].Name = "Renamed";
+        state.CharacterGroups[0].CharacterIds.Clear();
+
+        Assert.Equal([9001L], pins);
+        Assert.Equal("Mains", groups[0].Name);
+        Assert.Equal([9001L], groups[0].CharacterIds);
+    }
+
+    [Fact]
+    public void NormalizeDoesNotStripPinsWhenTheCharacterIsRestored()
+    {
+        // Models the forget rollback: Normalize() has already dropped the pin for
+        // the removed character, and the rollback must put both back together.
+        var state = new TriffSkillsState();
+        state.Upsert(9001).CharacterName = "Pilot";
+        state.PinnedCharacterIds.Add(9001);
+        state.CharacterGroups.Add(new CharacterGroup { Name = "Mains", CharacterIds = [9001] });
+
+        var previousCharacter = state.Characters[0].Clone();
+        var previousPins = state.SnapshotPins();
+        var previousGroups = state.SnapshotGroups();
+
+        state.Characters.RemoveAt(0);
+        state.Normalize();
+        Assert.Empty(state.PinnedCharacterIds);
+
+        state.Characters.Insert(0, previousCharacter);
+        state.PinnedCharacterIds = previousPins;
+        state.CharacterGroups = previousGroups;
+        state.Normalize();
+
+        Assert.Equal([9001L], state.PinnedCharacterIds);
+        Assert.Equal([9001L], Assert.Single(state.CharacterGroups).CharacterIds);
     }
 }
