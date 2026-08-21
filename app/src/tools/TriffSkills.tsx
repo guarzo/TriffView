@@ -318,6 +318,11 @@ export default function TriffSkills() {
   const previewRef = useRef<Preview | null>(null);
   const pendingDetailRequestsRef = useRef<Map<string, { characterId: number; planName: string }>>(new Map());
   const expandedIdsRef = useRef<Set<number>>(new Set());
+  // The native-message effect below is mount-only, so its closure cannot see a
+  // re-rendered selectedPlanName. Read the plan through this ref instead —
+  // comparing against the captured value discards every reply, because on the
+  // first render there are no plans yet and selectedPlanName is "".
+  const selectedPlanNameRef = useRef("");
 
   const cells = useMemo(() => {
     const map = new Map<string, MatrixCell>();
@@ -502,6 +507,10 @@ export default function TriffSkills() {
     expandedIdsRef.current = expandedIds;
   }, [expandedIds]);
 
+  useEffect(() => {
+    selectedPlanNameRef.current = selectedPlanName;
+  }, [selectedPlanName]);
+
   // A renamed or deleted group vanishes from state.characterGroups; if it was
   // the active filter, keep browsing instead of leaving the roster silently
   // stuck on a group name that no longer matches anything.
@@ -545,7 +554,7 @@ export default function TriffSkills() {
         // A reply for a plan the user has since navigated away from must not
         // land on top of the (possibly already-loaded) detail for the current
         // plan; the request that superseded it already cleared this map.
-        if (pending.planName !== selectedPlanName) return;
+        if (pending.planName !== selectedPlanNameRef.current) return;
         if (message.ok) {
           setDetails((current) => {
             const next = new Map(current);
