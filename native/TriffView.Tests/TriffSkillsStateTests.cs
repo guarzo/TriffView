@@ -101,4 +101,69 @@ public class TriffSkillsStateTests : IDisposable
         Assert.DoesNotContain("TriffHud", TriffSkillsPaths.Root, StringComparison.OrdinalIgnoreCase);
         TriffSkillsPaths.OverrideRoot(_dir);
     }
+
+    [Fact]
+    public void EmptyGroupSurvivesSaveAndReload()
+    {
+        var state = new TriffSkillsState();
+        state.Upsert(9001).CharacterName = "Pilot";
+        state.CharacterGroups.Add(new CharacterGroup { Name = "Haulers" });
+
+        Assert.True(state.TrySave(out var error), error);
+
+        var loaded = TriffSkillsState.Load();
+        var group = Assert.Single(loaded.State.CharacterGroups);
+        Assert.Equal("Haulers", group.Name);
+        Assert.Empty(group.CharacterIds);
+    }
+
+    [Fact]
+    public void NormalizeDropsPinsAndMembershipsForUnknownCharacters()
+    {
+        var state = new TriffSkillsState();
+        state.Upsert(9001).CharacterName = "Pilot";
+        state.PinnedCharacterIds.Add(9001);
+        state.PinnedCharacterIds.Add(9002);
+        state.CharacterGroups.Add(new CharacterGroup { Name = "Mains", CharacterIds = [9001, 9002] });
+
+        state.Normalize();
+
+        Assert.Equal([9001L], state.PinnedCharacterIds);
+        Assert.Equal([9001L], Assert.Single(state.CharacterGroups).CharacterIds);
+    }
+
+    [Fact]
+    public void NormalizeDeduplicatesGroupNamesCaseInsensitivelyKeepingTheFirst()
+    {
+        var state = new TriffSkillsState();
+        state.Upsert(9001).CharacterName = "Pilot";
+        state.CharacterGroups.Add(new CharacterGroup { Name = "Haulers", CharacterIds = [9001] });
+        state.CharacterGroups.Add(new CharacterGroup { Name = "HAULERS" });
+
+        state.Normalize();
+
+        var group = Assert.Single(state.CharacterGroups);
+        Assert.Equal("Haulers", group.Name);
+        Assert.Equal([9001L], group.CharacterIds);
+    }
+
+    [Fact]
+    public void SnapshotsAreIndependentOfLaterMutation()
+    {
+        var state = new TriffSkillsState();
+        state.Upsert(9001).CharacterName = "Pilot";
+        state.PinnedCharacterIds.Add(9001);
+        state.CharacterGroups.Add(new CharacterGroup { Name = "Mains", CharacterIds = [9001] });
+
+        var pins = state.SnapshotPins();
+        var groups = state.SnapshotGroups();
+
+        state.PinnedCharacterIds.Clear();
+        state.CharacterGroups[0].Name = "Renamed";
+        state.CharacterGroups[0].CharacterIds.Clear();
+
+        Assert.Equal([9001L], pins);
+        Assert.Equal("Mains", groups[0].Name);
+        Assert.Equal([9001L], groups[0].CharacterIds);
+    }
 }
