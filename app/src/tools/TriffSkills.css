@@ -258,8 +258,209 @@
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: minmax(0, 1fr) clamp(280px, 27vw, 340px);
+  grid-template-columns: minmax(0, 1fr) clamp(220px, 22vw, 280px);
   gap: 10px;
+}
+
+.triffskills .triffskills-roster-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.triffskills .triffskills-filters {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.triffskills .triffskills-filter {
+  flex: 1 1 160px;
+  min-width: 120px;
+  padding: 5px 8px;
+}
+
+.triffskills .triffskills-chip {
+  min-height: 24px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.triffskills .triffskills-chip.is-on {
+  border-color: var(--tv-accent);
+  background: var(--tv-accent-bg);
+  color: var(--tv-white);
+}
+
+.triffskills .triffskills-roster {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.triffskills .triffskills-roster-group {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.triffskills .triffskills-roster-group h4 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 4px 2px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.triffskills .triffskills-roster-group h4.is-pinned {
+  color: var(--tv-accent-text);
+}
+
+.triffskills .triffskills-roster-group h4 > span:last-child {
+  margin-left: auto;
+  color: var(--tv-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.triffskills .triffskills-roster-row {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--tv-border-faint);
+  padding: 6px 2px;
+}
+
+.triffskills .triffskills-pin-btn {
+  min-height: 22px;
+  min-width: 22px;
+  flex: 0 0 auto;
+  padding: 0;
+  color: var(--tv-muted);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.triffskills .triffskills-pin-btn.is-pinned {
+  border-color: var(--tv-accent);
+  color: var(--tv-accent-text);
+}
+
+.triffskills .triffskills-roster-name {
+  overflow: hidden;
+  flex: 1 1 auto;
+  color: var(--tv-text-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triffskills .triffskills-roster-tags {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.triffskills .triffskills-roster-tag {
+  border: 1px solid var(--tv-border-soft);
+  padding: 1px 6px;
+  color: var(--tv-muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.triffskills .triffskills-roster-badge {
+  flex: 0 0 auto;
+  border: 1px solid var(--tv-warning-text);
+  padding: 1px 6px;
+  color: var(--tv-warning-text);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.triffskills .triffskills-roster-status {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.triffskills .triffskills-plan-pane {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 6px;
+  border-left: 1px solid var(--tv-border-soft);
+  padding-left: 10px;
+}
+
+.triffskills .triffskills-plan-pane h3 {
+  margin: 0;
+  color: var(--tv-text-strong);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.triffskills .triffskills-plan-list {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.triffskills .triffskills-plan-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 26px;
+  padding: 5px 7px;
+  text-align: left;
+}
+
+.triffskills .triffskills-plan-row.is-selected {
+  border-color: var(--tv-accent);
+  background: var(--tv-accent-bg);
+  color: var(--tv-white);
+}
+
+.triffskills .triffskills-plan-name {
+  overflow: hidden;
+  flex: 1 1 auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triffskills .triffskills-plan-ratio {
+  flex: 0 0 auto;
+  color: var(--tv-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.triffskills .triffskills-plan-row.is-selected .triffskills-plan-ratio {
+  color: inherit;
 }
 
 .triffskills .triffskills-empty {
