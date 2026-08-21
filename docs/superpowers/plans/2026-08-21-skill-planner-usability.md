@@ -1009,15 +1009,30 @@ public class SkillsMutationTests : IDisposable
         var messages = new ConcurrentQueue<string>();
         using var controller = Controller(messages, saveState: () => "disk full");
 
-        controller.HandleWebMessage("triffskills:set-pinned", new JsonObject { ["characterId"] = 9001, ["pinned"] = true });
+        controller.HandleWebMessage("triffskills:set-pinned", JsonNode.Parse("""{"characterId":9001,"pinned":true}""")!.AsObject());
 
         Assert.True(
             SpinWait.SpinUntil(() => messages.Any(json => json.Contains("triffskills:error", StringComparison.Ordinal) && json.Contains("set-pinned", StringComparison.Ordinal)), SettleTimeout),
             string.Join(Environment.NewLine, messages));
 
-        // State is posted on the failure path too, and must show no pin.
-        var last = messages.Last(json => json.Contains("triffskills:state", StringComparison.Ordinal));
-        Assert.DoesNotContain("\"pinnedCharacterIds\": [\n      9001", last, StringComparison.Ordinal);
+        // State is posted on the failure path too, and must show no pin. SetPinned posts
+        // the error and then the state synchronously in the same call, so by the time the
+        // spin-wait above observes the error, both messages are already enqueued — but
+        // messages.Last(...) would still be wrong to use: at the instant the error first
+        // becomes visible, the last "state" message in the queue could still be the one
+        // PostState posted during controller construction (before this handler ever ran),
+        // which trivially has no pin and would make this assertion pass for the wrong
+        // reason. Take the snapshot after the wait, find the error's position in it, and
+        // require the specific state message that follows it.
+        var snapshot = messages.ToArray();
+        var errorIndex = Array.FindIndex(snapshot, json => json.Contains("triffskills:error", StringComparison.Ordinal) && json.Contains("set-pinned", StringComparison.Ordinal));
+        var stateAfterError = snapshot
+            .Skip(errorIndex + 1)
+            .Select(json => JsonNode.Parse(json))
+            .FirstOrDefault(node => (string?)node?["type"] == "triffskills:state");
+        Assert.NotNull(stateAfterError);
+        var pinnedIds = stateAfterError!["pinnedCharacterIds"]?.AsArray().Select(node => (long?)node).ToArray() ?? [];
+        Assert.DoesNotContain(9001L, pinnedIds);
     }
 
     [Fact]
