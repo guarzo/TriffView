@@ -14,14 +14,14 @@ export type RosterInput = {
 };
 
 export type RosterGroup = {
-  key: Readiness | "Pinned";
+  key: Readiness | "Pinned" | "Ungrouped";
   label: string;
   characterIds: number[];
 };
 
 const READINESS_ORDER: Readiness[] = ["Ready", "Training", "Locked", "Missing", "Unknown", "Unscored"];
 
-const LABELS: Record<Readiness | "Pinned", string> = {
+const LABELS: Record<Readiness | "Pinned" | "Ungrouped", string> = {
   Pinned: "Pinned",
   Ready: "Ready",
   Training: "Training",
@@ -29,6 +29,7 @@ const LABELS: Record<Readiness | "Pinned", string> = {
   Missing: "Missing",
   Unknown: "Unknown",
   Unscored: "Unscored",
+  Ungrouped: "Ungrouped",
 };
 
 /**
@@ -36,6 +37,11 @@ const LABELS: Record<Readiness | "Pinned", string> = {
  * by enumerating readiness values, so a character whose readiness is Unscored —
  * every newly added character, until its first refresh — still gets a row and
  * stays reachable for forget and re-authenticate.
+ *
+ * `readinessOf` comes from an unvalidated native message, so a readiness value
+ * outside READINESS_ORDER (one native adds later, before this list is updated
+ * to match) must still surface the character rather than silently drop its
+ * only row — that is what the trailing "Ungrouped" bucket below guarantees.
  */
 export function buildRoster(input: RosterInput): RosterGroup[] {
   const needle = input.filter.trim().toLowerCase();
@@ -60,11 +66,14 @@ export function buildRoster(input: RosterInput): RosterGroup[] {
     groups.push({ key: "Pinned", label: LABELS.Pinned, characterIds: pinnedMembers.map((c) => c.characterId) });
   }
 
+  const grouped = new Set<number>(pinnedMembers.map((c) => c.characterId));
+
   for (const readiness of READINESS_ORDER) {
     const members = visible.filter(
       (character) => !pinned.has(character.characterId) && input.readinessOf(character.characterId) === readiness,
     );
     if (!members.length) continue;
+    for (const member of members) grouped.add(member.characterId);
 
     // Closest-to-ready first, so the long Missing group leads with whoever is
     // nearly there. Distance is a count of unmet requirements, not training
@@ -78,6 +87,13 @@ export function buildRoster(input: RosterInput): RosterGroup[] {
         : [...members].sort(byName);
 
     groups.push({ key: readiness, label: LABELS[readiness], characterIds: ordered.map((c) => c.characterId) });
+  }
+
+  // A readiness value outside READINESS_ORDER must still produce a row, or the
+  // character loses its only surface for forget and re-authenticate.
+  const ungrouped = visible.filter((character) => !grouped.has(character.characterId)).sort(byName);
+  if (ungrouped.length) {
+    groups.push({ key: "Ungrouped", label: LABELS.Ungrouped, characterIds: ungrouped.map((c) => c.characterId) });
   }
 
   return groups;

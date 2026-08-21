@@ -316,7 +316,7 @@ export default function TriffSkills() {
   const previewRequestRef = useRef<{ requestId: string; revision: number } | null>(null);
   const commitRequestRef = useRef("");
   const previewRef = useRef<Preview | null>(null);
-  const pendingDetailRequestsRef = useRef<Map<string, number>>(new Map());
+  const pendingDetailRequestsRef = useRef<Map<string, { characterId: number; planName: string }>>(new Map());
   const expandedIdsRef = useRef<Set<number>>(new Set());
 
   const cells = useMemo(() => {
@@ -444,7 +444,7 @@ export default function TriffSkills() {
 
   function requestCellDetail(characterId: number, planNameForRequest: string) {
     const id = requestId();
-    pendingDetailRequestsRef.current.set(id, characterId);
+    pendingDetailRequestsRef.current.set(id, { characterId, planName: planNameForRequest });
     send("triffskills:get-cell-detail", { requestId: id, characterId, planName: planNameForRequest });
   }
 
@@ -464,13 +464,13 @@ export default function TriffSkills() {
     }
   }
 
-  function copyMissingSkills(characterId: number) {
+  async function copyMissingSkills(characterId: number) {
     const detail = details.get(characterId);
     if (!detail) return;
     const outstanding = detail.requirements.filter((requirement) => requirement.state !== "Active");
     if (!outstanding.length) return;
     const lines = outstanding.map((requirement) => `${requirement.skillName} ${LEVELS[requirement.requiredLevel] || requirement.requiredLevel}`);
-    copyText(lines.join("\n"));
+    if (!(await copyText(lines.join("\n")))) setError("The missing skills could not be copied to the clipboard.");
   }
 
   // Shared by both tabs so the Readiness roster and Train next list render
@@ -516,6 +516,10 @@ export default function TriffSkills() {
   // never the whole roster.
   useEffect(() => {
     setDetails(new Map());
+    // Replies still in flight for the previous plan must not land on top of the
+    // new ones; a stale reply arriving after this clear would otherwise overwrite
+    // a fresh detail with one keyed to a plan the row no longer shows.
+    pendingDetailRequestsRef.current.clear();
     for (const characterId of expandedIdsRef.current) requestCellDetail(characterId, selectedPlanName);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPlanName]);
@@ -535,13 +539,17 @@ export default function TriffSkills() {
         return;
       }
       if (message?.type === "triffskills:cell-detail") {
-        const characterId = pendingDetailRequestsRef.current.get(message.requestId);
-        if (characterId === undefined) return;
+        const pending = pendingDetailRequestsRef.current.get(message.requestId);
+        if (pending === undefined) return;
         pendingDetailRequestsRef.current.delete(message.requestId);
+        // A reply for a plan the user has since navigated away from must not
+        // land on top of the (possibly already-loaded) detail for the current
+        // plan; the request that superseded it already cleared this map.
+        if (pending.planName !== selectedPlanName) return;
         if (message.ok) {
           setDetails((current) => {
             const next = new Map(current);
-            next.set(characterId, message as CellDetail);
+            next.set(pending.characterId, message as CellDetail);
             return next;
           });
         } else {
@@ -851,11 +859,13 @@ export default function TriffSkills() {
                 ) : (
                   roster.map((group) => (
                     <section key={group.key} className="triffskills-roster-group">
-                      <h4 className={group.key === "Pinned" ? "is-pinned" : statusClass(group.key as Readiness)}>
-                        {group.key !== "Pinned" ? (
-                          <ProgressMark readiness={group.key as Readiness} fill={STATUS[group.key as Readiness].sampleFill} />
-                        ) : (
+                      <h4 className={group.key === "Pinned" ? "is-pinned" : group.key === "Ungrouped" ? "is-unknown" : statusClass(group.key as Readiness)}>
+                        {group.key === "Pinned" ? (
                           <span aria-hidden="true">★</span>
+                        ) : group.key === "Ungrouped" ? (
+                          <span aria-hidden="true">?</span>
+                        ) : (
+                          <ProgressMark readiness={group.key as Readiness} fill={STATUS[group.key as Readiness].sampleFill} />
                         )}
                         {group.label}
                         <span>{group.characterIds.length}</span>
