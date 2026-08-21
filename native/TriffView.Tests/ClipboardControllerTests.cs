@@ -84,8 +84,14 @@ public class ClipboardControllerTests : IDisposable
         // in the clipboard must actually resolve here (unlike the always-503
         // StubHandler used elsewhere in this class) because assertion 3 below
         // needs the preview to genuinely succeed and be stored as pending.
+        //
+        // The clipboard is a mutable local rather than a fixed string so the
+        // cycles below can feed a real copy-plan export back into the next
+        // import-clipboard read, the same way a human round-tripping through
+        // the OS clipboard would.
         var messages = new ConcurrentQueue<string>();
-        using var controller = Controller(() => "# CON\r\nCPU Management IV\r\n", _ => { }, messages, new SkillResolvingHandler());
+        var clipboard = "# CON\r\nCPU Management IV\r\n";
+        using var controller = Controller(() => clipboard, text => clipboard = text, messages, new SkillResolvingHandler());
 
         controller.HandleWebMessage("triffskills:import-clipboard", new JsonObject { ["requestId"] = "req_0002", ["revision"] = 1 });
 
@@ -123,6 +129,55 @@ public class ClipboardControllerTests : IDisposable
         Assert.True(
             SpinWait.SpinUntil(() => File.Exists(path), SettleTimeout),
             string.Join(Environment.NewLine, messages));
+
+        // 4. The saved plan file must never carry the "# name" title line back out of
+        // import — that line exists only in the clipboard's copy-plan format, never in a
+        // committed plan on disk.
+        AssertNoTitleLine(path);
+
+        // 5. Repeat export (copy-plan) -> import (import-clipboard) -> commit (replace)
+        // three times on the same plan. This is the accumulation regression the spec
+        // warns about: every export prepends a fresh "# name" title, so if import ever
+        // stopped stripping it, each cycle would leave one more stale title line sitting
+        // in the saved file.
+        for (var cycle = 1; cycle <= 3; cycle++)
+        {
+            messages.Clear();
+            var requestId = $"req_cycle_{cycle}";
+
+            controller.HandleWebMessage("triffskills:copy-plan", new JsonObject { ["planName"] = "Imported CON Plan" });
+            Assert.StartsWith("# Imported CON Plan", clipboard, StringComparison.Ordinal);
+
+            controller.HandleWebMessage("triffskills:import-clipboard", new JsonObject { ["requestId"] = requestId, ["revision"] = 1 });
+            Assert.True(
+                SpinWait.SpinUntil(() => messages.Any(json => json.Contains("clipboard-preview", StringComparison.Ordinal) && json.Contains(requestId, StringComparison.Ordinal)), SettleTimeout),
+                string.Join(Environment.NewLine, messages));
+
+            controller.HandleWebMessage("triffskills:commit-plan", new JsonObject
+            {
+                ["requestId"] = requestId,
+                ["revision"] = 1,
+                ["replace"] = true,
+                ["name"] = "Imported CON Plan",
+            });
+            Assert.True(
+                SpinWait.SpinUntil(() => messages.Any(json =>
+                {
+                    var node = JsonNode.Parse(json);
+                    return (string?)node?["type"] == "triffskills:plan-commit" && (string?)node?["requestId"] == requestId && (bool?)node?["ok"] == true;
+                }), SettleTimeout),
+                string.Join(Environment.NewLine, messages));
+
+            AssertNoTitleLine(path);
+        }
+    }
+
+    // Parses the file line-by-line rather than substring-matching the whole contents, so
+    // this can't be satisfied by coincidence (e.g. a skill name that happens to contain "#").
+    private static void AssertNoTitleLine(string path)
+    {
+        var lines = File.ReadAllLines(path);
+        Assert.DoesNotContain(lines, line => line.TrimStart().StartsWith('#'));
     }
 
     [Fact]
