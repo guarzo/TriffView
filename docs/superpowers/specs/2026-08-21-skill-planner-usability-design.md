@@ -232,16 +232,34 @@ worth its weight.
 
 ### Native and web contract
 
-Clipboard import is handled entirely on the native side. The broken
+Clipboard access is handled entirely on the native side. The broken
 `readClipboard()` path is not used, and is left as-is rather than repaired,
 since nothing calls it.
+
+**Clipboard is an injected dependency, in both directions.** The controller is
+constructed with only `PostAppEvent`
+(`native/MainWindow.xaml.cs:684`), `CopyText` is private to `MainWindow`
+(`native/MainWindow.xaml.cs:900-910`), and a handled `triffskills:` message
+returns before the global `switch` that owns `copy-text`
+(`native/MainWindow.xaml.cs:680-703`) — so the controller can reach neither the
+clipboard nor the existing copy handler. `TriffSkillsController` therefore takes
+a read delegate and a write delegate alongside `_post`, supplied by `MainWindow`,
+which owns the WPF `Clipboard`. This is also what makes both directions testable
+against a fake rather than the real system clipboard; an import-only seam would
+leave export untested.
+
+Clipboard failures surface as `triffskills:error` with the action name. The
+global `clipboard-error` event the existing `CopyText` posts is not usable here:
+the Skill Planner's listener only handles `triffskills:*` messages
+(`app/src/tools/TriffSkills.tsx:540-599`), so a global event would be silently
+dropped.
 
 New messages, web to native:
 
 | Message | Payload | Effect |
 |---|---|---|
-| `triffskills:import-clipboard` | `{requestId}` | Native reads `Clipboard.GetText()`, derives a candidate name from a leading `#` comment line, and runs the existing `PlanImportWorkflow.PreviewAsync` |
-| `triffskills:copy-plan` | `{planName}` | Native reads the plan file, prepends a `# <name>` title line, and calls the existing `CopyText` |
+| `triffskills:import-clipboard` | `{requestId, revision}` | Native reads the clipboard through the injected read delegate, takes a candidate name from a leading `#` comment line, strips that line, and previews the remainder under a placeholder name |
+| `triffskills:copy-plan` | `{planName}` | Native reads the plan file, prepends a `# <name>` title line, and writes it through the injected write delegate |
 | `triffskills:set-pinned` | `{characterId, pinned}` | Toggles a pin, saves state |
 | `triffskills:save-group` | `{name, characterIds, originalName?}` | Creates or renames a group |
 | `triffskills:delete-group` | `{name}` | Removes a group |
@@ -251,7 +269,7 @@ New message, native to web:
 
 | Message | Payload |
 |---|---|
-| `triffskills:clipboard-preview` | `{requestId, ok, name, requirementCount, diagnostics}` |
+| `triffskills:clipboard-preview` | `{requestId, revision, ok, name, requirementCount, diagnostics}` |
 
 `commit-plan` gains an optional `name`, validated through `PlanNameValidator`,
 so the name edited in the confirm dialog applies without a second preview round
@@ -272,9 +290,26 @@ dropped.
 **Mutations snapshot, apply, save, and re-post state.** Each of `set-pinned`,
 `save-group`, `delete-group`, and `select-plan` follows the shape the reorder
 handler already established (`native/TriffSkills/TriffSkillsController.cs:229-242`):
-capture the field it is about to change, apply the change, call `_saveState()`,
-and **restore the captured value if the save fails**, then `PostError` with the
-action name and `PostState(force: true)` either way.
+snapshot what it is about to change, apply the change, call `_saveState()`, and
+**restore the snapshot if the save fails**, then `PostError` with the action name
+and `PostState(force: true)` either way.
+
+**The snapshot must be an independent copy, not a captured reference.** This is
+the specific way the pattern fails here. Reorder can capture a bare reference
+because `TryReorderCharacters` assigns a brand-new list
+(`native/TriffSkills/TriffSkillsState.cs:162-168`), leaving the old one intact
+for the handler to restore. Pins and groups are not like that: `PinnedCharacterIds.Add(id)`
+mutates in place, so a captured reference and the live list are the same object
+and restoring it restores nothing. Groups are worse — renaming mutates a group
+object, so even a shallow copy of the list still shares the object being renamed.
+
+Pins snapshot as a new list (`[.. PinnedCharacterIds]`); groups snapshot deeply,
+each group copied into a new object with its own copied id list. `Normalize()`
+also reassigns these collections while it filters, which a reference capture
+would not survive either. The existing forget-character path already models the
+right depth — it clones the character rather than aliasing it
+(`native/TriffSkills/TriffSkillsAuthentication.cs:87`) — and the pins-and-groups
+snapshot added to that same rollback must be equally deep.
 
 Restoring is not optional here. `TrySave` runs `Normalize()` against live state
 before writing and returns `false` without undoing anything
@@ -282,6 +317,10 @@ before writing and returns `false` without undoing anything
 after a failed save survives in memory, is served to the web on the next state
 request, and can be written by any later save that happens to succeed — the exact
 opposite of the "last good state" the failure path is supposed to preserve.
+
+State is posted on the failure path too, not withheld. That is what re-syncs the
+web's optimistic update back to the restored truth; suppressing it would leave the
+UI showing a pin that no longer exists.
 
 State is posted on the failure path too, not withheld. That is what re-syncs the
 web's optimistic update back to the restored truth; suppressing it would leave the
@@ -333,26 +372,42 @@ Requiring the comment marker keeps every malformed requirement reportable.
 
 ### Import flow
 
-1. `Import from clipboard` posts `triffskills:import-clipboard`.
+1. `Import from clipboard` posts `triffskills:import-clipboard` with a
+   `requestId` and a `revision`.
 2. Native reads the clipboard, takes the candidate name from a leading `#` line
    if one is present, and strips that line from the contents it will preview and
    ultimately save.
-3. Native previews through the existing workflow. **The preview always runs under
-   a valid name**, because `PlanImportWorkflow.PreviewAsync` validates the name
-   before it parses anything (`native/TriffSkills/PlanImportWorkflow.cs:53-58`) —
-   an empty candidate would fail with a name error and never reach the parser, so
-   the requirement count and diagnostics the dialog needs would never be produced.
-   When no candidate name is present, the preview uses the placeholder
-   `Imported plan`, and the reply's `name` is empty so the dialog knows the user
-   must supply one.
-4. The dialog shows a name field pre-filled with the candidate, and a verdict
+3. **Native always previews under a fixed internal placeholder name**
+   (`Imported plan`), never under the candidate. The candidate is display data
+   for the dialog and nothing else.
+
+   This is not belt-and-braces, it closes a real hole. `PreviewAsync` validates
+   the name before it parses anything
+   (`native/TriffSkills/PlanImportWorkflow.cs:53-58`), so any candidate that
+   fails `PlanNameValidator` — `# CON` is a reserved Windows device name
+   (`native/TriffSkills/PlanNameValidator.cs:62-64`), and length, character, and
+   path rules apply likewise — would be rejected before a pending preview was
+   ever stored. The dialog would show a name error, the user would correct it,
+   and the commit would then fail with "preview expired" because `Commit` has no
+   pending entry to find (`native/TriffSkills/PlanImportWorkflow.cs:79-84`).
+   Previewing under a name guaranteed valid removes that path entirely: the
+   parse result and pending preview always exist, whatever the clipboard said.
+4. The reply carries `requestId`, the same `revision`, `ok`, the candidate `name`
+   (empty when the clipboard had no `#` title or the candidate failed
+   validation), `requirementCount`, and `diagnostics`.
+5. The dialog shows a name field pre-filled with the candidate, and a verdict
    line: either the requirement count, or the diagnostics. `Import` is disabled
-   while the name is empty or invalid.
-5. `Import` posts the existing `commit-plan` with the confirmed name. Because
-   `CommitValidated` compares requirements and not names
-   (`native/TriffSkills/PlanStore.cs:201`), committing under a name different
-   from the placeholder is safe. Collision handling, atomic write, and reload
-   verification are unchanged.
+   while the name is empty or invalid. A candidate rejected by the validator
+   arrives as an empty name with the reason among the diagnostics, so the user
+   is told why rather than silently handed a blank field.
+6. `Import` posts the existing `commit-plan` with the `requestId`, the same
+   `revision`, and the confirmed name. The revision is not optional: `Commit`
+   rejects a mismatch (`native/TriffSkills/TriffSkillsController.cs:526-531`,
+   `native/TriffSkills/PlanImportWorkflow.cs:79-84`), so the clipboard preview
+   must carry it exactly as the textarea path does. Because `CommitValidated`
+   compares requirements and not names (`native/TriffSkills/PlanStore.cs:201`),
+   committing under a name different from the placeholder is safe. Collision
+   handling, atomic write, and reload verification are unchanged.
 
 An empty clipboard, non-text clipboard content, or unparseable text surfaces as
 diagnostics in the dialog rather than as a silent no-op.
@@ -409,19 +464,29 @@ In `native/TriffView.Tests`:
 - The forget-character rollback restoring pins and group memberships alongside the
   character when the save fails — the partial-loss hole this design would
   otherwise open.
-- Each new mutation handler restoring its captured value when `_saveState()` fails,
+- Each new mutation handler restoring its snapshot when `_saveState()` fails,
   and posting state on the failure path as well as the success path.
+- **That the snapshot is independent**: a failed `set-pinned` restores the prior
+  pins, and a failed group rename restores the prior name. Both fail against a
+  reference capture and pass only against a real copy, which is exactly the
+  distinction worth pinning in a test.
 - Candidate-name derivation: a leading `#` line becomes the name and is stripped
   from the saved contents; a leading valid requirement does not become a name; a
   leading malformed requirement still produces a parse diagnostic rather than
   being swallowed as a name; a non-leading `#` comment is preserved.
+- **An invalid candidate name still yields a committable preview** — `# CON` and
+  an over-long title both return a requirement count with an empty `name`, and a
+  subsequent `commit-plan` under a corrected name succeeds. This is the `# CON`
+  path that the placeholder-preview rule exists to close.
 - The clipboard round trip: a plan exported with its `# name` header re-imports
   under the same name and the same requirements, and **the saved file gains no
   title line however many times the cycle repeats**.
 - `commit-plan` with a name override, including a name that fails
-  `PlanNameValidator`.
-- `triffskills:import-clipboard` against an injected clipboard seam. Per CLAUDE.md,
-  tests must not touch a real system resource where a seam is available.
+  `PlanNameValidator`, and a revision mismatch being rejected.
+- Both clipboard directions against injected fake read and write delegates —
+  including a read that throws and a write that fails, each surfacing as
+  `triffskills:error`. Per CLAUDE.md, tests must not touch a real system resource
+  where a seam is available.
 - The state projection carrying `pinnedCharacterIds`, `characterGroups`, and
   `selectedPlanName`, and mutation failures posting `triffskills:error`.
 
@@ -515,8 +580,10 @@ native avoids a 512 KiB round trip.
 
 ## Assumptions that may change
 
-- That `Clipboard.GetText()` behaves on the WPF STA thread here as it does for
-  the existing `CopyText`. If not, the import message needs an STA dispatch.
+- That `Clipboard.GetText()` behaves on the WPF STA thread here as `Clipboard.SetText`
+  already does for `CopyText` (`native/MainWindow.xaml.cs:900-910`). If not, the
+  read delegate needs an STA dispatch — which is a reason to keep both clipboard
+  directions behind delegates `MainWindow` supplies, rather than in the controller.
 - That plans stay few enough for a rail list. Beyond roughly 25 the rail needs
   its own filter; nothing in the design prevents adding one later.
 - That the group chips and the filter box together are enough at 40 characters.
